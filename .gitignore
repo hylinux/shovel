@@ -1,6 +1,6 @@
 # Python-generated files
 __pycache__/
-*.py[oc]
+*.py[cod]
 build/
 dist/
 wheels/
@@ -18,3 +18,25 @@ wheels/
 .mypy_cache/
 
 .DS_Store
+
+
+
+htmlcov/
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+
+Thumbs.db
+
+# Frontend
+frontend/node_modules/
+frontend/dist/
+
+# Local Config
+data/
+logs/
+runtime/
+models/

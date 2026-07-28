@@ -1,4 +1,4 @@
-# `Hello, Shove!`
+# `Hello, Shovel!`
 
 `Shovel` is a personal AI Agent platform that helps users build, run, and manage local or cloud-based AI Agents through a unified Web experience.
 

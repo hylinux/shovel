@@ -1,0 +1,112 @@
+[project]
+name = "shovel"
+version = "0.1.0"
+description = "Shovel is a AI Agent tool. it help your build your Personal AI Agent."
+readme = "README.md"
+requires-python = ">=3.14"
+license = { text = "MIT" }
+authors = [ { name = "HongWei Guo" } ]
+
+
+dependencies = [
+    "py-generic-host",
+    "rich>=15.0.0",
+    "typer>=0.27.0",
+]
+
+
+[project.optional-dependencies]
+dev = [
+    "httpx>=0.28.1",
+    "mypy>=2.1.0",
+    "pytest>=9.1.1",
+    "pytest-asyncio>=1.4.0",
+    "pytest-cov>=7.1.0",
+    "pytest-mock>=3.15.1",
+    "ruff>=0.15.20",
+    "types-pyyaml>=6.0.12.20260518",
+]
+
+
+[tool.uv.sources]
+py-generic-host = { path = "../py-generic-host", editable = true }
+
+
+[project.scripts]
+shovel = "shovel.cli:app"
+
+[build-system]
+requires = ["uv_build>=0.11.26,<0.12"]
+build-backend = "uv_build"
+
+
+[tool.uv.build-backend]
+module-root = "backend/src"
+
+source-exclude = [
+    "frontend/**",
+    "backend/tests/**",
+]
+
+# ---------- Ruff ----------
+[tool.ruff]
+line-length = 110
+target-version = "py314"
+src = ["backend/src", "backend/tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP", "ASYNC", "S", "SIM", "RUF"]
+ignore = ["S101"] # allow assert in tests
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+line-ending = "lf"
+
+
+[tool.ruff.lint.per-file-ignores]
+"backend/tests/**" = ["S","B", "ASYNC"]
+
+# ---------- Mypy ----------
+[tool.mypy]
+python_version = "3.14"
+strict = true
+plugins = ["pydantic.mypy"]
+ignore_missing_imports = true
+mypy_path = "backend/src"
+namespace_packages = true
+explicit_package_bases = true
+warn_unused_ignores = true
+warn_return_any = true
+
+[[tool.mypy.overrides]]
+module = "shovel.app.container"
+disallow_subclassing_any = false
+
+[[tool.mypy.overrides]]
+module = "shovel.app.api.*"
+disallow_untyped_decorators = false
+
+# ---------- Pytest ----------
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+
+addopts = """
+-ra
+-q
+--strict-markers
+--cov=shovel
+--cov-report=term-missing
+"""
+testpaths = ["backend/tests"]
+pythonpath = [
+    "backend/src",
+    "."
+]
+
+[tool.coverage.run]
+source = ["shovel"]
+
+[tool.coverage.report]
+show_missing = true
+skip_covered = false

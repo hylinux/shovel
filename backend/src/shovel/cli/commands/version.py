@@ -2,18 +2,14 @@ from __future__ import annotations
 
 import json
 import platform
-import sys
 from dataclasses import asdict, dataclass
-from pathlib import Path
 from typing import Annotated
 
 import typer
-from rich.panel import Panel
 
+from shovel.cli.context import cli_context
 from shovel.cli.metadata import (
     PRODUCT,
-    get_generic_host_version,
-    get_shovel_version,
 )
 from shovel.cli.ui.console import console
 from shovel.cli.ui.logo import get_logo, get_tagline
@@ -87,24 +83,23 @@ def version(
 
 
 def collect_version_info() -> VersionInfo:
-    workspace = get_default_workspace()
 
-    config_file = workspace / "config" / "settings.yaml"
-    database_file = workspace / "data" / "shovel.db"
+    config_file = cli_context.get_default_config_file()
+    database_file = cli_context.get_default_database()
 
     return VersionInfo(
-        shovel_version=get_shovel_version(),
+        shovel_version=cli_context.get_shovel_version(),
         python_version=platform.python_version(),
-        os_name=get_os_name(),
-        workspace=str(workspace),
+        os_name= cli_context.get_os_name(),
+        workspace= str(cli_context.get_default_workspace()),
         config_file=str(config_file),
         database_file=str(database_file),
         configuration_loaded=config_file.exists(),
         database_ready=database_file.exists(),
         model_provider="OpenAI",
-        generic_host_version=get_generic_host_version(),
+        generic_host_version=cli_context.get_generic_host_version(),
         frontend_version="0.1.0",
-        backend_version=get_shovel_version(),
+        backend_version=cli_context.get_shovel_version(),
     )
 
 
@@ -116,15 +111,11 @@ def print_basic_version(info: VersionInfo) -> None:
 
     console.print()
 
-    console.print(
-        Panel.fit(
-            PRODUCT.description,
-            title="[bold green]About[/]",
-            border_style="green",
-            padding=(1, 2),
-            width=80,
-        )
+
+    console.about_panel(
+        message=PRODUCT.description
     )
+
 
     console.print()
 
@@ -134,15 +125,7 @@ def print_basic_version(info: VersionInfo) -> None:
         author=PRODUCT.author,
     )
 
-    console.print(
-        Panel.fit(
-            table,
-            border_style="bright_blue",
-            padding=(1, 2),
-        )
-    )
-
-
+    console.print_panel(table)
     console.print()
 
 
@@ -154,15 +137,8 @@ def print_verbose_version(info: VersionInfo) -> None:
 
     console.print()
 
-    console.print(
-        Panel.fit(
-            PRODUCT.description,
-            title="[bold green]About[/]",
-            border_style="green",
-            padding=(1, 2),
-            width=80,
-        )
-    )
+    console.about_panel(PRODUCT.description)
+
 
     console.print()
 
@@ -213,30 +189,6 @@ def print_json(info: VersionInfo) -> None:
         )
     )
 
-
-def get_os_name() -> str:
-    system = platform.system()
-    release = platform.release()
-
-    if system == "Windows":
-        return f"Windows {release}"
-
-    if system == "Darwin":
-        return f"macOS {release}"
-
-    if system == "Linux":
-        return f"Linux {release}"
-
-    return platform.platform()
-
-
-def get_default_workspace() -> Path:
-    home = Path.home()
-
-    if sys.platform == "win32":
-        return home / ".shovel"
-
-    return home / ".shovel"
 
 
 def format_configuration_status(loaded: bool) -> str:

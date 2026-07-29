@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import os
+
 import typer
 
 from shovel.cli.commands.version import app as version_app
@@ -11,6 +13,19 @@ app = typer.Typer(
     add_completion=False,
     rich_markup_mode="rich",
 )
+
+
+@app.callback()
+def callback(
+    debug: bool = typer.Option(
+        False,
+        "--debug",
+        help="Enable debug output",
+    ),
+) -> None:
+
+    if debug:
+        os.environ["SHOVEL_DEBUG"] = "1"
 
 
 # Version 子命令

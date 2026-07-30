@@ -199,8 +199,13 @@ class ConsoleService:
     def status(
         self,
         message: str,
+        *,
+        spinner: str = "dots",
     ) -> Generator[None]:
-        with self._console.status(message):
+        with self._console.status(
+            message,
+            spinner=spinner,
+        ):
             yield
 
 

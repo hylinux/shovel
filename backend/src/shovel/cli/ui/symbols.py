@@ -8,5 +8,5 @@ class Symbols:
     SUCCESS = "✓"
     ERROR = "✗"
     WARNING = "⚠"
-    INFO = "ℹ"  # noqa: RUF001
+    INFO = "i"
     DEBUG = "•"

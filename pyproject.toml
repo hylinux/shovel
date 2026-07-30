@@ -9,8 +9,10 @@ authors = [ { name = "HongWei Guo" } ]
 
 
 dependencies = [
+    "alembic>=1.18.5",
     "py-generic-host",
     "rich>=15.0.0",
+    "sqlalchemy>=2.0.51",
     "typer>=0.27.0",
 ]
 

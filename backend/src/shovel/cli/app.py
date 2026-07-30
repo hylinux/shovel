@@ -4,6 +4,7 @@ import os
 
 import typer
 
+from shovel.cli.commands.init import app as init_app
 from shovel.cli.commands.version import app as version_app
 
 app = typer.Typer(
@@ -34,3 +35,12 @@ app.add_typer(
     name="version",
     help="Show Shovel version and runtime information.",
 )
+
+
+# init 初始化命令
+app.add_typer(
+    init_app,
+    name="init",
+    help="Shovel will initial all setup.",
+)
+

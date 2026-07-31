@@ -99,7 +99,7 @@ class ConsoleService:
     ) -> None:
         self._console.print(
             Panel(
-                Text(message),
+                Text(message, overflow="fold", no_wrap=False),
                 title=title,
                 border_style="error",
                 width=80,
@@ -116,7 +116,7 @@ class ConsoleService:
     ) -> None:
         self._console.print(
             Panel(
-                Text(message),
+                Text(message, overflow="fold", no_wrap=False),
                 title=title,
                 border_style="warning",
                 width=80,
@@ -134,7 +134,7 @@ class ConsoleService:
 
         self._console.print(
             Panel(
-                Text(message),
+                Text(message, overflow="fold", no_wrap=False),
                 title=title,
                 border_style="info",
                 padding=(1, 2),
@@ -150,7 +150,7 @@ class ConsoleService:
     ) -> None:
         self._console.print(
             Panel(
-                Text(message),
+                Text(message, overflow="fold", no_wrap=False),
                 title=title,
                 border_style="info",
                 padding=(1, 2),
@@ -165,8 +165,8 @@ class ConsoleService:
     ) -> None:
 
         self._console.print(
-            Panel.fit(
-                message,
+            Panel(
+                Text(message, overflow="fold", no_wrap=False),
                 title="[bold green]About[/]",
                 width=width,
                 padding=(1, 2),

@@ -10,6 +10,7 @@
 | 作者 | HongWei Guo |
 | 版本 | Draft v1.0 |
 | 目标读者 | 项目开发者、架构设计者、后续维护者 |
+| 更新时间 | 2026/7/31 |
 | 路径 | `docs/shovel-architecture-design.md` |
 
 ---

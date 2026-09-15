@@ -9,6 +9,7 @@ authors = [ { name = "HongWei Guo" } ]
 
 
 dependencies = [
+    "aiosqlite>=0.22.1",
     "alembic>=1.18.5",
     "py-generic-host",
     "rich>=15.0.0",
@@ -32,6 +33,10 @@ dev = [
 
 [tool.uv.sources]
 py-generic-host = { path = "../py-generic-host", editable = true }
+
+[[tool.uv.index]]
+url = "https://packagefeedproxy.microsoft.io/pypi/simple/"
+default = true
 
 
 [project.scripts]

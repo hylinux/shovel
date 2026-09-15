@@ -1,14 +1,45 @@
 from __future__ import annotations
 
-import json
 from pathlib import Path
 
-from pydantic_settings import BaseSettings
+from pydantic_settings import (
+    BaseSettings,
+    PydanticBaseSettingsSource,
+    YamlConfigSettingsSource,
+)
 
+from .database_config import DatabaseSettings
 from .document_settings import DocumentSettings
 from .model_settings import DefaultAgentModelSettings
 from .qdrant_config import QdrantSettings
 from .redis_config import RedisSettings
+
+
+def load_settings(config_path: Path | str) -> AppSettings:
+    """从指定 YAML 文件加载 Shovel 配置。"""
+
+    path = Path(config_path).expanduser().resolve()
+
+    class YamlSettings(AppSettings):
+
+        @classmethod
+        def settings_customise_sources(
+            cls,
+            settings_cls: type[BaseSettings],
+            init_settings: PydanticBaseSettingsSource,
+            env_settings: PydanticBaseSettingsSource,
+            dotenv_settings: PydanticBaseSettingsSource,
+            file_secret_settings: PydanticBaseSettingsSource,
+        ) -> tuple[PydanticBaseSettingsSource, ...]:
+            return (
+                YamlConfigSettingsSource(
+                    settings_cls,
+                    yaml_file=path,
+                ),
+            )
+
+    return YamlSettings()
+
 
 
 class AppSettings(BaseSettings):
@@ -23,6 +54,7 @@ class AppSettings(BaseSettings):
     qdrant: QdrantSettings = QdrantSettings()
     redis:  RedisSettings = RedisSettings()
     model:  DefaultAgentModelSettings = DefaultAgentModelSettings()
+    database: DatabaseSettings = DatabaseSettings()
 
 
     @classmethod

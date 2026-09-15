@@ -61,7 +61,11 @@ def run_prd():
 async def _run_dev_async() -> None:
     console.print("Running dev environment.")
 
+    console.print("Shovel trying to get the config file...")
+
     config_path = cli_context.get_default_config_file()
+
+    console.success(f"Shovel configuration file path {config_path}")
 
     if not cli_context.validate_config_exists():
         console.error(

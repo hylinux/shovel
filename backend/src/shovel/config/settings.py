@@ -4,8 +4,8 @@ from pathlib import Path
 
 from pydantic_settings import (
     BaseSettings,
+    JsonConfigSettingsSource,
     PydanticBaseSettingsSource,
-    YamlConfigSettingsSource,
 )
 
 from .database_config import DatabaseSettings
@@ -16,11 +16,11 @@ from .redis_config import RedisSettings
 
 
 def load_settings(config_path: Path | str) -> AppSettings:
-    """从指定 YAML 文件加载 Shovel 配置。"""
+    """从指定 JSON 文件加载 Shovel 配置。"""
 
     path = Path(config_path).expanduser().resolve()
 
-    class YamlSettings(AppSettings):
+    class JsonSettings(AppSettings):
 
         @classmethod
         def settings_customise_sources(
@@ -32,13 +32,16 @@ def load_settings(config_path: Path | str) -> AppSettings:
             file_secret_settings: PydanticBaseSettingsSource,
         ) -> tuple[PydanticBaseSettingsSource, ...]:
             return (
-                YamlConfigSettingsSource(
+                init_settings,
+                env_settings,
+                JsonConfigSettingsSource(
                     settings_cls,
-                    yaml_file=path,
+                    json_file=path,
                 ),
+                file_secret_settings,
             )
 
-    return YamlSettings()
+    return JsonSettings()
 
 
 

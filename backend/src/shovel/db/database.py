@@ -29,7 +29,7 @@ async def create_database_engine(
     # 两道防线互补, 且把排查方向写进报错信息
     if not url:
         raise ValueError(
-            "database url 为空。请检查 settings.json 中 database.url 是否配置, "
+            "database url 为空。请检查 settings.toml 中 database.url 是否配置, "
             "以及 AppContainer.config 是否已 from_dict(settings.model_dump(mode='json'))。"
         )
 

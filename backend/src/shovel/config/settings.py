@@ -88,6 +88,8 @@ class AppSettings(BaseSettings):
     agent_host: str = "127.0.0.1"
     agent_port: int = 19566
     http_host: str = "127.0.0.1"
+    dev_http_host: str = "127.0.0.1"
+    dev_http_port: int = 9999
     http_port: int = 8080
     log_level: str = "INFO"
 

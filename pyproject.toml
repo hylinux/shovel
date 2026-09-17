@@ -119,3 +119,8 @@ source = ["shovel"]
 [tool.coverage.report]
 show_missing = true
 skip_covered = false
+
+[tool.pyright]
+pythonVersion = "3.14"
+pythonPlatform = "All"
+typeCheckingMode = "standard"

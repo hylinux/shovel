@@ -5,7 +5,6 @@ import platform
 from dataclasses import asdict, dataclass
 from typing import Annotated
 
-from rich.panel import Panel
 import typer
 
 from shovel.cli.context import cli_context

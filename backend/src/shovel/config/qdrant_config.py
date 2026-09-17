@@ -1,8 +1,8 @@
 from __future__ import annotations
 
-from pydantic_settings import BaseSettings
+from pydantic import BaseModel
 
 
-class QdrantSettings(BaseSettings):
+class QdrantSettings(BaseModel):
     host: str | None = None
     port: int | None = None

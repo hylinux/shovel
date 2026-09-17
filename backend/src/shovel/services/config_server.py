@@ -18,16 +18,11 @@ class ShovelContext:
         self.debug = os.environ.get("SHOVEL_DEBUG") == "1"
 
     # 创建默认的配置文件
-    def create_default_config_file(self) -> None:
+    def create_default_config_file(self, *, force: bool = False,) -> Path | None:
         config_file = self.get_default_config_file()
 
-        # 已经存在了,则直接返回
-        if config_file.exists():
-            return 
+        return AppSettings().save(config_file, overwrite=force)
 
-        app_setttings = AppSettings()
-
-        app_setttings.save(config_file)
 
 
 
@@ -109,7 +104,7 @@ class ShovelContext:
     def get_default_config_file(self) -> Path:
         config_dir = self.get_default_config_dir()
 
-        return config_dir / "settings.json"
+        return config_dir / "settings.toml"
 
 
     def get_default_config_dir(self) -> Path:

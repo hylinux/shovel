@@ -17,7 +17,7 @@ from shovel.db.database import (
 class AppContainer(containers.DeclarativeContainer):
 
     # Settings
-    config = providers.Configuration()
+    config = providers.Configuration(strict=True)
 
     # Resource
     # 需要SQLite的DB
@@ -28,7 +28,7 @@ class AppContainer(containers.DeclarativeContainer):
     )
 
     # 数据库的session
-    session_factory = providers.Singleton(
+    session_factory = providers.Resource(
         create_session_factory,
         engine = db_engine,
     )

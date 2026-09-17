@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from enum import Enum
 
-from pydantic_settings import BaseSettings
+from pydantic import BaseModel
 
 
 class ModelProviderType(Enum):
@@ -17,7 +17,7 @@ class ModelProviderType(Enum):
 
 
 
-class DefaultAgentModelSettings(BaseSettings):
+class DefaultAgentModelSettings(BaseModel):
     model_provider_type: ModelProviderType | None = None
     base_endpoint: str | None = None
     model_name: str | None = None

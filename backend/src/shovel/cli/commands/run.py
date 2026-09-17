@@ -6,7 +6,7 @@
 # 运行开发环境
 #  1. 在项目的前端目录里: frontend 里运行npm run dev, 显示前端
 #  2. 在项目的后端目录里: backend 里运行基于py_generic_host的后端应用
-# 前端应用和后端应用可以一起运行，方便调试测试和开发
+# 前端应用和后端应用可以一起运行 方便调试测试和开发
 #
 # run prd:
 # 将前端项目编译后部署到backend项目可以mount的目录里,使用单一的uvicorn 单一运行服务。
@@ -17,11 +17,12 @@
 from __future__ import annotations
 
 import asyncio
+from typing import cast
 
 import structlog
 import typer
-from fastapi import FastAPI
-from py_generic_host.hosting.builder import HostContext, WebHostBuilder
+from py_generic_host.di.protocols import AppContainerProtocol
+from py_generic_host.hosting.builder import WebHostBuilder
 
 from shovel.cli.context import cli_context
 from shovel.cli.decorators import command_handler
@@ -76,8 +77,9 @@ async def _run_dev_async() -> None:
 
     settings: AppSettings = load_settings(config_path)
 
+
     container = AppContainer()
-    container.config.from_dict(settings.model_dump())
+    container.config.from_dict(settings.model_dump(mode="json"))
 
     logger = structlog.get_logger(settings.service_name)
 
@@ -89,12 +91,12 @@ async def _run_dev_async() -> None:
     host = (
         WebHostBuilder()
         .use_settings(container.config)
-        .use_container(container)
+        .use_container(cast(AppContainerProtocol, container))
+        .enable_health_checks(False)
         .use_urls(
             settings.http_host,
             settings.http_port,
         )
-        .configure_web_app(_configure_app)
         .build()
     )
 
@@ -102,6 +104,3 @@ async def _run_dev_async() -> None:
     await host.run_async()
 
 
-
-def _configure_app(ctx: HostContext, app: FastAPI) -> None:
-    pass

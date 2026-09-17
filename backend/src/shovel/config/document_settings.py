@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from enum import Enum
 
-from pydantic_settings import BaseSettings
+from pydantic import BaseModel
 
 
 class DocumentType(Enum):
@@ -15,5 +15,5 @@ class DocumentType(Enum):
     XML = 7
 
 
-class DocumentSettings(BaseSettings):
+class DocumentSettings(BaseModel):
     root_dir: str | None = None

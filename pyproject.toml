@@ -1,6 +1,6 @@
 [project]
 name = "shovel"
-version = "0.1.0"
+version = "0.1.1"
 description = "Shovel is a AI Agent tool. it help your build your Personal AI Agent."
 readme = "README.md"
 requires-python = ">=3.14"
@@ -11,9 +11,11 @@ authors = [ { name = "HongWei Guo" } ]
 dependencies = [
     "aiosqlite>=0.22.1",
     "alembic>=1.18.5",
+    "greenlet>=3.5.5",
     "py-generic-host",
     "rich>=15.0.0",
     "sqlalchemy>=2.0.51",
+    "tomli-w>=1.2.0",
     "typer>=0.27.0",
 ]
 

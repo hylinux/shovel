@@ -38,7 +38,10 @@ class EmbeddingSettings(BaseModel):
     #: Azure 则填 resource endpoint。
     base_url: str = ""
 
-    api_key: SecretStr | None = None
+    #: 留空表示端点不需要鉴权(本地 ollama / vLLM 就是这种情况)。
+    #: 用空 SecretStr 而不是 None: None 无法写进 TOML, 这个键会在
+    #: 生成的配置文件里整个消失, 用户根本不知道该往哪儿填密钥。
+    api_key: SecretStr = SecretStr("")
 
     #: 仅 Azure 需要。
     api_version: str = ""

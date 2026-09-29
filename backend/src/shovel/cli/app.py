@@ -4,6 +4,7 @@ import os
 
 import typer
 
+from shovel.cli.commands.config import app as config_app
 from shovel.cli.commands.init import app as init_app
 from shovel.cli.commands.resource import app as resource_app
 from shovel.cli.commands.run import app as run_app
@@ -45,6 +46,14 @@ app.add_typer(
     init_app,
     name="init",
     help="Shovel will initial all setup.",
+)
+
+
+# config 配置文件管理命令
+app.add_typer(
+    config_app,
+    name="config",
+    help="Show, validate or regenerate the configuration file.",
 )
 
 

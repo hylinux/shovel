@@ -43,13 +43,14 @@ class QdrantSettings(BaseModel):
     #: 嵌入式模式的落盘目录; 留空时由 validator 回落到 ~/.shovel/memory/qdrant
     path: str = ""
 
-    #: server 模式
-    host: str | None = None
-    port: int | None = None
+    #: server 模式。留空串而不是 None —— TOML 没有 null, None 的键写不
+    #: 进配置文件, 用户会拿到一个缺了一半键的 [memory.qdrant] 表。
+    host: str = ""
+    port: int = Field(default=6333, ge=1, le=65535)
 
     #: cloud 模式
-    url: str | None = None
-    api_key: str | None = None
+    url: str = ""
+    api_key: str = ""
 
     #: True = 向量常驻磁盘(省内存), False = 载入内存(更快)。
     #: 记忆量小, 但它与知识库共用一台机器, 默认让内存留给知识库。
@@ -111,12 +112,16 @@ class MemoryLlmSettings(BaseModel):
 
     留空 provider 表示"跟随 [model] 里的默认大模型", 由
     :func:`shovel.memory.config.build_memory_config` 完成映射。
+
+    这里一律用空串而不是 ``None``: ``None`` 在 TOML 里没有对应写法,
+    只能被省略, 于是 ``shovel init`` 生成的 [memory.llm] 只剩两个
+    数值键, 回落到底有哪些项可以覆盖完全看不出来。
     """
 
-    provider: str | None = None
-    model: str | None = None
-    api_key: str | None = None
-    base_url: str | None = None
+    provider: str = ""
+    model: str = ""
+    api_key: str = ""
+    base_url: str = ""
     temperature: float = 0.1
     max_tokens: int = 2000
 
@@ -126,12 +131,14 @@ class MemoryEmbedderSettings(BaseModel):
 
     ⚠️ ``dims`` 必须与 [memory.qdrant] 建 collection 时用的维度一致。
     两者由 :class:`MemorySettings.dim` 统一给出, 不在这里重复声明。
+
+    同 :class:`MemoryLlmSettings`, 空串表示"未覆盖, 走回落"。
     """
 
-    provider: str | None = None
-    model: str | None = None
-    api_key: str | None = None
-    base_url: str | None = None
+    provider: str = ""
+    model: str = ""
+    api_key: str = ""
+    base_url: str = ""
 
 
 class MemorySettings(BaseModel):

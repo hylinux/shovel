@@ -8,6 +8,9 @@ import typer
 from shovel.cli.context import cli_context
 from shovel.cli.decorators import command_handler
 from shovel.cli.ui.console import console
+from shovel.config.settings import load_settings
+from shovel.db.database import init_database
+from shovel.vector import init_vector_store
 
 app = typer.Typer(
     help="Initial shovel agent",
@@ -161,19 +164,55 @@ def init() -> None:
         console.success(f"The default configuration file {config_file} was created.")
 
 
-    # 生成一个默认的数据库
+    # 读取配置: 数据库 URL 与向量库参数都以配置文件为准,
+    # 不再各处硬编码 ~/.shovel 下的路径
+    settings = load_settings(config_file)
+
+    # 初始化 SQLite: 建表是幂等的, 已存在的表不会被动
     with console.status(
         "[cyan]Initial the database ......",
     ):
         time.sleep(2)
+
     db_file = cli_context.get_default_database()
 
     if db_file.exists():
-        # 如果数据库文件已经存在了,跳过
         console.success(f"The Database file {db_file} is exists.")
     else:
-        # 如果默认的数据库不存在
         console.warning(f"The Database file {db_file} is not exists. We will generate it.")
-        console.success(f"The Database file {db_file} was generated.")
 
+    created_tables = init_database(
+        settings.database.url,
+        echo=settings.database.echo,
+    )
+
+    if created_tables:
+        console.success(
+            f"SQLite schema is ready, {len(created_tables)} table(s) created: "
+            f"{', '.join(created_tables)}"
+        )
+    else:
+        console.success("SQLite schema is already up to date. Nothing to create.")
+
+    # 初始化 Zvec: 知识与记忆各一个 collection。
+    # 已存在时绝不重建 —— 重建等于丢掉全部向量, 而重新 embedding 是最贵的一步。
+    with console.status(
+        "[cyan]Initial the vector store (Zvec) ......",
+    ):
+        time.sleep(2)
+
+    collections = init_vector_store(settings.zvec)
+
+    for info in collections:
+        if info.created:
+            console.success(
+                f"Zvec collection '{info.name}' was created at {info.path} "
+                f"(dim={settings.zvec.dim}, metric={settings.zvec.metric})."
+            )
+        else:
+            console.success(
+                f"Zvec collection '{info.name}' is exists at {info.path}."
+            )
+
+    console.success("Shovel Agent was initialized.")
 

@@ -27,6 +27,7 @@ from .errors import (
 from .model_settings import DefaultAgentModelSettings
 from .qdrant_config import QdrantSettings
 from .redis_config import RedisSettings
+from .zvec_config import ZvecSettings
 
 # ================================================================
 # TOML 值转换
@@ -99,6 +100,7 @@ class AppSettings(BaseSettings):
     redis: RedisSettings = Field(default_factory=RedisSettings)
     model: DefaultAgentModelSettings = Field(default_factory=DefaultAgentModelSettings)
     database: DatabaseSettings = Field(default_factory=DatabaseSettings)
+    zvec: ZvecSettings = Field(default_factory=ZvecSettings)
 
     # ------------------------------------------------------------
     # 读

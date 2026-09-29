@@ -12,6 +12,9 @@ dependencies = [
     "aiosqlite>=0.22.1",
     "alembic>=1.18.5",
     "greenlet>=3.5.5",
+    # 资源凭据: 密钥存进操作系统凭据库, 数据库里只留一个引用字符串。
+    # 没有可用后端时硬失败而不是退回明文 —— 见 services/credentials.py
+    "keyring>=25.6.0",
     # 记忆子系统: mem0 负责记忆的抽取/冲突判定/失效, qdrant-client 提供
     # 它唯一可嵌入式运行的向量后端(mem0 不支持 Zvec, 所以记忆不走 Zvec)
     "mem0ai>=0.1.118",

@@ -5,6 +5,7 @@ import os
 import typer
 
 from shovel.cli.commands.init import app as init_app
+from shovel.cli.commands.resource import app as resource_app
 from shovel.cli.commands.run import app as run_app
 from shovel.cli.commands.version import app as version_app
 
@@ -51,6 +52,14 @@ app.add_typer(
     run_app,
     name="run",
     help="running project in [dev|prd] model."
+)
+
+
+# resource 数据源资源管理命令
+app.add_typer(
+    resource_app,
+    name="resource",
+    help="Manage data-source resources.",
 )
 
 

@@ -36,7 +36,7 @@ class CliExceptionHandler:
             debug: bool | None = None,
     ) -> None:
         self._debug = (
-            is_debug_enabled() 
+            is_debug_enabled()
             if debug is None
             else debug
         )

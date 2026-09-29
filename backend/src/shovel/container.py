@@ -9,8 +9,8 @@ from __future__ import annotations
 from dependency_injector import containers, providers
 
 from shovel.db.database import (
-    create_database_engine,
-    create_session_factory,
+    create_async_database_engine,
+    create_async_session_factory,
 )
 
 
@@ -22,14 +22,14 @@ class AppContainer(containers.DeclarativeContainer):
     # Resource
     # 需要SQLite的DB
     db_engine = providers.Resource(
-        create_database_engine,
+        create_async_database_engine,
         url = config.database.url,
         echo = config.database.echo,
     )
 
     # 数据库的session
     session_factory = providers.Resource(
-        create_session_factory,
+        create_async_session_factory,
         engine = db_engine,
     )
 

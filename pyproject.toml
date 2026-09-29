@@ -66,7 +66,7 @@ src = ["backend/src", "backend/tests"]
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "B", "UP", "ASYNC", "S", "SIM", "RUF"]
-ignore = ["S101"] # allow assert in tests
+ignore = ["S101", "RUF002"] # allow assert in tests
 
 [tool.ruff.format]
 quote-style = "double"

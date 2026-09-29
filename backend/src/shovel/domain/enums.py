@@ -8,7 +8,7 @@ class ResourceState(StrEnum):
     """
     用户创建的资源状态
 
-    状态的取值分别是：
+    状态的取值分别是
     draft
     verifying
     active
@@ -45,7 +45,7 @@ class ScanMode(StrEnum):
     扫描模式定义
     """
 
-    FULL_SWEEP = "full_sweep"     # 全面扫描，也是唯一允许驱动(Driver)
+    FULL_SWEEP = "full_sweep"     # 全面扫描 也是唯一允许驱动(Driver)
     INCREMENTAL = "incremental"   # 增量刷新
     TARGETED = "targeted"         # 表示由用户传入实际需要扫描的资源, 而且扫描只在这几个传入的资源上
 
@@ -67,8 +67,8 @@ class MisfirePolicy(StrEnum):
     错过触发的处理规则
     """
 
-    COALESCE = "coalesce"   # 多次合并成一次处理，也就是因为各种原因错过触发了之后，不管之前多少次都合并成一次进行触发操作
-    SKIP = "skip"      # 不管错过了多少次，都跳过，等待下一次触发
+    COALESCE = "coalesce"   # 多次合并成一次处理 也就是因为各种原因错过触发了之后 不管之前多少次都合并成一次进行触发操作  # noqa: E501
+    SKIP = "skip"      # 不管错过了多少次 都跳过 等待下一次触发
     RUN_ALL = "run_all"  # 把所有错过的触发全部跑一遍
 
 
@@ -159,7 +159,7 @@ class Modality(StrEnum):
     """
     内容的形态
 
-    这里的内容有很多种，例如Document, Chunk等等
+    这里的内容有很多种 例如Document, Chunk等等
     """
 
     TEXT = "text"
@@ -209,7 +209,7 @@ class Granularity(StrEnum):
     """
 
     CHUNK = "chunk"    # 用于向量搜索
-    PARENT = "parent"   # 用于读取，供大模型和人类阅读，也是expand_chunk 的目标 不需要向量化
+    PARENT = "parent"   # 用于读取 供大模型和人类阅读 也是expand_chunk 的目标 不需要向量化
     SECTION = "section"
     DOC_SUMMARY = "doc_summary"
     HYPOTHETICAL_QUESTION = "hypothetical_question"
@@ -296,7 +296,7 @@ class DerivedKind(StrEnum):
     ENTITIES = "entities"
 
 
-class BlockKind(StrEnum):
+class BlobKind(StrEnum):
     """
     Block的类型
     """
@@ -523,3 +523,12 @@ class WorkingSlot(StrEnum):
     OBSERVATION = "observation"  # compact aggressively
     SCRATCH = "scratch"          # drop first
     ERROR = "error"              # keep: repeated failures must stay visible
+
+
+
+# 定义的日志级别
+class LogLevel(StrEnum):
+    INFO = "info"
+    WARN = "warn"
+    ERROR = "error"
+

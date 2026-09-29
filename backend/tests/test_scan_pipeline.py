@@ -314,6 +314,41 @@ async def test_shrinking_document_drops_stale_chunks(
     assert all("第7段" not in c.text_ for c in after)
 
 
+async def test_reindex_purges_stale_vectors_from_the_sink(
+    service: ScanService,
+    sessions: async_sessionmaker[AsyncSession],
+    sink: FakeSink,
+    resource_id: str,
+    corpus: Path,
+) -> None:
+    """重新索引之后, 向量库里不能留下任何 SQLite 已经没有的 chunk。
+
+    chunk id 里含 content_hash, 所以内容一变**所有** id 都跟着变, 新 id
+    不会撞上任何旧 id。指望 upsert 覆盖是错的 —— 它只会在旁边多写一份,
+    于是检索能命中一个 SQLite 里根本不存在的 chunk。
+    """
+
+    (corpus / "readme.txt").write_text(
+        "\n\n".join(f"原始的第{i}段内容, 写长一点以便切出独立的块。" * 6 for i in range(4)),
+        encoding="utf-8",
+    )
+    await service.scan(resource_id, mode=ScanMode.FULL_SWEEP)
+
+    (corpus / "readme.txt").write_text(
+        "\n\n".join(f"换掉的第{i}段内容, 同样写长一点保证切块。" * 6 for i in range(4)),
+        encoding="utf-8",
+    )
+    await service.scan(resource_id, mode=ScanMode.FULL_SWEEP)
+
+    async with sessions() as session:
+        live = set(
+            (await session.execute(select(Chunk.id))).scalars().all()
+        )
+
+    assert set(sink.records) <= live, "向量库里有 SQLite 已经删掉的幽灵 chunk"
+    assert not any("原始的第" in r.text for r in sink.records.values())
+
+
 # --------------------------------------------------------------------------- #
 # 删除对账
 # --------------------------------------------------------------------------- #
@@ -338,6 +373,55 @@ async def test_full_scan_tombstones_vanished_documents(
         doc = (await session.execute(stmt)).scalar_one()
 
     assert doc.lifecycle_state is DocumentLifecycleState.TOMBSTONED
+
+
+async def test_tombstone_withdraws_the_vectors(
+    service: ScanService,
+    sink: FakeSink,
+    resource_id: str,
+    corpus: Path,
+) -> None:
+    """立碑的同时必须把向量撤下来。
+
+    lifecycle_state 只是 SQLite 里的一个标记, Zvec 并不知道它。不撤的话,
+    一篇已经从源端消失的文档照样能被检索命中 —— 而"立碑"对用户的承诺
+    恰恰是它不再出现在结果里。
+    """
+
+    await service.scan(resource_id, mode=ScanMode.FULL_SWEEP)
+
+    assert any(r.doc_uri.endswith("readme.txt") for r in sink.records.values())
+
+    (corpus / "readme.txt").unlink()
+    await service.scan(resource_id, mode=ScanMode.FULL_SWEEP)
+
+    assert not any(r.doc_uri.endswith("readme.txt") for r in sink.records.values())
+
+
+async def test_revived_document_gets_its_vectors_back(
+    service: ScanService,
+    sink: FakeSink,
+    resource_id: str,
+    corpus: Path,
+) -> None:
+    """复活不能只恢复 lifecycle, 向量也得回来。
+
+    立碑时撤掉了向量, 而复活时内容哈希通常没变 —— 如果不把 pipe_state
+    打回 PENDING, needs_processing 会返回 False, 于是文档回到 ACTIVE
+    却永远没有向量, 成了一篇"在库里但搜不到"的隐形文档。
+    """
+
+    await service.scan(resource_id, mode=ScanMode.FULL_SWEEP)
+
+    text = (corpus / "readme.txt").read_text(encoding="utf-8")
+    (corpus / "readme.txt").unlink()
+    await service.scan(resource_id, mode=ScanMode.FULL_SWEEP)
+
+    # 原样写回去: 内容哈希和立碑之前完全一致
+    (corpus / "readme.txt").write_text(text, encoding="utf-8")
+    await service.scan(resource_id, mode=ScanMode.FULL_SWEEP)
+
+    assert any(r.doc_uri.endswith("readme.txt") for r in sink.records.values())
 
 
 async def test_tombstoned_document_revives(

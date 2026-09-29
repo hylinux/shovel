@@ -48,7 +48,6 @@ import asyncio
 import contextlib
 from collections.abc import Sequence
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, cast
 
 from sqlalchemy import delete, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -94,9 +93,6 @@ from shovel.services.connector_base import (
     DiscoveryScope,
 )
 from shovel.services.resource_service import ResourceService
-
-if TYPE_CHECKING:
-    from sqlalchemy.engine import CursorResult
 
 #: 每积累多少个向量就写一次 Zvec。
 #:
@@ -559,6 +555,18 @@ class ScanService:
 
         outcome.chunks_written += written
 
+        # 旧向量必须显式删掉, 不能指望 upsert 覆盖。
+        #
+        # chunk id 里含 content_hash, 所以内容一变**所有** chunk 的 id 都
+        # 跟着变, 新 id 不会撞上任何旧 id —— upsert 只会在旁边多写一份,
+        # 旧的那批永远留在 Zvec 里。SQLite 那边 _persist 已经把旧行删了,
+        # 于是两边对不上: 检索命中一个 SQLite 里根本不存在的 chunk。
+        #
+        # 一篇文档在一轮扫描里只会走到这里一次, 所以不用担心把自己
+        # 刚写进去的向量删掉 —— 新向量此刻还在 buffer 里, 没落库。
+        if by_id:
+            await self._sink.delete_document(resource.id, item.uri)
+
         for draft in embeddable:
             vector = by_id.get(draft.id)
 
@@ -727,6 +735,15 @@ class ScanService:
         **立碑而不是删除。** 墓碑是可撤销的: 外接硬盘拔掉一次不该
         让知识永久消失, 下次扫描见到它就会自动复活 (见 _upsert_document)。
         真正的物理清除由单独的 purge 流程按保留期做。
+
+        但**向量必须当场撤下来**: SQLite 的 lifecycle_state 只是一个标记,
+        Zvec 并不知道它。不删的话一篇已经从源端消失的文档照样能被检索命中,
+        而"立碑"对用户的承诺恰恰是它不该再出现在结果里。
+
+        代价是复活时要重新 embedding。所以立碑的同时把 pipe_state 打回
+        PENDING —— 否则复活那一刻 ``needs_processing`` 会因为 hash 没变
+        而返回 False, 于是文档回到 ACTIVE 却永远没有向量, 成了一篇
+        "在库里但搜不到"的隐形文档。
         """
 
         async with self._sessions() as session:
@@ -737,30 +754,56 @@ class ScanService:
             if job is None or not job.may_reconcile_deletions:
                 return 0
 
-            result = await session.execute(
+            condition = (
+                (Document.resource_id == resource_id)
+                & (Document.lifecycle_state == DocumentLifecycleState.ACTIVE)
+                & (Document.last_seen_run != job_id)
+            )
+
+            # 先把 uri 取出来: UPDATE 之后这些行就不再满足条件了,
+            # 而撤向量需要逐个 doc_uri 调用 sink。
+            doomed = list(
+                (await session.execute(select(Document.uri).where(condition)))
+                .scalars()
+                .all()
+            )
+
+            if not doomed:
+                return 0
+
+            await session.execute(
                 update(Document)
-                .where(
-                    (Document.resource_id == resource_id)
-                    & (Document.lifecycle_state == DocumentLifecycleState.ACTIVE)
-                    & (Document.last_seen_run != job_id)
-                )
+                .where(condition)
                 .values(
                     lifecycle_state=DocumentLifecycleState.TOMBSTONED,
                     tombstoned_at=now_ts(),
+                    pipe_state=DocumentPipeState.PENDING,
                     skip_reason="本轮全量扫描未再发现该条目。",
                 )
             )
+
+            # 账本同步改掉: 向量马上就要从 Zvec 撤走了。
+            await session.execute(
+                update(Chunk)
+                .where(
+                    (Chunk.resource_id == resource_id)
+                    & (Chunk.doc_uri.in_(doomed))
+                    & (Chunk.vector_state == VectorState.INDEXED)
+                )
+                .values(vector_state=VectorState.PENDING)
+            )
+
             await session.commit()
 
-        # UPDATE 语句返回的是 CursorResult, 但 execute() 的静态类型是
-        # 更宽的 Result —— 后者没有 rowcount。
-        count = cast("CursorResult[Any]", result).rowcount or 0
+        for uri in doomed:
+            await self._sink.delete_document(resource_id, uri)
 
-        if count:
-            await self._log(
-                job_id, LogLevel.INFO, None, "RECONCILE_TOMBSTONED",
-                f"{count} 个条目在源端已不存在, 已标记为墓碑。",
-            )
+        count = len(doomed)
+
+        await self._log(
+            job_id, LogLevel.INFO, None, "RECONCILE_TOMBSTONED",
+            f"{count} 个条目在源端已不存在, 已标记为墓碑并撤下向量。",
+        )
 
         return count
 

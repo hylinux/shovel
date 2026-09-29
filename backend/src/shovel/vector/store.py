@@ -14,7 +14,7 @@ from zvec import Collection, CollectionSchema
 
 from shovel.config.zvec_config import ZvecSettings
 
-from .schema import chunk_collection_schema, memory_collection_schema
+from .schema import chunk_collection_schema
 
 #: zvec.init() 进程内只允许调用一次, 第二次会抛 RuntimeError。
 #: CLI 里 init / run 可能都想初始化, 所以在这里做一次幂等收口。
@@ -110,7 +110,9 @@ def open_collection(path: Path | str, *, read_only: bool = False) -> Collection:
 
 
 def init_vector_store(settings: ZvecSettings) -> list[CollectionInfo]:
-    """按配置初始化 Zvec 运行时与全部 collection。
+    """按配置初始化 Zvec 运行时与知识库 collection。
+
+    记忆不在此处: 它由 mem0 写入本地 Qdrant, 见 :mod:`shovel.memory`。
 
     返回每个 collection 的初始化结果, 由调用方(CLI)决定怎么展示。
     """
@@ -122,16 +124,6 @@ def init_vector_store(settings: ZvecSettings) -> list[CollectionInfo]:
             settings.knowledge_path,
             chunk_collection_schema(
                 settings.chunk_collection,
-                dim=settings.dim,
-                metric=settings.metric,
-                hnsw_m=settings.hnsw_m,
-                hnsw_ef_construction=settings.hnsw_ef_construction,
-            ),
-        ),
-        (
-            settings.memory_path,
-            memory_collection_schema(
-                settings.memory_collection,
                 dim=settings.dim,
                 metric=settings.metric,
                 hnsw_m=settings.hnsw_m,

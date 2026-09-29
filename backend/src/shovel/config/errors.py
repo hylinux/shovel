@@ -10,15 +10,22 @@ import tomllib
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from shovel.exceptions.config import ConfigError as _BaseConfigError
+
 if TYPE_CHECKING:
     from pydantic import ValidationError
 
 
-class ConfigError(Exception):
+class ConfigError(_BaseConfigError):
     """配置载入失败。
 
     message 已经是面向最终用户的可读文本, CLI 捕获后直接打印即可,
     不需要再展示 traceback (配置错误是用户错误, 不是程序缺陷)。
+
+    继承 :class:`shovel.exceptions.config.ConfigError` 而不是裸 Exception:
+    CLI 的异常处理器只认 ShovelError, 其余一律归到"发生了未知错误,
+    加 --debug 看 traceback"。而配置写错了恰恰是最不需要 traceback、
+    最需要把那段精心排版的提示原样打出来的场景。
     """
 
 

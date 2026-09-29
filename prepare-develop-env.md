@@ -34,18 +34,16 @@
 
 ## 2. 依赖的外部数据库等工具：
 
-本机开发建议使用Docker Desktop, 安装好docker 之后，请依次在本机启动qdrant 以及redis ，启动命令参考：
+记忆子系统默认使用嵌入式 Qdrant（`memory.qdrant.mode = "local"`，一个目录就是一个库），
+因此本机开发不需要额外启动任何服务。
+
+只有当你把 `memory.qdrant.mode` 改成 `server` 时，才需要一个独立的 Qdrant。
+本机开发建议使用 Docker Desktop，启动命令参考：
 
 - `Qdrant`:
 
 ```bash
 docker run -d --name qdrant_latest -p 6333:6333 -p 6334:6334 -v "d:/qdrantDB/:/qdrant/storage:z" qdrant:latest
-```
-
-- `Redis`:
-
-```bash
-docker run -d --name redis -p 6379:6379 -v d:/DockerData/RedisData:/data redis:latest
 ```
 
 ## 3. 代码准备：

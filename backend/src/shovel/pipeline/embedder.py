@@ -182,7 +182,7 @@ class HttpEmbedder:
         settings = self._settings
         provider = settings.provider
         base = settings.base_url.rstrip("/")
-        key = settings.api_key.get_secret_value() if settings.api_key else ""
+        key = settings.api_key.get_secret_value()
 
         if provider == "ollama":
             # Ollama 原生端点。它也提供 /v1 的 OpenAI 兼容层, 但原生端点

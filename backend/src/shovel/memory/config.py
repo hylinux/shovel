@@ -52,7 +52,7 @@ _DEFAULT_PROVIDER = "openai"
 
 
 def _provider_of(model: DefaultAgentModelSettings) -> str:
-    if model.model_provider_type is None:
+    if not model.model_provider_type:
         return _DEFAULT_PROVIDER
 
     return _PROVIDERS.get(model.model_provider_type, _DEFAULT_PROVIDER)

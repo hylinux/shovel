@@ -10,6 +10,7 @@ import os
 import shutil
 import tomllib
 from datetime import datetime
+from enum import Enum
 from pathlib import Path
 from typing import Any
 
@@ -27,7 +28,6 @@ from .errors import (
 )
 from .memory_config import MemorySettings
 from .model_settings import DefaultAgentModelSettings
-from .redis_config import RedisSettings
 from .zvec_config import ZvecSettings
 
 # ================================================================
@@ -41,11 +41,18 @@ def _to_toml_safe(value: Any) -> Any:
        TOML 没有 null, "未设置"的正确表达是键不存在,
        回读时由 pydantic 的字段默认值兜底。
 
+       ⚠️ 正因为 None 会让键从生成的配置文件里消失, 配置模型里的
+       "可空"字段一律用空串 / 空 SecretStr 表达未设置 —— 否则
+       'shovel init' 会吐出一堆空表, 用户看不到有哪些键可以填。
+
     2. SecretStr -> 真实值
        model_dump(mode="json") 会输出 "**********",
        直接写盘等于用掩码覆盖掉用户真实的密钥。
 
-    3. Path -> posix 字符串
+    3. Enum -> 成员值
+       mode="python" 拿到的是枚举对象本身, tomli_w 不认识它。
+
+    4. Path -> posix 字符串
     """
 
     if value is None:
@@ -53,6 +60,9 @@ def _to_toml_safe(value: Any) -> Any:
 
     if isinstance(value, SecretStr):
         return value.get_secret_value()
+
+    if isinstance(value, Enum):
+        return _to_toml_safe(value.value)
 
     if isinstance(value, Path):
         return value.as_posix()
@@ -86,8 +96,9 @@ def _to_toml_safe(value: Any) -> Any:
 #:
 #: 这里只丢弃"我们自己曾经写进去过"的键, 因此不会掩盖真正的错别字。
 _REMOVED_KEYS: dict[str | None, set[str]] = {
-    # 记忆改由 mem0 托管, qdrant 的配置搬到了 [memory.qdrant]
-    None: {"qdrant"},
+    # 记忆改由 mem0 托管, qdrant 的配置搬到了 [memory.qdrant];
+    # redis 整个从项目里移除了, 老配置文件里的 [redis] 段直接丢弃
+    None: {"qdrant", "redis"},
     # Zvec 只负责知识库了, 记忆的 collection 不再由它管
     "zvec": {"memory_path", "memory_collection"},
 }
@@ -135,7 +146,6 @@ class AppSettings(BaseSettings):
 
     # default_factory: 推迟到实例化时才构造, 避免导入期副作用
     document: DocumentSettings = Field(default_factory=DocumentSettings)
-    redis: RedisSettings = Field(default_factory=RedisSettings)
     model: DefaultAgentModelSettings = Field(default_factory=DefaultAgentModelSettings)
     database: DatabaseSettings = Field(default_factory=DatabaseSettings)
 

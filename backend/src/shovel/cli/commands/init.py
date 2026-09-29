@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import time
+from collections.abc import Callable
 from pathlib import Path
 
 import typer
@@ -11,6 +12,7 @@ from shovel.cli.ui.console import console
 from shovel.config.settings import load_settings
 from shovel.db.database import init_database
 from shovel.memory import init_memory_store
+from shovel.services.health import HealthResult, HealthStatus, check_model
 from shovel.vector import init_vector_store
 
 app = typer.Typer(
@@ -18,6 +20,54 @@ app = typer.Typer(
     invoke_without_command=True,
     no_args_is_help=False
 )
+
+#: 每个检查步骤前的停顿, 纯粹是为了让 spinner 能被看见。
+_STEP_PAUSE_SECONDS = 2
+
+
+def _ensure_dir(path: Path, label: str) -> None:
+    """确保目录存在。
+
+    一律带上 ``parents=True, exist_ok=True``:
+
+    * ``parents``  —— 这些目录之间有父子关系(knowledge / memory / data 都在
+      profile 之下)。逐个裸 ``mkdir()`` 依赖"上一步一定成功"这个假设,
+      一旦顺序被调整或某一层被用户删掉, 报出来的是一个完全没有上下文的
+      ``FileNotFoundError``。
+    * ``exist_ok`` —— "存在性检查"和"创建"之间永远有时间差。两个终端同时
+      跑 ``shovel init`` 时, 后一个会撞上 ``FileExistsError`` 而整个失败,
+      而目录已经存在恰恰是我们想要的结果。
+    """
+
+    with console.status(f"[cyan]Checking the {label} ......"):
+        time.sleep(_STEP_PAUSE_SECONDS)
+
+    existed = path.exists()
+
+    if not existed:
+        console.warning(f"The {label} {path} is not exists. We will create it.")
+
+    path.mkdir(parents=True, exist_ok=True)
+
+    if existed:
+        console.success(f"The {label} {path} is exists.")
+    else:
+        console.success(f"The {label} {path} was created.")
+
+
+def _report_health(label: str, result: HealthResult) -> None:
+    """把自检结果翻译成终端输出。
+
+    失败只 warning 不抛异常: init 的职责是把本地环境准备好, 而外部依赖
+    连不上通常意味着"还没配", 不该让整个初始化功亏一篑。
+    """
+
+    if result.status is HealthStatus.OK:
+        console.success(f"{label}: {result.detail}")
+    elif result.status is HealthStatus.SKIPPED:
+        console.info(f"{label}: {result.detail}")
+    else:
+        console.warning(f"{label}: {result.detail}")
 
 
 @app.callback()
@@ -29,129 +79,34 @@ def init() -> None:
     #check profile 文件目录
     console.info("Checking the default directories.")
 
-    with console.status(
-        "[cyan]Checking the profile path......",
-    ):
-        time.sleep(2)
+    # 目录之间有父子关系, 所以 profile 必须排在最前面
+    directories: list[tuple[Callable[[], Path], str]] = [
+        (cli_context.get_default_profile_dir, "default profile directory"),
+        (cli_context.get_default_config_dir, "default configuration directory"),
+        (cli_context.get_default_workspace, "default workspace directory"),
+        # 这里暂时采用 sqlite 来管理运行部分需要数据库的地方
+        (cli_context.get_default_database_dir, "database directory"),
+        # 知识与记忆各自独立落盘: 删掉知识库重建时不会碰到记忆
+        (cli_context.get_default_knowledge_dir, "knowledge directory"),
+        (cli_context.get_default_memory_dir, "memory directory"),
+        (cli_context.get_default_logs_dir, "log directory"),
+    ]
 
-    profile_path = cli_context.get_default_profile_dir()
-
-    if Path.exists(profile_path):
-        console.success(f"The default profile directory {profile_path} is exists.")
-    else:
-        console.warning(f"The default profile directory {profile_path} is not eixts. We will create it.")
-        Path.mkdir(profile_path)
-        console.success(f"Profile directory {profile_path} was created.")
-
-    # check config 文件目录
-    with console.status(
-        "[cyan]Checking the default configuratrion directory ......",
-    ):
-        time.sleep(2)
-
-    config_dir = cli_context.get_default_config_dir()
-
-    if Path.exists(config_dir):
-        console.success(f"The default configuration directory {config_dir} is exists.")
-    else:
-        console.warning(f"The default configuration directory {config_dir} is not exists. We will create it.")
-        Path.mkdir(config_dir)
-        console.success(f"Configuration directory {config_dir} was created.")
-
-    # 检查workspace 目录
-    with console.status(
-        "[cyan]Checking the default workspace ......",
-    ):
-        time.sleep(2)
-
-    workspace_dir = cli_context.get_default_workspace()
-
-    if Path.exists(workspace_dir):
-        console.success(f"The Default worksapce directory {workspace_dir} is exists.")
-    else:
-        console.warning(f"The Default worksapce directory {workspace_dir} is not exists. We will create it.")
-        workspace_dir.mkdir(parents=True, exist_ok=True)
-        console.success(f"Default worksapce directory {workspace_dir} was created.")
-
-
-    # 检查db 目录(我们这里暂时采用sqlite 来管理运行部分需要数据库的地方)
-    with console.status(
-        "[cyan]Checking the database directory ......",
-    ):
-        time.sleep(2)
-
-    db_dir = cli_context.get_default_database_dir()
-
-    if Path.exists(db_dir):
-        console.success(f"Database directory {db_dir} is exists.")
-    else:
-        console.warning(f"Database directory {db_dir} is not exists. We will create it.")
-        db_dir.mkdir()
-        console.success(f"Database directory {db_dir} was created.")
-
-
-    # 需要新增两个目录
-    # 一个用于存放knowledge, 一个用于存放记忆
-    with console.status(
-        "[cyan]Checking the Knowledge directory ......",
-    ):
-        time.sleep(2)
-
-    knowledge_dir = cli_context.get_default_knowledge_dir()
-
-    if Path.exists(knowledge_dir):
-        console.success(f"Knowledge directory {knowledge_dir} is exists.")
-    else:
-        console.warning(f"Knowledge directory {knowledge_dir} is not exists. We will create it.")
-        knowledge_dir.mkdir()
-        console.success(f"Knowledge directory {knowledge_dir} was created.")
-
-
-    # 用于存放记忆的目录
-    with console.status(
-        "[cyan]Checking the Memory directory ......",
-    ):
-        time.sleep(2)
-
-    memory_dir = cli_context.get_default_memory_dir()
-
-    if Path.exists(memory_dir):
-        console.success(f"Memory directory {memory_dir} is exists.")
-    else:
-        console.warning(f"Memory directory {memory_dir} is not exists. We will create it.")
-        memory_dir.mkdir()
-        console.success(f"Memory directory {memory_dir} was created.")
-
-
-
-    # 检查 日志目录
-    with console.status(
-        "[cyan]Checking the log directory ......",
-    ):
-        time.sleep(2)
-
-    log_dir = cli_context.get_default_logs_dir()
-
-    if Path.exists(log_dir):
-        console.success(f"Log directory {log_dir} is exists.")
-    else:
-        console.warning(f"Log directory {log_dir} is not exists. We will create it.")
-        log_dir.mkdir()
-        console.success(f"Log directory {log_dir} was created.")
+    for resolve, label in directories:
+        _ensure_dir(resolve(), label)
 
     # 暂时就这些目录吧。
 
     # 然后这里做其他的初始化任务, 包括:
     # 1. 生成默认的配置文件
-    # 2. 检查qdrant 数据库的连接,初始化数据库
-    # 3. 检查 Redis 的连接,初始化 Redis 数据库
-    # 4. 检查默认大模型的连接,确保默认大模型可以正常工作
+    # 2. 检查向量库/记忆库, 初始化它们
+    # 3. 检查默认大模型的连接,确保默认大模型可以正常工作
 
     # 检查默认的配置文件,如果配置文件不存在,则使用默认配置
     with console.status(
         "[cyan]Initial the configuration file ......",
     ):
-        time.sleep(2)
+        time.sleep(_STEP_PAUSE_SECONDS)
 
     config_file = cli_context.get_default_config_file()
 
@@ -173,7 +128,7 @@ def init() -> None:
     with console.status(
         "[cyan]Initial the database ......",
     ):
-        time.sleep(2)
+        time.sleep(_STEP_PAUSE_SECONDS)
 
     db_file = cli_context.get_default_database()
 
@@ -200,7 +155,7 @@ def init() -> None:
     with console.status(
         "[cyan]Initial the knowledge vector store (Zvec) ......",
     ):
-        time.sleep(2)
+        time.sleep(_STEP_PAUSE_SECONDS)
 
     collections = init_vector_store(settings.zvec)
 
@@ -224,7 +179,7 @@ def init() -> None:
     with console.status(
         "[cyan]Initial the memory store (mem0 + Qdrant) ......",
     ):
-        time.sleep(2)
+        time.sleep(_STEP_PAUSE_SECONDS)
 
     memory_info = init_memory_store(settings.memory)
 
@@ -241,5 +196,12 @@ def init() -> None:
 
     console.success(f"mem0 history database is ready at {memory_info.history_db}.")
 
-    console.success("Shovel Agent was initialized.")
+    # 检查默认大模型的连接。未配置时只是提示, 不算失败 —— 见 services/health.py
+    with console.status(
+        "[cyan]Checking the default model endpoint ......",
+    ):
+        time.sleep(_STEP_PAUSE_SECONDS)
 
+    _report_health("Default model", check_model(settings.model))
+
+    console.success("Shovel Agent was initialized.")

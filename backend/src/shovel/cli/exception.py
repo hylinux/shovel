@@ -4,6 +4,7 @@ import os
 from typing import NoReturn
 
 import typer
+from rich.markup import escape
 
 from shovel.cli.ui.console import console
 from shovel.exceptions.base import ShovelError
@@ -60,10 +61,12 @@ class CliExceptionHandler:
             self,
             exc: ShovelError,
     ) -> NoReturn:
-        console.error(exc.message)
+        # escape: 错误文本里常常带着配置片段/文件路径, 其中的方括号
+        # 会被 rich 当成样式标签吃掉 —— 报错信息漏字比报错本身更难查。
+        console.error(escape(exc.message))
 
         if exc.hint:
-            console.info(f"Hint: {exc.hint}")
+            console.info(f"Hint: {escape(exc.hint)}")
 
         if self._debug:
             console.debug(f"Exit Code: {exc.exit_code}")

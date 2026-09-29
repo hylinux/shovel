@@ -193,6 +193,40 @@ class DocClass(StrEnum):
 
 
 
+class BlockKind(StrEnum):
+    """解析出来的一个文本块是什么东西。
+
+    这不是"格式", 而是**切块时的处置方式**, 所以取值很少:
+
+    * ``HEADING``   标题 —— 是天然的切分边界, 且要进结构路径
+    * ``PARAGRAPH`` 正文 —— 可以和相邻段落合并成一块
+    * ``LIST_ITEM`` 列表项 —— 单独太短, 相邻的应该粘在一起
+    * ``TABLE``     表格 —— 绝不能从中间切开, 否则表头和数据就断了联系
+    * ``CODE``      代码 —— 同样不可切开, 半个函数没有意义
+    * ``CAPTION``   图表标题 —— 应当粘在它所描述的对象上
+    * ``NOTE``      附注 (演讲者备注、脚注) —— 可索引, 但权重低于正文
+
+    再细的分类 (例如区分 h1/h2) 由 ``Block.level`` 表达, 不需要新的成员。
+    """
+
+    HEADING = "heading"
+    PARAGRAPH = "paragraph"
+    LIST_ITEM = "list_item"
+    TABLE = "table"
+    CODE = "code"
+    CAPTION = "caption"
+    NOTE = "note"
+
+    @property
+    def atomic(self) -> bool:
+        """是否禁止从块内部切开。
+
+        表格和代码是原子的: 一张被腰斩的表格, 下半截没有表头, 检索出来
+        只是一堆数字; 半个函数体同理。宁可让它超出目标块长, 也不能切碎。
+        """
+        return self in {BlockKind.TABLE, BlockKind.CODE}
+
+
 @dataclass(frozen=True)
 class LayerSpec:
     """

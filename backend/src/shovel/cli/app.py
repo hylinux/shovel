@@ -7,6 +7,7 @@ import typer
 from shovel.cli.commands.init import app as init_app
 from shovel.cli.commands.resource import app as resource_app
 from shovel.cli.commands.run import app as run_app
+from shovel.cli.commands.scan import app as scan_app
 from shovel.cli.commands.version import app as version_app
 
 app = typer.Typer(
@@ -60,6 +61,14 @@ app.add_typer(
     resource_app,
     name="resource",
     help="Manage data-source resources.",
+)
+
+
+# scan 扫描与索引命令
+app.add_typer(
+    scan_app,
+    name="scan",
+    help="Scan resources and build the search index.",
 )
 
 

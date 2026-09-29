@@ -12,13 +12,23 @@ dependencies = [
     "aiosqlite>=0.22.1",
     "alembic>=1.18.5",
     "greenlet>=3.5.5",
+    # 知识库 embedding 的 HTTP 客户端。直接用 httpx 而不是 openai SDK:
+    # 要同时支持 openai / azure / ollama 三种端点形状, 而 ollama 的批量
+    # 只有原生 /api/embed 才有 —— SDK 反而挡在中间。见 pipeline/embedder.py
+    "httpx>=0.28.1",
     # 资源凭据: 密钥存进操作系统凭据库, 数据库里只留一个引用字符串。
     # 没有可用后端时硬失败而不是退回明文 —— 见 services/credentials.py
     "keyring>=25.6.0",
     # 记忆子系统: mem0 负责记忆的抽取/冲突判定/失效, qdrant-client 提供
     # 它唯一可嵌入式运行的向量后端(mem0 不支持 Zvec, 所以记忆不走 Zvec)
     "mem0ai>=0.1.118",
+    # 文档解析器。每种格式一个库, 都是同步的 CPU 密集调用, 统一用
+    # asyncio.to_thread 挪出事件循环 —— 见 pipeline/parsers/
+    "openpyxl>=3.1.5",      # .xlsx
     "py-generic-host",
+    "pypdf>=6.19.0",        # .pdf
+    "python-docx>=1.2.0",   # .docx
+    "python-pptx>=1.0.2",   # .pptx
     "qdrant-client>=1.15.1",
     "rich>=15.0.0",
     "sqlalchemy>=2.0.51",

@@ -19,6 +19,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from .database_config import DatabaseSettings
 from .document_settings import DocumentSettings
+from .embedding_config import EmbeddingSettings
 from .errors import (
     ConfigError,
     format_toml_error,
@@ -140,6 +141,10 @@ class AppSettings(BaseSettings):
 
     #: 知识库向量存储(Zvec)
     zvec: ZvecSettings = Field(default_factory=ZvecSettings)
+
+    #: 知识库的 embedding 服务。与 [memory.embedder] 是两套, 原因见
+    #: config/embedding_config.py —— 两个向量库的维度各自独立。
+    embedding: EmbeddingSettings = Field(default_factory=EmbeddingSettings)
 
     #: 记忆子系统(mem0 + 本地 Qdrant)。记忆不走 Zvec, 原因见 memory_config.py
     memory: MemorySettings = Field(default_factory=MemorySettings)

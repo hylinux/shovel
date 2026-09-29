@@ -17,6 +17,7 @@ dependencies = [
     "sqlalchemy>=2.0.51",
     "tomli-w>=1.2.0",
     "typer>=0.27.0",
+    "zvec>=0.7.0",
 ]
 
 

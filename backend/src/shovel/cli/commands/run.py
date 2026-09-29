@@ -231,7 +231,7 @@ def _load_settings_or_exit() -> AppSettings:
     if not cli_context.validate_config_exists():
         console.error(
             "Shovel configuration missing, "
-            "please use command 'shovel config' to generate a default one."
+            "please use command 'shovel init' to generate a default one."
         )
         raise typer.Exit(code=1)
 

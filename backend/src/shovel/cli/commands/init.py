@@ -81,9 +81,43 @@ def init() -> None:
     if Path.exists(db_dir):
         console.success(f"Database directory {db_dir} is exists.")
     else:
-        console.success(f"Database directory {db_dir} is not exists. We will create it.")
+        console.warning(f"Database directory {db_dir} is not exists. We will create it.")
         db_dir.mkdir()
         console.success(f"Database directory {db_dir} was created.")
+
+
+    # 需要新增两个目录
+    # 一个用于存放knowledge, 一个用于存放记忆
+    with console.status(
+        "[cyan]Checking the Knowledge directory ......",
+    ):
+        time.sleep(2)
+
+    knowledge_dir = cli_context.get_default_knowledge_dir()
+
+    if Path.exists(knowledge_dir):
+        console.success(f"Knowledge directory {knowledge_dir} is exists.")
+    else:
+        console.warning(f"Knowledge directory {knowledge_dir} is not exists. We will create it.")
+        knowledge_dir.mkdir()
+        console.success(f"Knowledge directory {knowledge_dir} was created.")
+
+
+    # 用于存放记忆的目录
+    with console.status(
+        "[cyan]Checking the Memory directory ......",
+    ):
+        time.sleep(2)
+
+    memory_dir = cli_context.get_default_memory_dir()
+
+    if Path.exists(memory_dir):
+        console.success(f"Memory directory {memory_dir} is exists.")
+    else:
+        console.warning(f"Memory directory {memory_dir} is not exists. We will create it.")
+        memory_dir.mkdir()
+        console.success(f"Memory directory {memory_dir} was created.")
+
 
 
     # 检查 日志目录
@@ -133,8 +167,6 @@ def init() -> None:
     ):
         time.sleep(2)
     db_file = cli_context.get_default_database()
-
-    console.print(db_file)
 
     if db_file.exists():
         # 如果数据库文件已经存在了,跳过

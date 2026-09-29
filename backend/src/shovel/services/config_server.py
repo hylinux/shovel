@@ -112,6 +112,19 @@ class ShovelContext:
 
         return profile_dir / "config"
 
+    def get_default_knowledge_dir(self) -> Path:
+        profile_dir = self.get_default_profile_dir()
+
+        return profile_dir / "knowledge"
+
+
+    def get_default_memory_dir(self) -> Path:
+        profile_file = self.get_default_profile_dir()
+
+        return profile_file / "memory"
+
+
+
 
     def get_package_version(
             self,

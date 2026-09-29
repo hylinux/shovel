@@ -1,6 +1,9 @@
 #---------------------------------------------------------------------
 # Zvec collection 的 schema 定义
 #
+# 本模块只覆盖知识库(chunk)。记忆的向量由 mem0 写入本地 Qdrant,
+# schema 由 mem0 自己维护, 我们不在这里声明。
+#
 # SQLite 是真相之源, Zvec 可丢弃重建。因此这里只声明两类东西:
 #   1. dense 向量本身
 #   2. "必须写进查询条件里"的标量字段
@@ -25,11 +28,11 @@ from zvec import (
     VectorSchema,
 )
 
-#: dense 向量字段名。两个 collection 用同一个名字, 检索层就不必分支。
+#: dense 向量字段名。
 DENSE_VECTOR = "dense"
 
 #: 全文检索字段名。Zvec 里存一份文本副本用于 FTS,
-#: 权威全文仍在 SQLite 的 chunk.text / 记忆表中。
+#: 权威全文仍在 SQLite 的 chunk.text 中。
 TEXT_FIELD = "text"
 
 _METRICS = {
@@ -119,65 +122,9 @@ def chunk_collection_schema(
     )
 
 
-def memory_collection_schema(
-        name: str = "shovel_memory",
-        *,
-        dim: int = 1024,
-        metric: str = "cosine",
-        hnsw_m: int = 16,
-        hnsw_ef_construction: int = 200,
-) -> CollectionSchema:
-    """记忆 collection。
-
-    doc id == :func:`shovel.db.base.memory_vector_id`。
-    记忆不属于任何文档, 过滤维度是"谁的/哪次会话/还有效吗/多重要",
-    与 chunk 完全不同 —— 这正是它独立成一个 collection 的原因。
-    """
-
-    return CollectionSchema(
-        name=name,
-        fields=[
-            # episodic / semantic / procedural ...
-            FieldSchema("memory_kind", DataType.STRING, index_param=InvertIndexParam()),
-            FieldSchema("memory_id", DataType.STRING, index_param=InvertIndexParam()),
-
-            # 记忆的授权边界与 chunk 分开(见 AgentScope.can_access_memory)
-            FieldSchema("agent_id", DataType.STRING, nullable=True,
-                        index_param=InvertIndexParam()),
-            FieldSchema("session_id", DataType.STRING, nullable=True,
-                        index_param=InvertIndexParam()),
-
-            # supersede 不删行, 检索时必须靠它排除已失效记忆
-            FieldSchema("validity_state", DataType.STRING, nullable=True,
-                        index_param=InvertIndexParam()),
-            FieldSchema("rev", DataType.INT64, nullable=True,
-                        index_param=InvertIndexParam(enable_range_optimization=True)),
-
-            # 显著性与时间轴: 都是范围查询, 所以开 range optimization
-            FieldSchema("importance", DataType.FLOAT, nullable=True),
-            FieldSchema("confidence", DataType.FLOAT, nullable=True),
-            FieldSchema("is_pinned", DataType.BOOL, nullable=True),
-            FieldSchema("occurred_at", DataType.INT64, nullable=True,
-                        index_param=InvertIndexParam(enable_range_optimization=True)),
-            FieldSchema("valid_from", DataType.INT64, nullable=True,
-                        index_param=InvertIndexParam(enable_range_optimization=True)),
-            FieldSchema("valid_until", DataType.INT64, nullable=True,
-                        index_param=InvertIndexParam(enable_range_optimization=True)),
-
-            FieldSchema("tags", DataType.ARRAY_STRING, nullable=True,
-                        index_param=InvertIndexParam()),
-
-            FieldSchema(TEXT_FIELD, DataType.STRING, nullable=True,
-                        index_param=FtsIndexParam()),
-        ],
-        vectors=_dense(dim, metric, hnsw_m, hnsw_ef_construction),
-    )
-
-
 __all__ = [
     "DENSE_VECTOR",
     "TEXT_FIELD",
     "chunk_collection_schema",
-    "memory_collection_schema",
     "metric_of",
 ]

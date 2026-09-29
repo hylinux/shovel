@@ -12,7 +12,11 @@ dependencies = [
     "aiosqlite>=0.22.1",
     "alembic>=1.18.5",
     "greenlet>=3.5.5",
+    # 记忆子系统: mem0 负责记忆的抽取/冲突判定/失效, qdrant-client 提供
+    # 它唯一可嵌入式运行的向量后端(mem0 不支持 Zvec, 所以记忆不走 Zvec)
+    "mem0ai>=0.1.118",
     "py-generic-host",
+    "qdrant-client>=1.15.1",
     "rich>=15.0.0",
     "sqlalchemy>=2.0.51",
     "tomli-w>=1.2.0",

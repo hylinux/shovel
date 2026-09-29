@@ -4,7 +4,6 @@ from .schema import (
     DENSE_VECTOR,
     TEXT_FIELD,
     chunk_collection_schema,
-    memory_collection_schema,
     metric_of,
 )
 from .store import (
@@ -23,7 +22,6 @@ __all__ = [
     "ensure_collection",
     "init_vector_store",
     "init_zvec_runtime",
-    "memory_collection_schema",
     "metric_of",
     "open_collection",
 ]

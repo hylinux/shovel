@@ -171,6 +171,24 @@ OpenAI 的 embedding 接口**不保证**返回顺序与请求顺序一致。不�
 一篇文档重新解析后块数可能变少。不先删就会留下"幽灵内容": 上一版的第 7 块
 还在库里, 而这一版只有 5 块 —— 检索得到, 但文档里已经没有这段话了。
 
+### 向量库也要显式删, upsert 覆盖不了
+
+SQLite 那侧删干净了还不够。chunk id 里含 `content_hash`, 所以内容一变,
+**所有**块的 id 都跟着变, 新 id 不会撞上任何旧 id —— upsert 只会在旁边
+多写一份, 旧的那批永远留在 Zvec。
+
+于是两边对不上: 检索命中一个 SQLite 里根本不存在的 chunk。所以写新向量
+之前必须先 `delete_document(resource_id, doc_uri)` 把这篇的旧向量整篇撤掉。
+
+这个缺陷用假 embedder 测不出来 —— 只有拿真实模型跑完整链路, 再拿 SQLite
+的 id 集合去比对 Zvec, 才会看到多出来的那些。
+
+> **已知缺口**: 删旧向量在前, 新向量攒够 `_VECTOR_FLUSH_SIZE` 才落库。
+> 作业若在这中间崩溃, `indexed_hash` 已经更新而向量还没写, 下一轮会因
+> hash 没变而跳过, 这篇就成了"在库里但搜不到"的隐形文档。彻底修需要把
+> `indexed_hash` 的写入推迟到 flush 成功之后, 会动到 `_persist` 的事务
+> 边界, 留待后续。
+
 ---
 
 ## 6. 增量与对账
@@ -196,11 +214,35 @@ OpenAI 的 embedding 接口**不保证**返回顺序与请求顺序一致。不�
 
 ### 立碑, 不删除
 
-对账用一条 UPDATE 完成: `last_seen_run != job_id` 的都标成墓碑。
+对账把 `last_seen_run != job_id` 的都标成墓碑。
 
 不物理删除, 是因为文件"消失"在真实世界里经常只是临时的 —— 网盘没同步完、
 U 盘没插、目录被临时改名。立碑的语义是"这一轮没看见", 下一轮见到了就自动复活,
 不需要任何人工干预。
+
+### 立碑要同时撤向量, 并把 `pipe_state` 打回 `PENDING`
+
+`lifecycle_state` 只是 SQLite 里的一个标记, Zvec 并不知道它。光改状态的话,
+一篇已经从源端消失的文档照样能被检索命中 —— 而立碑对用户的承诺恰恰是它
+不该再出现在结果里。所以立碑要连带 `delete_document`。
+
+撤了向量就必须同时把 `pipe_state` 打回 `PENDING`, 否则复活那一步会出问题:
+
+```python
+# Document.needs_processing
+if lifecycle_state is not ACTIVE:      return False
+if pipe_state in (PENDING, FAILED):    return True
+return indexed_hash != content_hash
+```
+
+文件原样搬回来时内容哈希没变, 如果 `pipe_state` 还停在 `INDEXED`,
+`needs_processing` 会返回 `False` —— 文档回到 `ACTIVE` 了, 向量却已经被撤掉
+且永远不会重建。所以对账那条 UPDATE 同时写三样: `lifecycle_state`、
+`pipe_state`、以及 `Chunk.vector_state`。
+
+因为要逐篇调 sink 删向量, 对账拿不到一条纯 UPDATE 就完事的便利 —— 得先
+`SELECT` 出这一轮没见到的 uri 列表, 计数也改用 `len(doomed)` 而不是
+`rowcount`。
 
 ---
 

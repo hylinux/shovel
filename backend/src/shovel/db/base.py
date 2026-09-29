@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import enum
 import json
 import time
 import uuid
+from typing import Any
 
 import sqlalchemy as sa
 from sqlalchemy import Dialect, MetaData
@@ -99,7 +101,7 @@ def memory_vector_id(memory_kind: str, memory_id: str, rev: int = 1) -> str:
 # --------------------------------------------------------------------------- #
 # custom types
 # --------------------------------------------------------------------------- #
-class JSONEncoded(TypeDecorator):
+class JSONEncoded(TypeDecorator[Any]):
     """A JSON value stored in a TEXT column.
 
     Subclasses override :meth:`empty_value` so a NULL column round-trips to
@@ -156,7 +158,7 @@ class JSONDict(JSONEncoded):
         return {}
 
 
-def Enum(enum_cls, **kw) -> sa.Enum:
+def Enum(enum_cls: type[enum.Enum], **kw: Any) -> sa.Enum:
     """Non-native enum -> ``VARCHAR + CHECK (col IN (...))`` on SQLite."""
     return sa.Enum(
         enum_cls,

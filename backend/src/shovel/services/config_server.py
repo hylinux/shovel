@@ -11,7 +11,7 @@ from shovel.config.settings import AppSettings
 
 class ShovelContext:
 
-    def __init__(self):
+    def __init__(self) -> None:
         """
         根据操作系统读出默认的用户Profile路径
         """

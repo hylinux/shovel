@@ -6,7 +6,8 @@
 #---------------------------------------------------------
 from __future__ import annotations
 
-from collections.abc import AsyncIterator
+from collections.abc import AsyncGenerator
+from typing import Any
 
 from sqlalchemy import create_engine, event
 from sqlalchemy import inspect as sa_inspect
@@ -100,7 +101,7 @@ async def create_async_database_engine(
         url: str,
         *,
         echo: bool | None = False,      # config 可能注入 None
-) -> AsyncIterator[AsyncEngine]:
+) -> AsyncGenerator[AsyncEngine]:
     """
     创建并管理数据库 Engine 生命周期.
     """
@@ -148,7 +149,7 @@ def session_factory(engine: Engine) -> sessionmaker[Session]:
 
 
 
-def _apply_pragmas(dbapi_conn, _record) -> None:
+def _apply_pragmas(dbapi_conn: Any, _record: Any) -> None:
     cur = dbapi_conn.cursor()
     for key, value in PRAGMAS.items():
         cur.execute(f"PRAGMA {key}={value}")

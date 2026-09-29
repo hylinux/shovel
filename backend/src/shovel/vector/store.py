@@ -6,8 +6,10 @@
 #---------------------------------------------------------------------
 from __future__ import annotations
 
+import contextlib
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 import zvec
 from zvec import Collection, CollectionSchema
@@ -46,7 +48,7 @@ def init_zvec_runtime(
     if _runtime_ready:
         return
 
-    kwargs: dict = {}
+    kwargs: dict[str, Any] = {}
 
     if log_dir is not None:
         path = Path(log_dir)
@@ -58,11 +60,9 @@ def init_zvec_runtime(
     if log_level is not None:
         kwargs["log_level"] = log_level
 
-    try:
+    # 同一进程里已经 init 过(例如被 run 命令先初始化), 不是错误
+    with contextlib.suppress(RuntimeError):
         zvec.init(**kwargs)
-    except RuntimeError:
-        # 同一进程里已经 init 过(例如被 run 命令先初始化), 不是错误
-        pass
 
     _runtime_ready = True
 

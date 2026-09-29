@@ -9,6 +9,7 @@ from __future__ import annotations
 from collections.abc import AsyncIterator
 
 from sqlalchemy import create_engine, event
+from sqlalchemy import inspect as sa_inspect
 from sqlalchemy.engine import Engine
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
@@ -17,6 +18,8 @@ from sqlalchemy.ext.asyncio import (
     create_async_engine,
 )
 from sqlalchemy.orm import Session, sessionmaker
+
+from shovel.db.base import Base
 
 #: Per-connection pragmas. journal_mode is persistent (stored in the file
 #: header); the rest must be re-applied on every connection.
@@ -55,6 +58,42 @@ def create_database_engine(url: str,
 
 
 
+
+
+def to_sync_url(url: str) -> str:
+    """把异步 URL 降级成同步 URL。
+
+    运行期用 aiosqlite; 但建表是一次性的启动动作, 没有并发,
+    用同步 engine 可以让 CLI 不必为了一句 create_all 去开事件循环。
+    """
+
+    return url.replace("+aiosqlite", "", 1)
+
+
+def init_database(
+        url: str,
+        *,
+        echo: bool | None = False,
+) -> list[str]:
+    """建好(或补全)所有表, 返回本次实际新建的表名。
+
+    幂等: ``create_all`` 带 ``checkfirst``, 已存在的表不会被动。
+    这里不做 schema 迁移 —— 列变更由 SchemaMigration 那条线负责。
+    """
+
+    # 导入即注册: 没有这一行, metadata 里可能一张表都没有
+    from shovel.db import model  # noqa: F401
+
+    engine = create_database_engine(to_sync_url(url), echo=echo)
+
+    try:
+        before = set(sa_inspect(engine).get_table_names())
+        Base.metadata.create_all(engine)
+        after = set(sa_inspect(engine).get_table_names())
+    finally:
+        engine.dispose()
+
+    return sorted(after - before)
 
 
 async def create_async_database_engine(

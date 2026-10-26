@@ -28,7 +28,9 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+import asyncio
+import threading
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from typing import Any, Protocol
 
@@ -103,27 +105,73 @@ class ZvecChunkSink:
 
     def __init__(self, collection: Any) -> None:
         self._collection = collection
+        self._io_lock = threading.RLock()
+
+    async def _io[T](self, action: Callable[[], T]) -> T:
+        def locked() -> T:
+            with self._io_lock:
+                return action()
+
+        task = asyncio.create_task(asyncio.to_thread(locked))
+        try:
+            return await asyncio.shield(task)
+        except asyncio.CancelledError:
+            # A cancelled coroutine must not leave native I/O racing collection.close().
+            await task
+            raise
 
     async def upsert(self, records: Sequence[VectorRecord]) -> int:
         if not records:
             return 0
 
-        import asyncio
-
         docs = [self._to_doc(record) for record in records]
 
+        def write() -> None:
+            result = self._collection.upsert(docs)
+            _ensure_ok(result, f"写入 {len(docs)} 条向量")
+            self._collection.flush()
+
         try:
-            result = await asyncio.to_thread(self._collection.upsert, docs)
             # flush 之后才算真的落盘。不 flush 的话, 进程正常退出时这批
             # 向量可能还在内存里, 而 SQLite 那边已经标成 indexed —— 得到
             # 一个"标着已索引却搜不到"的状态, 且没有任何自动发现途径。
-            await asyncio.to_thread(self._collection.flush)
+            await self._io(write)
         except Exception as exc:
             raise VectorSinkError(f"写入 {len(docs)} 条向量失败: {exc}") from exc
 
-        _ensure_ok(result, f"写入 {len(docs)} 条向量")
-
         return len(docs)
+
+    async def search(
+        self,
+        vector: list[float],
+        *,
+        resource_ids: Sequence[str],
+        model_version: str,
+        limit: int,
+    ) -> list[tuple[str, float]]:
+        if not resource_ids:
+            return []
+        from zvec import Query
+
+        identifiers = ", ".join(f'"{_escape(item)}"' for item in resource_ids)
+        expression = (
+            f'resource_id in ({identifiers}) and granularity = "chunk" '
+            f'and model_version = "{_escape(model_version)}"'
+        )
+
+        def query() -> list[tuple[str, float]]:
+            rows = self._collection.query(
+                queries=Query(field_name=DENSE_VECTOR, vector=vector),
+                topk=limit,
+                filter=expression,
+                output_fields=["resource_id"],
+            )
+            return [(str(row.id), float(row.score or 0)) for row in rows]
+
+        try:
+            return await self._io(query)
+        except Exception as exc:
+            raise VectorSinkError(f"检索知识向量失败: {exc}") from exc
 
     async def delete_document(self, resource_id: str, doc_uri: str) -> int:
         # 比较符是单个 ``=`` (SQL 风格), 不是 ``==``。写成 ``==`` 会被
@@ -137,25 +185,25 @@ class ZvecChunkSink:
         return await self._delete(f'resource_id = "{_escape(resource_id)}"')
 
     async def aclose(self) -> None:
-        import asyncio
-
         if self._collection is None:
             return
 
         collection, self._collection = self._collection, None
-        await asyncio.to_thread(collection.close)
+        await self._io(collection.close)
 
     # ----------------------------------------------------------------- #
     # 内部
     # ----------------------------------------------------------------- #
     async def _delete(self, expression: str) -> int:
-        import asyncio
-
-        try:
+        def remove() -> None:
             # 注意是 delete_by_filter 而不是 delete —— 后者按 id 删。
             # 传错的话表达式会被当成一个 id, 于是"什么都没删掉"且不报错。
-            await asyncio.to_thread(self._collection.delete_by_filter, expression)
-            await asyncio.to_thread(self._collection.flush)
+            result = self._collection.delete_by_filter(expression)
+            _ensure_ok(result, f"按条件删除向量 ({expression})")
+            self._collection.flush()
+
+        try:
+            await self._io(remove)
         except Exception as exc:
             raise VectorSinkError(f"按条件删除向量失败 ({expression}): {exc}") from exc
 
@@ -227,7 +275,7 @@ def _escape(value: str) -> str:
     return value.replace("\\", "\\\\").replace('"', '\\"')
 
 
-def open_chunk_sink(knowledge_path: str) -> ChunkVectorSink:
+def open_chunk_sink(knowledge_path: str) -> ZvecChunkSink:
     """打开知识库 collection 并包成一个 sink。
 
     collection 不存在时**不**自动创建: 建 collection 需要知道维度和

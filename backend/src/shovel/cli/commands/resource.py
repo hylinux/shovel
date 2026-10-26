@@ -37,6 +37,7 @@ from shovel.db.database import (
 from shovel.db.model.config import Resource
 from shovel.domain.enums import ResourceState, Sensitivity
 from shovel.exceptions.resource import InvalidConnectorConfigError
+from shovel.runtime.client import execute_command
 from shovel.services import connector_registry
 from shovel.services.resource_service import ResourceDraft, ResourceService
 
@@ -304,12 +305,24 @@ def add(
         identity_ref=identity_ref,
     )
 
-    resource = _run(lambda svc: svc.create(draft))
+    settings = load_settings(cli_context.get_default_config_file())
+    receipt = asyncio.run(execute_command(
+        settings, "resource.create",
+        {
+            "name": draft.name, "connector_kind": draft.connector_kind, "config": draft.config,
+            "description": draft.description, "sensitivity": draft.sensitivity,
+            "authority": draft.authority, "identity_ref": draft.identity_ref, "verify": verify_now,
+        },
+        secret=draft.secret,
+    ))
+    resource = _run(lambda svc: svc.get(str(receipt["resource_id"])))
 
     console.success(f"资源 '{resource.name}' 已创建 (id={resource.id}, 状态={resource.state.value})。")
 
     if verify_now:
-        result = _run(lambda svc: svc.verify(resource.id))
+        from shovel.services.connector_base import VerifyResult
+
+        result = VerifyResult(**receipt["result"]["verification"])
         _report_verify(resource.name, result)
     else:
         console.info(f"尚未校验。运行 `shovel resource verify {resource.name}` 来确认它是通的。")
@@ -381,7 +394,10 @@ def verify(
     """校验一个资源的连通性, 并据此更新它的状态。"""
 
     with console.status(f"[cyan]正在校验 {ref} ……"):
-        result = _run(lambda svc: svc.verify(ref))
+        from shovel.services.connector_base import VerifyResult
+
+        receipt = _execute_resource("verify", ref)
+        result = VerifyResult(**receipt["result"])
 
     _report_verify(ref, result)
 
@@ -397,7 +413,8 @@ def pause(
 ) -> None:
     """暂停一个资源, 让调度器不再扫描它。"""
 
-    resource = _run(lambda svc: svc.pause(ref, reason))
+    _execute_resource("pause", ref, {"reason": reason})
+    resource = _run(lambda svc: svc.resolve(ref))
     console.success(f"资源 '{resource.name}' 已暂停。")
 
 
@@ -408,7 +425,8 @@ def resume(
 ) -> None:
     """恢复一个被暂停的资源。"""
 
-    resource = _run(lambda svc: svc.resume(ref))
+    _execute_resource("resume", ref)
+    resource = _run(lambda svc: svc.resolve(ref))
     console.success(f"资源 '{resource.name}' 已恢复, 状态={resource.state.value}。")
 
 
@@ -433,7 +451,8 @@ def revoke(
             abort=True,
         )
 
-    resource = _run(lambda svc: svc.revoke(ref, reason))
+    _execute_resource("revoke", ref, {"reason": reason})
+    resource = _run(lambda svc: svc.resolve(ref))
     console.success(f"资源 '{resource.name}' 已吊销, 凭据已销毁。")
     console.info("已索引的文档仍然保留。要一并清除请使用 `shovel resource remove`。")
 
@@ -455,8 +474,15 @@ def remove(
             abort=True,
         )
 
-    resource_id = _run(lambda svc: svc.delete(ref))
-    console.success(f"资源已删除 (id={resource_id})。")
+    receipt = _execute_resource("delete", ref)
+    console.success(f"资源记录已删除 (id={receipt['resource_id']}),向量清理完成。")
+
+
+def _execute_resource(
+    action: str, ref: str, payload: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    settings = load_settings(cli_context.get_default_config_file())
+    return asyncio.run(execute_command(settings, f"resource.{action}", payload, ref=ref))
 
 
 # --------------------------------------------------------------------------- #

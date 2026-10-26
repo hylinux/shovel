@@ -43,9 +43,9 @@ from shovel.db.database import (
 from shovel.db.model.config import Resource
 from shovel.db.model.execution import Job, JobEvent
 from shovel.domain.enums import JobState, ScanMode
-from shovel.pipeline.embedder import build_embedder
-from shovel.pipeline.scan_service import ScanOutcome, ScanService
-from shovel.pipeline.sink import NullVectorSink, open_chunk_sink
+from shovel.pipeline.scan_service import ScanOutcome
+from shovel.runtime.client import execute_command
+from shovel.runtime.schemas import ScanInput
 from shovel.services.resource_service import ResourceService
 
 app = typer.Typer(
@@ -118,43 +118,51 @@ def run(
         bool,
         typer.Option("--embed/--no-embed", help="是否生成向量。关掉时 chunk 停在 pending。"),
     ] = True,
+    force: Annotated[
+        bool,
+        typer.Option("--force", help="忽略已完成标记, 重新生成本轮发现文档的索引。"),
+    ] = False,
 ) -> None:
     """扫描一个资源。"""
 
-    async def go(sessions: Any, settings: AppSettings) -> ScanOutcome:
-        embedder = build_embedder(
-            settings.embedding,
-            expected_dimension=settings.zvec.dim,
-            enabled=embed,
-        )
-
-        # 不 embedding 就没有向量可写, 此时去打开 collection 只会在
-        # 用户还没 `shovel init` 过的机器上凭空失败一次。
-        sink = open_chunk_sink(settings.zvec.knowledge_path) if embed else NullVectorSink()
-
-        service = ScanService(
-            sessions,
-            ResourceService(sessions),
-            embedder=embedder,
-            sink=sink,
-        )
-
-        try:
-            return await service.scan(
-                ref,
-                mode=mode,
-                profile_name=profile,
-                target_ids=tuple(target or ()),
-                limit=limit,
-            )
-        finally:
-            await embedder.aclose()
-            await sink.aclose()
-
+    settings = load_settings(cli_context.get_default_config_file())
+    request = ScanInput(
+        mode=mode, profile_name=profile, target_ids=target or [], limit=limit, embed=embed, force=force,
+    )
     with console.status(f"[cyan]正在扫描 {ref} ……"):
-        outcome = _run(go)
+        receipt = asyncio.run(execute_command(
+            settings, "scan", request.model_dump(mode="json"), ref=ref,
+        ))
+    result = receipt["result"]
+    if not result:
+        console.warning(f"扫描已取消 (job={receipt['job_id']})。")
+        return
+    from shovel.domain.enums import ErrorKind
+
+    result["state"] = JobState(result["state"])
+    result["scan_mode"] = ScanMode(result["scan_mode"])
+    if result.get("error_kind"):
+        result["error_kind"] = ErrorKind(result["error_kind"])
+    outcome = ScanOutcome(**result)
 
     _report(outcome)
+    if not embed:
+        console.info("未生成向量; 后续普通扫描会补齐。向量删除暂存队列, 可用 `shovel scan cleanup` 执行。")
+
+
+@app.command("cleanup")
+@command_handler()
+def cleanup(
+    resource_id: Annotated[
+        str | None,
+        typer.Option("--resource-id", help="只清理这个资源 id, 包括已删除的资源。"),
+    ] = None,
+) -> None:
+    """重试待处理的知识库向量删除, 无需配置 embedding。"""
+    settings = load_settings(cli_context.get_default_config_file())
+    receipt = asyncio.run(execute_command(settings, "cleanup", {"resource_id": resource_id}))
+    completed = receipt["result"]["completed"]
+    console.success(f"已完成 {completed} 条向量清理任务。")
 
 
 @app.command("list")

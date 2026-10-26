@@ -1,7 +1,7 @@
 """Domain C — content: document, chunk, document_derived, blob.
 
-The ``chunk_fts`` FTS5 virtual table cannot be expressed in the ORM; it lives in
-``db/ddl_extras.py`` together with the views.
+The ``chunk_search`` FTS5 virtual table and its triggers are managed by
+``db/migrations.py`` rather than the ORM.
 """
 
 from __future__ import annotations
@@ -114,7 +114,7 @@ class Document(Base):
     def needs_processing(self) -> bool:
         if self.lifecycle_state != DocumentLifecycleState.ACTIVE:
             return False
-        if self.pipe_state in (DocumentPipeState.PENDING, DocumentPipeState.FAILED):
+        if self.pipe_state not in (DocumentPipeState.INDEXED, DocumentPipeState.SKIPPED):
             return True
         return self.indexed_hash != self.content_hash
 

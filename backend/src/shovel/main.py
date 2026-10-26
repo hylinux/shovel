@@ -6,24 +6,19 @@
 #---------------------------------------------------------------
 from __future__ import annotations
 
-import structlog
+from pathlib import Path
 
 from shovel.config.settings import load_settings
-from shovel.container import AppContainer
+from shovel.runtime.hosting import build_host
 
 
 async def amain(config_file_path: str) -> None:
-    """装配 DI 容器。
-
-    host 的接入还没落地 —— 目前真正的运行入口是 ``shovel run``
-    (见 ``cli/commands/run.py``), 这里只保留容器装配这一步。
-    """
-
-    log = structlog.get_logger()
-
+    """Run the hosted backend; attach exported assets when frontend_path is set."""
     settings = load_settings(config_file_path)
-
-    container = AppContainer()
-    container.config.from_dict(settings.model_dump(mode="json"))
-
-    log.info("shovel.container_ready", config_file_path=config_file_path)
+    host = build_host(
+        settings, development=False,
+        frontend=Path(settings.frontend_path) if settings.frontend_path else None,
+    )
+    await host.run_async()
+    if host.exit_code:
+        raise SystemExit(host.exit_code)

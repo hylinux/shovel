@@ -17,21 +17,25 @@ from typing import Any
 
 import pytest
 import pytest_asyncio
-from sqlalchemy import event, select
+from sqlalchemy import event, select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from shovel.db.base import Base
 from shovel.db.model.content import Chunk, Document
 from shovel.db.model.execution import Job
+from shovel.db.model.retrieval import DeletionOutbox
 from shovel.domain.enums import (
     DocumentLifecycleState,
     DocumentPipeState,
+    ErrorKind,
     Granularity,
     JobState,
     ScanMode,
     VectorState,
 )
-from shovel.exceptions.pipeline import ResourceNotScannableError
+from shovel.exceptions.pipeline import ResourceNotScannableError, VectorSinkError
+from shovel.pipeline.cleanup import IndexCleanupService
+from shovel.pipeline.embedder import NullEmbedder
 from shovel.pipeline.scan_service import ScanService
 from shovel.pipeline.sink import VectorRecord
 from shovel.services.credentials import InMemoryCredentialStore
@@ -84,7 +88,10 @@ class FakeSink:
 
     async def delete_document(self, resource_id: str, doc_uri: str) -> int:
         self.deletes.append(doc_uri)
-        stale = [k for k, v in self.records.items() if v.doc_uri == doc_uri]
+        stale = [
+            k for k, v in self.records.items()
+            if v.doc_uri == doc_uri and v.resource_id == resource_id
+        ]
 
         for key in stale:
             del self.records[key]
@@ -93,8 +100,10 @@ class FakeSink:
 
     async def delete_resource(self, resource_id: str) -> int:
         self.deletes.append(resource_id)
-
-        return 0
+        stale = [k for k, v in self.records.items() if v.resource_id == resource_id]
+        for key in stale:
+            del self.records[key]
+        return len(stale)
 
     async def aclose(self) -> None:
         return None
@@ -564,3 +573,358 @@ async def test_limit_truncates_processing_but_not_discovery(
 
     assert len(docs) >= 3
     assert any(d.pipe_state is DocumentPipeState.PENDING for d in docs)
+
+
+async def test_no_embed_is_completed_by_an_ordinary_incremental_scan(
+    sessions: async_sessionmaker[AsyncSession],
+    resources: ResourceService,
+    service: ScanService,
+    resource_id: str,
+    sink: FakeSink,
+) -> None:
+    text_only = ScanService(sessions, resources, embedder=NullEmbedder())
+    first = await text_only.scan(resource_id)
+    assert first.ok
+    assert first.vectors_written == 0
+    async with sessions() as session:
+        docs = (
+            await session.scalars(
+                select(Document).where(Document.lifecycle_state == DocumentLifecycleState.ACTIVE)
+            )
+        ).all()
+        assert all(d.pipe_state is DocumentPipeState.CHUNKED for d in docs)
+        assert all(d.indexed_hash is None for d in docs)
+
+    recovered = await service.scan(resource_id)
+    assert recovered.ok
+    assert recovered.parsed == 2
+    assert recovered.vectors_written == len(sink.records) > 0
+
+
+async def test_legacy_indexed_documents_with_pending_vectors_are_retried(
+    service: ScanService,
+    sessions: async_sessionmaker[AsyncSession],
+    resource_id: str,
+) -> None:
+    await service.scan(resource_id)
+    async with sessions() as session:
+        await session.execute(
+            update(Chunk)
+            .where(Chunk.granularity == Granularity.CHUNK)
+            .values(vector_state=VectorState.PENDING)
+        )
+        await session.commit()
+
+    result = await service.scan(resource_id)
+    assert result.ok
+    assert result.parsed == 2
+    async with sessions() as session:
+        pending = (
+            await session.scalars(select(Chunk).where(Chunk.vector_state == VectorState.PENDING))
+        ).all()
+    assert pending == []
+
+
+async def test_limit_does_not_strand_older_pending_documents(
+    service: ScanService,
+    resource_id: str,
+    corpus: Path,
+) -> None:
+    import os
+
+    os.utime(corpus / "notes.md", (1000, 1000))
+    os.utime(corpus / "readme.txt", (2000, 2000))
+    first = await service.scan(resource_id, limit=1)
+    assert first.parsed == 1
+    second = await service.scan(resource_id)
+    assert second.ok
+    assert second.parsed == 1
+    assert first.vectors_written > 0
+    assert second.vectors_written > 0
+
+
+@pytest.mark.parametrize("write_before_failure", [False, True])
+async def test_vector_failure_does_not_acknowledge_document_completion(
+    service: ScanService,
+    sessions: async_sessionmaker[AsyncSession],
+    resource_id: str,
+    sink: FakeSink,
+    monkeypatch: pytest.MonkeyPatch,
+    write_before_failure: bool,
+) -> None:
+    original = sink.upsert
+
+    async def fail(records: Sequence[VectorRecord]) -> int:
+        if write_before_failure:
+            await original(records)
+        raise VectorSinkError("interrupted vector write")
+
+    monkeypatch.setattr(sink, "upsert", fail)
+    first = await service.scan(resource_id)
+    assert first.state is JobState.FAILED
+    async with sessions() as session:
+        unfinished = (
+            await session.scalars(select(Document).where(Document.pipe_state == DocumentPipeState.CHUNKED))
+        ).all()
+        assert len(unfinished) == 1
+        assert unfinished[0].indexed_hash is None
+
+    monkeypatch.setattr(sink, "upsert", original)
+    second = await service.scan(resource_id)
+    assert second.ok
+    assert second.parsed == 2
+    third = await service.scan(resource_id, mode=ScanMode.FULL_SWEEP)
+    assert third.parsed == 0
+    async with sessions() as session:
+        live = set(await session.scalars(select(Chunk.id).where(Chunk.granularity == Granularity.CHUNK)))
+    assert set(sink.records) == live
+
+
+async def test_short_vector_write_is_not_reported_as_success(
+    service: ScanService,
+    resource_id: str,
+    sink: FakeSink,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def short_write(records: Sequence[VectorRecord]) -> int:
+        return 0
+
+    monkeypatch.setattr(sink, "upsert", short_write)
+    result = await service.scan(resource_id)
+    assert result.state is JobState.FAILED
+
+
+async def test_old_chunker_version_is_rebuilt_without_a_file_change(
+    service: ScanService,
+    sessions: async_sessionmaker[AsyncSession],
+    resource_id: str,
+) -> None:
+    from shovel.pipeline.chunker import CHUNKER_VERSION
+
+    await service.scan(resource_id)
+    async with sessions() as session:
+        await session.execute(
+            update(Document)
+            .where(Document.pipe_state == DocumentPipeState.INDEXED)
+            .values(chunker_version="legacy")
+        )
+        await session.commit()
+
+    result = await service.scan(resource_id)
+    assert result.ok
+    assert result.parsed == 2
+    async with sessions() as session:
+        versions = set(
+            await session.scalars(
+                select(Document.chunker_version).where(Document.pipe_state == DocumentPipeState.INDEXED)
+            )
+        )
+    assert versions == {CHUNKER_VERSION}
+
+
+async def test_embedding_model_change_rebuilds_unchanged_documents(
+    service: ScanService,
+    sessions: async_sessionmaker[AsyncSession],
+    resources: ResourceService,
+    resource_id: str,
+    sink: FakeSink,
+) -> None:
+    class NewEmbedder(FakeEmbedder):
+        @property
+        def model_version(self) -> str:
+            return "fake-embed@2"
+
+    await service.scan(resource_id)
+    changed = ScanService(sessions, resources, embedder=NewEmbedder(), sink=sink)
+    result = await changed.scan(resource_id)
+    assert result.ok
+    assert result.parsed == 2
+    assert all(r.model_version == "fake-embed@2" for r in sink.records.values())
+
+
+async def test_force_rebuild_repairs_a_lost_vector_index(
+    service: ScanService,
+    resource_id: str,
+    sink: FakeSink,
+) -> None:
+    await service.scan(resource_id)
+    sink.records.clear()
+    result = await service.scan(resource_id, force=True)
+    assert result.ok
+    assert result.parsed == 2
+    assert len(sink.records) > 0
+
+
+async def test_same_files_in_two_resources_have_distinct_chunks(
+    service: ScanService,
+    sessions: async_sessionmaker[AsyncSession],
+    resources: ResourceService,
+    resource_id: str,
+    corpus: Path,
+    sink: FakeSink,
+) -> None:
+    other = await resources.create(
+        ResourceDraft(
+            name="second-copy",
+            connector_kind="local_fs",
+            config={"root_path": str(corpus)},
+        )
+    )
+    await resources.verify(other.id)
+    assert (await service.scan(resource_id)).ok
+    original_ids = set(sink.records)
+    assert (await service.scan(other.id)).ok
+    other_ids = {r.id for r in sink.records.values() if r.resource_id == other.id}
+    assert original_ids.isdisjoint(other_ids)
+    assert original_ids <= set(sink.records)
+    async with sessions() as session:
+        ids = set(await session.scalars(select(Chunk.id).where(Chunk.granularity == Granularity.CHUNK)))
+    assert ids == set(sink.records)
+
+
+async def test_failed_tombstone_deletion_is_retried_by_next_scan(
+    service: ScanService,
+    sessions: async_sessionmaker[AsyncSession],
+    resource_id: str,
+    corpus: Path,
+    sink: FakeSink,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    await service.scan(resource_id)
+    original = sink.delete_document
+
+    async def fail(resource: str, uri: str) -> int:
+        raise VectorSinkError("deletion interrupted")
+
+    monkeypatch.setattr(sink, "delete_document", fail)
+    (corpus / "readme.txt").unlink()
+    result = await service.scan(resource_id, mode=ScanMode.FULL_SWEEP)
+    assert result.state is JobState.FAILED
+    async with sessions() as session:
+        intent = (await session.scalars(select(DeletionOutbox).where(DeletionOutbox.done_at.is_(None)))).one()
+        assert intent.attempts == 1
+        assert intent.last_error is not None
+
+    monkeypatch.setattr(sink, "delete_document", original)
+    assert (await service.scan(resource_id)).ok
+    assert not any(r.doc_uri.endswith("readme.txt") for r in sink.records.values())
+    async with sessions() as session:
+        pending = list(await session.scalars(select(DeletionOutbox).where(DeletionOutbox.done_at.is_(None))))
+    assert pending == []
+
+
+async def test_no_embed_tombstones_keep_a_real_cleanup_intent(
+    service: ScanService,
+    sessions: async_sessionmaker[AsyncSession],
+    resources: ResourceService,
+    resource_id: str,
+    corpus: Path,
+    sink: FakeSink,
+) -> None:
+    await service.scan(resource_id)
+    (corpus / "readme.txt").unlink()
+    text_only = ScanService(sessions, resources, embedder=NullEmbedder())
+    result = await text_only.scan(resource_id, mode=ScanMode.FULL_SWEEP)
+    assert result.ok
+    assert result.tombstoned == 1
+    assert any(r.doc_uri.endswith("readme.txt") for r in sink.records.values())
+    await IndexCleanupService(sessions, sink).drain()
+    assert not any(r.doc_uri.endswith("readme.txt") for r in sink.records.values())
+
+
+async def test_resource_deletion_survives_cleanup_failure_and_restart(
+    service: ScanService,
+    sessions: async_sessionmaker[AsyncSession],
+    resources: ResourceService,
+    resource_id: str,
+    sink: FakeSink,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    await service.scan(resource_id)
+    assert await resources.delete(resource_id) == resource_id
+    original = sink.delete_resource
+
+    async def fail(resource: str) -> int:
+        raise VectorSinkError("resource deletion interrupted")
+
+    monkeypatch.setattr(sink, "delete_resource", fail)
+    with pytest.raises(VectorSinkError):
+        await IndexCleanupService(sessions, sink).drain()
+    async with sessions() as session:
+        intent = (await session.scalars(select(DeletionOutbox).where(DeletionOutbox.done_at.is_(None)))).one()
+        assert intent.resource_id == resource_id
+        assert intent.attempts == 1
+        assert intent.last_error is not None
+        assert list(await session.scalars(select(Document))) == []
+
+    monkeypatch.setattr(sink, "delete_resource", original)
+    assert await IndexCleanupService(sessions, sink).drain() == 1
+    assert sink.records == {}
+    assert await IndexCleanupService(sessions, sink).drain() == 0
+
+
+async def test_unexpected_failure_records_failed_job(
+    service: ScanService,
+    sessions: async_sessionmaker[AsyncSession],
+    resource_id: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def fail(**kwargs: Any) -> bool:
+        raise RuntimeError("unexpected failure")
+
+    monkeypatch.setattr(service, "_process", fail)
+    with pytest.raises(RuntimeError, match="unexpected failure"):
+        await service.scan(resource_id)
+    async with sessions() as session:
+        job = (await session.scalars(select(Job))).one()
+    assert job.state is JobState.FAILED
+    assert job.error_kind is ErrorKind.INTERNAL
+    assert job.finished_at is not None
+
+
+async def test_interrupted_write_and_reindex_with_real_vectors(
+    sessions: async_sessionmaker[AsyncSession],
+    resources: ResourceService,
+    resource_id: str,
+    corpus: Path,
+    embedder: FakeEmbedder,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import zvec
+
+    from shovel.pipeline.sink import ZvecChunkSink
+    from shovel.vector.schema import chunk_collection_schema
+    from shovel.vector.store import init_zvec_runtime
+
+    init_zvec_runtime()
+    path = corpus / "node_modules" / "index"
+    path.parent.mkdir()
+    collection = zvec.create_and_open(str(path), chunk_collection_schema(dim=_DIM))
+    sink = ZvecChunkSink(collection)
+    service = ScanService(sessions, resources, embedder=embedder, sink=sink)
+    original = sink.upsert
+
+    async def interrupted(records: Sequence[VectorRecord]) -> int:
+        await original(records)
+        raise VectorSinkError("write landed, completion was interrupted")
+
+    try:
+        monkeypatch.setattr(sink, "upsert", interrupted)
+        assert (await service.scan(resource_id)).state is JobState.FAILED
+        monkeypatch.setattr(sink, "upsert", original)
+        assert (await service.scan(resource_id)).ok
+        async with sessions() as session:
+            before = set(
+                await session.scalars(select(Chunk.id).where(Chunk.granularity == Granularity.CHUNK))
+            )
+        assert set(collection.fetch(list(before))) == before
+
+        (corpus / "readme.txt").write_text("replacement text", encoding="utf-8")
+        assert (await service.scan(resource_id, mode=ScanMode.FULL_SWEEP)).ok
+        async with sessions() as session:
+            after = set(await session.scalars(select(Chunk.id).where(Chunk.granularity == Granularity.CHUNK)))
+        assert int(collection.stats.doc_count) == len(after)
+        assert set(collection.fetch(list(after))) == after
+        assert collection.fetch(list(before - after)) == {}
+    finally:
+        await sink.aclose()

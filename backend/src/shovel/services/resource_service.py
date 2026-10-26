@@ -16,7 +16,7 @@ state_machine    哪些状态能转到哪些      不认识任何 IO
 ResourceService  把上面三个缝起来        <- 就是本模块
 ```
 
-把缝合逻辑收在一处, 换来的是: CLI、未来的 HTTP API、以及扫描调度器
+把缝合逻辑收在一处, 换来的是: CLI、HTTP API、以及扫描调度器
 调的是同一套方法, 因而不可能出现"CLI 改状态会写 state_reason, 而 API
 不会"这种分叉。
 """
@@ -29,12 +29,22 @@ from typing import Any
 
 from pydantic import BaseModel, SecretStr, ValidationError
 from sqlalchemy import delete as sa_delete
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from shovel.db.base import now_ts
 from shovel.db.model.config import Resource, ScanProfile
-from shovel.domain.enums import ResourceState, ScanMode, Sensitivity
+from shovel.db.model.content import Chunk, Document
+from shovel.db.model.retrieval import DeletionOutbox
+from shovel.domain.enums import (
+    DeletionScope,
+    DocumentLifecycleState,
+    DocumentPipeState,
+    ResourceState,
+    ScanMode,
+    Sensitivity,
+    VectorState,
+)
 from shovel.domain.resource_state import (
     allowed_targets,
     assert_transition,
@@ -160,7 +170,7 @@ class ResourceService:
     # ----------------------------------------------------------------- #
     # 创建与修改
     # ----------------------------------------------------------------- #
-    async def create(self, draft: ResourceDraft) -> Resource:
+    async def create(self, draft: ResourceDraft, *, resource_id: str | None = None) -> Resource:
         """新建一个资源, 初始状态 DRAFT。
 
         为什么新建出来是 DRAFT 而不是直接 ACTIVE: 创建只证明"配置的形状
@@ -188,6 +198,8 @@ class ResourceService:
             ),
             description=draft.description or spec.description,
         )
+        if resource_id is not None:
+            resource.id = resource_id
 
         async with self._sessions() as session:
             if await self._find_by_name(session, draft.name) is not None:
@@ -246,7 +258,28 @@ class ResourceService:
                     _values(allowed_targets(row.state)),
                 )
 
-            row.config = config_model.model_dump(mode="json")
+            replacement = config_model.model_dump(mode="json")
+            if row.config != replacement:
+                # Old source scope must not reappear after verifying the new connection.
+                previous = await session.scalar(
+                    select(Document.uri).where(Document.resource_id == row.id).limit(1)
+                )
+                if previous is not None:
+                    await session.execute(
+                        update(Document).where(Document.resource_id == row.id).values(
+                            lifecycle_state=DocumentLifecycleState.TOMBSTONED,
+                            tombstoned_at=now_ts(),
+                            pipe_state=DocumentPipeState.PENDING,
+                            skip_reason="连接配置已修改, 等待在新范围内重新发现。",
+                        )
+                    )
+                    await session.execute(
+                        update(Chunk).where(Chunk.resource_id == row.id).values(
+                            vector_state=VectorState.PENDING,
+                        )
+                    )
+                    session.add(DeletionOutbox(scope=DeletionScope.RESOURCE, resource_id=row.id))
+            row.config = replacement
 
             if row.state is not ResourceState.DRAFT:
                 assert_transition(
@@ -400,7 +433,7 @@ class ResourceService:
         ``db.database.PRAGMAS`` 保证 (SQLite 默认是 OFF, 忘了开的话级联
         会静默失效, 只留下一堆孤儿行)。
 
-        返回被删资源的 id, 方便调用方把它送进 DeletionOutbox 去清向量。
+        删除意图与资源删除在同一事务提交, 向量清理由调用方立即执行或稍后重试。
         """
 
         resource = await self.resolve(ref)
@@ -408,6 +441,10 @@ class ResourceService:
         async with self._sessions() as session:
             row = await self._load(session, resource.id)
             identity_ref = row.identity_ref
+            session.add(DeletionOutbox(
+                scope=DeletionScope.RESOURCE,
+                resource_id=row.id,
+            ))
 
             # 用 Core DELETE 而不是 session.delete(row)。
             #

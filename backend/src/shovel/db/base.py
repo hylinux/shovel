@@ -47,7 +47,7 @@ def new_id(prefix: str) -> str:
 
 
 def chunk_vector_id(doc_uri: str, content_hash: str, chunker_version: str,
-                    granularity: str, index: int) -> str:
+                    granularity: str, index: int, *, resource_id: str = "") -> str:
     """根据Chunk的内容生成唯一的ID
 
     根据该规则生成的向量id, 无论是在SQLite里, 还是在Zvec里，他们的ID都是相同的。
@@ -77,6 +77,8 @@ def chunk_vector_id(doc_uri: str, content_hash: str, chunker_version: str,
     不需要从映射表里恢复。
     """
     key = f"{doc_uri}|{content_hash}|{chunker_version}|{granularity}|{index}"
+    if resource_id:
+        key = f"resource:{len(resource_id)}:{resource_id}|{key}"
     return str(uuid.uuid5(SHOVEL_NAMESPACE, key))
 
 

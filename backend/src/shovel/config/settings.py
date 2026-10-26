@@ -141,7 +141,9 @@ class AppSettings(BaseSettings):
     http_host: str = "127.0.0.1"
     dev_http_host: str = "127.0.0.1"
     dev_http_port: int = 9999
+    dev_frontend_port: int = Field(default=3000, ge=1, le=65535)
     http_port: int = 8080
+    frontend_path: str = ""
     log_level: str = "INFO"
 
     # default_factory: 推迟到实例化时才构造, 避免导入期副作用

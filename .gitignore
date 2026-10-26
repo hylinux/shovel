@@ -34,9 +34,12 @@ Thumbs.db
 # Frontend
 frontend/node_modules/
 frontend/dist/
+backend/src/shovel/static/
+.impeccable/hook.cache.json
 
 # Local Config
 data/
 logs/
 runtime/
+!backend/src/shovel/runtime/
 models/

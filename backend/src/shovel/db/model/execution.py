@@ -81,11 +81,13 @@ class Job(Base):
 
     @property
     def progress(self) -> float:
-        """0.0-1.0. Meaningless until discovery completes -- which is exactly why
-        discovery is a separate, up-front stage."""
+        """Completed work fraction, with successful terminal jobs at 1.0."""
+        if self.state in (JobState.SUCCEEDED, JobState.COMPLETED_WITH_ERRORS):
+            return 1.0
         if not self.is_discovery_complete or self.discovered == 0:
             return 0.0
-        done = self.embedded + self.skipped_unchanged + self.failed_docs
+        processed = self.chunked if self.stats.get("embedding_enabled") is False else self.embedded
+        done = processed + self.skipped_unchanged + self.failed_docs
         return min(1.0, done / self.discovered)
 
     @property

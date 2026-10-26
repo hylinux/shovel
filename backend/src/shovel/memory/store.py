@@ -16,6 +16,7 @@
 #---------------------------------------------------------------------
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -41,6 +42,7 @@ def _require_mem0() -> Any:
     """
 
     try:
+        os.environ.setdefault("MEM0_TELEMETRY", "false")
         from mem0 import Memory
     except ImportError as e:
         raise MissingDependencyError(
@@ -67,6 +69,7 @@ def _require_qdrant_client() -> Any:
 
 def _require_mem0_qdrant() -> Any:
     try:
+        os.environ.setdefault("MEM0_TELEMETRY", "false")
         from mem0.vector_stores.qdrant import Qdrant
     except ImportError as e:
         raise MissingDependencyError(

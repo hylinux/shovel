@@ -8,6 +8,28 @@
 的 Linked Service: **不描述要搬什么, 只描述怎么连上**。要搬什么是 ScanProfile
 的事, 什么时候搬是 Schedule 的事。
 
+## Host 与 REST 入口
+
+`runtime/hosting.py` 将应用资源交给 Generic Host 管理, `RuntimeWorker`
+串行消费 SQLite 中的 `Operation`。Web 与 CLI 的新增、验证、更新、暂停、
+恢复、吊销、删除都经过同一队列, 不在 HTTP 请求中直接扫描文件。
+创建支持可选的首次扫描; 父操作与扫描操作分别保留结果, 扫描 Job ID
+在提交事务中生成, 重启不会再建一份作业。
+
+运行中的 Host 通过本机发现文件供 CLI 连接, CLI 校验工作区标识后走 REST。
+没有后台服务时, CLI 使用短生命周期的非 Web Host, 而不是另外实现一套写入。
+资源列表/详情等只读 CLI 仍直接读取 SQLite。数据库与向量目录都有跨进程锁;
+绕过这些入口直接调用底层 Service 的程序须自行遵守相同的单写者约束。
+
+REST 前缀为 `/api/v1`, 写操作返回 `202` 与操作凭据, 可查询
+`GET /operations/{id}`。完整路由见运行中后端的 `/docs` 和 README。
+创建/验证失败、向量清理失败会显式出现在操作状态中; 删除元数据不会
+级联删除自身的操作凭据。需要凭据的连接器使用 `identity_ref`,
+密钥通过 `POST /credentials` 写入系统 keyring, 不进入持久任务参数。
+连接配置实际变化时, 同一事务将旧文档标为墓碑并保存资源级向量删除意图。
+重新验证新目录不会使旧范围的知识重新可见; 新扫描不沿用旧文档的 mtime
+水位线, 即使新目录文件较旧也能重新发现。原始文件和历史对话不会被删除。
+
 ---
 
 ## 1. 一句话分工
@@ -41,7 +63,7 @@ stateDiagram-v2
     draft --> verifying: verify()
     verifying --> active: 连得上
     verifying --> degraded: 连不上
-    verifying --> draft: 校验进程被杀, 手工捞回来
+    verifying --> degraded: Host 恢复被中断的验证
     active --> degraded: 扫描时发现连不上了
     degraded --> active: 又连上了
     active --> paused: pause()
@@ -340,13 +362,15 @@ await session.commit()               # 再落库
 | | 凭据 | 资源行 | 已索引的文档 |
 |---|---|---|---|
 | `revoke()` | 销毁 | 保留(terminal) | 保留 |
-| `delete()` | 销毁 | 删除 | 由调用方清理 |
+| `delete()` | 销毁 | 删除 | SQLite 级联删除, 向量删除意图同事务持久化 |
 
 吊销的语义是"这个凭据不该再被 Shovel 持有了"。只改状态会让密钥继续躺在
 系统凭据库里, 而用户以为自己已经收回了授权。但吊销的是**访问权**, 不是
 已经索引过的知识。
 
-`delete()` 返回被删资源的 id, 方便调用方把它送进 DeletionOutbox 去清向量。
+`delete()` 自己把资源级清理意图写入 DeletionOutbox, 与资源删除在同一事务提交,
+返回被删资源的 id。CLI 随即尝试清理向量; 若失败, 记录已经删除但清理意图仍在,
+可用 `shovel scan cleanup --resource-id <id>` 重试, 不需要重建资源或配置 embedding。
 `scan_profile` / `schedule` 靠外键 `ON DELETE CASCADE` 跟着走 —— 前提是
 SQLite 的 `PRAGMA foreign_keys=ON` 真的生效(默认是 OFF, 忘了开的话级联会
 静默失效, 只留下一堆孤儿行)。
@@ -423,9 +447,7 @@ shovel resource remove notes      # 删除, 级联 profile / schedule
 
 * **只有 `local_fs` 一个真实连接器。** 本轮的目标是把协议跑通, 让后来的
   连接器有个能照抄的参考实现, 而不是堆数量。
-* `discover()` 的签名已经定死, 但**没有消费者** —— 扫描 pipeline 是下一个
-  模块的事。这是刻意的: 让扫描模块开工时接口已经稳定, 而不是一边写 pipeline
-  一边改协议。
+* `discover()` 已由扫描 pipeline 消费, 见 `Documents/scan_pipeline.md`。
 * `ScanProfile` / `Schedule` 的完整 CRUD 留给调度模块。本轮只有
   `_build_default_profile`。
 * `WATCH` 能力没有任何实现。

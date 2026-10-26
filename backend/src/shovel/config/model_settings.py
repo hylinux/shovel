@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from enum import StrEnum
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 
 class ModelProviderType(StrEnum):
@@ -45,6 +45,9 @@ class DefaultAgentModelSettings(BaseModel):
     model_name: str = ""
     api_version: str = ""
     security_key: str = ""
+    max_input_chars: int = Field(default=24000, ge=2000, le=500000)
+    max_output_tokens: int = Field(default=2048, ge=1, le=32768)
+    timeout_seconds: float = Field(default=120, ge=5, le=600)
 
     @property
     def is_configured(self) -> bool:

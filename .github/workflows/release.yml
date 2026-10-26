@@ -60,6 +60,23 @@ jobs:
             exit $code
           fi
 
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: shovel/frontend/package-lock.json
+
+      - name: Build and bundle static workbench
+        working-directory: shovel/frontend
+        shell: bash
+        run: |
+          npm ci
+          npm run lint
+          npm run typecheck
+          npm run build
+          mkdir -p ../backend/src/shovel/static
+          cp -R out/. ../backend/src/shovel/static/
+
       - name: Build distributions
         working-directory: shovel
         run: uv build

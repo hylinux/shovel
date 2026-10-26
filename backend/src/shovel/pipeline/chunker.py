@@ -50,7 +50,7 @@ from shovel.pipeline.parsers.base import Block, ParsedDocument
 #: = 下一次扫描会重新切、重新 embedding**。改动切块逻辑时必须同步改它,
 #: 否则新旧策略切出来的块会共用同一个 id, 库里会留下一批永远不被更新的
 #: 陈旧向量。
-CHUNKER_VERSION = "1"
+CHUNKER_VERSION = "2"
 
 #: 一个 CJK 字符大约折算多少个 token。用于把字符预算换算成 token 预算 ——
 #: 只是量级估计, 不追求准确。
@@ -174,6 +174,7 @@ def chunk_document(
     doc_uri: str,
     content_hash: str,
     config: ChunkerConfig | None = None,
+    resource_id: str = "",
 ) -> tuple[ChunkDraft, ...]:
     """切一篇文档, 返回 parent 块与 chunk 块的混合序列。
 
@@ -195,6 +196,7 @@ def chunk_document(
         parent_id = chunk_vector_id(
             doc_uri, content_hash, CHUNKER_VERSION,
             Granularity.PARENT.value, parent_index,
+            resource_id=resource_id,
         )
 
         drafts.append(ChunkDraft(
@@ -212,6 +214,7 @@ def chunk_document(
                 id=chunk_vector_id(
                     doc_uri, content_hash, CHUNKER_VERSION,
                     Granularity.CHUNK.value, chunk_index,
+                    resource_id=resource_id,
                 ),
                 granularity=Granularity.CHUNK,
                 chunk_index=chunk_index,

@@ -1,0 +1,123 @@
+from __future__ import annotations
+
+import asyncio
+import inspect
+from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
+from functools import partial
+from typing import Any
+
+from shovel.config.settings import AppSettings
+from shovel.memory.config import memory_paths
+from shovel.memory.store import open_memory
+from shovel.runtime.errors import NotFound, RuntimeFailure
+
+_SCOPE = {"user_id": "local-user", "agent_id": "shovel"}
+
+
+class MemoryService:
+    """One lazy mem0 client on one owning thread, including embedded Qdrant."""
+
+    def __init__(self, settings: AppSettings) -> None:
+        self.settings = settings
+        self._memory: Any = None
+        self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="shovel-memory")
+
+    @property
+    def configured(self) -> bool:
+        return bool(
+            self.settings.memory.embedder.model
+            and (self.settings.model.is_configured or self.settings.memory.llm.model)
+        )
+
+    def _get(self) -> Any:
+        if not self.configured:
+            raise RuntimeFailure(
+                "Memory 尚未配置。",
+                status=503,
+                hint="配置 [memory.embedder] 的模型和 [model] 或 [memory.llm];未启用记忆的对话不受影响。",
+            )
+        if self._memory is None:
+            for path in memory_paths(self.settings.memory):
+                path.mkdir(parents=True, exist_ok=True)
+            self._memory = open_memory(self.settings.memory, self.settings.model)
+        return self._memory
+
+    async def _call[T](self, action: Callable[[], T]) -> T:
+        try:
+            return await asyncio.get_running_loop().run_in_executor(self._executor, action)
+        except RuntimeFailure:
+            raise
+        except Exception as exc:
+            raise RuntimeFailure(
+                f"Memory 操作失败 ({type(exc).__name__})。",
+                status=502,
+                hint="检查 Memory 的模型、向量维度和 Qdrant 配置;本次操作未报告成功。",
+            ) from exc
+
+    @staticmethod
+    def _scope_arguments(method: Callable[..., Any], limit: int) -> dict[str, Any]:
+        parameters = inspect.signature(method).parameters
+        # mem0 2.x moved entity arguments into filters and renamed limit to top_k.
+        result: dict[str, Any] = dict(_SCOPE) if "user_id" in parameters else {"filters": dict(_SCOPE)}
+        result["top_k" if "top_k" in parameters else "limit"] = limit
+        return result
+
+    @staticmethod
+    def _items(response: Any) -> list[dict[str, Any]]:
+        rows = response.get("results") if isinstance(response, dict) else response
+        if not isinstance(rows, list) or any(not isinstance(item, dict) for item in rows):
+            raise RuntimeFailure("Memory 返回了不支持的数据格式。", status=502)
+        return rows
+
+    async def search(self, query: str) -> list[dict[str, Any]]:
+        def search() -> list[dict[str, Any]]:
+            memory = self._get()
+            return self._items(memory.search(query, **self._scope_arguments(memory.search, 5)))
+
+        return await self._call(search)
+
+    async def remember(self, content: str) -> None:
+        def add() -> None:
+            self._get().add([{"role": "user", "content": content}], **_SCOPE)
+
+        await self._call(add)
+
+    async def list(self, limit: int = 100) -> list[dict[str, Any]]:
+        def list_memories() -> list[dict[str, Any]]:
+            memory = self._get()
+            return self._items(memory.get_all(**self._scope_arguments(memory.get_all, limit)))
+
+        return await self._call(list_memories)
+
+    async def delete(self, identifier: str) -> None:
+        def remove() -> None:
+            memory = self._get()
+            item = memory.get(identifier)
+            if not isinstance(item, dict) or any(item.get(key) != value for key, value in _SCOPE.items()):
+                raise NotFound("记忆", identifier)
+            memory.delete(identifier)
+
+        await self._call(remove)
+
+    async def close(self) -> None:
+        def close() -> None:
+            if self._memory is None:
+                return
+            memory, self._memory = self._memory, None
+            try:
+                close_method = getattr(memory, "close", None)
+                if callable(close_method):
+                    close_method()
+                elif getattr(memory, "db", None) is not None:
+                    memory.db.close()
+            finally:
+                vector_store = getattr(memory, "vector_store", None)
+                client = getattr(vector_store, "client", None)
+                if client is not None:
+                    client.close()
+
+        try:
+            await self._call(close)
+        finally:
+            await asyncio.to_thread(partial(self._executor.shutdown, wait=True))

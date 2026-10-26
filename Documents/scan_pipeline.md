@@ -7,7 +7,28 @@
 资源模块解决的是"怎么连上一个数据源"。扫描管线解决的是紧接着的那个问题:
 **连上了之后, 怎么把里面的东西变成可以被检索的块。**
 
-`Connector.discover()` 在资源模块里一直没有消费者 —— 本模块就是那个消费者。
+`Connector.discover()` 的消费者是本模块, CLI 与 REST 统一由 Host 调用它。
+
+## 持久后台执行与检索
+
+`POST /api/v1/resources/{id}/scans` 在同一个事务中保存排队 Job 和完整
+Operation 参数, 立刻返回 202。后台服务复用该 Job ID 执行, 保存发现进度、
+逐文档计数与事件。取消会在发现批次和文档边界生效; 中断的完整发现不会
+触发删除对账。Host 停止造成的中断与用户主动取消分开处理, 重启可恢复
+前者。已结束 Job 在操作凭据写入前崩溃时, 从 Job 重建结果而不是重新扫描。
+重放同一 Job 时会清除该 Job 上次尝试留下的观察标记, 重新建立本轮发现集合;
+否则两次尝试之间被删除的文件会因旧标记仍等于 Job ID 而漏掉墓碑对账。
+
+Web 和 `shovel scan run/cleanup` 使用同一执行链。只读的 list/show 直接
+查 SQLite。运行 Host 时 CLI 走本机 REST, 离线时使用短生命周期 Host。
+`--no-embed` 仍写入可关键词检索的块, 不打开 Zvec; 后续普通向量扫描补齐
+索引。只有向量工作需要已配置 embedding 和已初始化的 Zvec collection。
+
+Host 启动时执行幂等的增量 schema 迁移, 建立并回填 SQLite FTS5 trigram
+索引, 块变更由触发器同步。中文短查询使用转义、参数化的包含查询。
+语义检索使用 Zvec 的资源/模型/粒度预过滤, hybrid 用 RRF 合并排名。
+SQLite 再检查资源可读状态、有效文档版本和向量元数据, 并展开到父块供
+阅读和对话引用, 不把向量库中孤立/过期的文本直接当成有效知识。
 
 ---
 
@@ -106,11 +127,15 @@ token 化是绑定模型的。用 token 做预算, 换一次 embedding 模型就
 
 ### `CHUNKER_VERSION` 参与 id 计算
 
-`chunk_vector_id(doc_uri, content_hash, chunker_version, granularity, index)`。
+`chunk_vector_id(doc_uri, content_hash, chunker_version, granularity, index, resource_id=...)`。
 
-也就是说 **改 `CHUNKER_VERSION` = 全库重切 + 重 embedding**。这是故意的:
+扫描会比较已存的切块版本, 因此 **改 `CHUNKER_VERSION` = 下次扫描重切 + 重 embedding**。这是故意的:
 切块逻辑变了而 id 不变, 会让旧向量和新文本在 Zvec 里共存, 而且没有任何办法
 发现这件事。
+
+当前版本为 `2`: 扫描产出的 id 加入资源身份, 同一文件被两个资源收录时不再
+争用 SQLite 主键或覆盖向量。旧调用不传 `resource_id` 时仍保留原计算规则;
+已有文档通过版本比较在下次扫描时逐篇重建, 不修改数据库 schema。
 
 ### `context_prefix` 不进 SQLite 正文
 
@@ -137,8 +162,9 @@ token 化是绑定模型的。用 token 做预算, 换一次 embedding 模型就
 embedding 是整条链路上**唯一**需要外部服务的一步。没有它, "我先把本地笔记
 索引起来看看"就变成一件必须先注册账号、先填 API Key 的事。
 
-关掉之后 chunk 照常写进 SQLite, 停在 `vector_state=pending`; 等 embedding
-配好了再跑一次就能补齐。
+关掉之后 chunk 照常写进 SQLite, 停在 `vector_state=pending`, 文档停在
+`pipe_state=chunked`; 不提前确认 `indexed_hash`。等 embedding 配好了再运行
+普通扫描(包括默认的增量扫描)即可重读、切块并补齐向量。
 
 ### 响应必须按 `index` 重排
 
@@ -183,11 +209,32 @@ SQLite 那侧删干净了还不够。chunk id 里含 `content_hash`, 所以内�
 这个缺陷用假 embedder 测不出来 —— 只有拿真实模型跑完整链路, 再拿 SQLite
 的 id 集合去比对 Zvec, 才会看到多出来的那些。
 
-> **已知缺口**: 删旧向量在前, 新向量攒够 `_VECTOR_FLUSH_SIZE` 才落库。
-> 作业若在这中间崩溃, `indexed_hash` 已经更新而向量还没写, 下一轮会因
-> hash 没变而跳过, 这篇就成了"在库里但搜不到"的隐形文档。彻底修需要把
-> `indexed_hash` 的写入推迟到 flush 成功之后, 会动到 `_persist` 的事务
-> 边界, 留待后续。
+### 完成标记必须晚于向量落盘
+
+现在以一篇文档为提交单元, 不再跨文档缓冲向量:
+
+```text
+SQLite 事务: 替换 chunk + 文档标 CHUNKED + 写删除意图
+  → 执行删除意图并 flush, 成功后确认该意图
+  → upsert 本篇新向量并 flush
+  → SQLite 事务: chunk 标 INDEXED + 文档标 INDEXED + 确认 indexed_hash
+```
+
+任何一步中断, 都不会提前确认文档完成。包括向量已经落盘但最后一个 SQLite
+事务尚未提交的情况, 重跑也会幂等地重建。本篇 embedding 仍由 HTTP 层分批发送。
+
+旧数据中“文档已 INDEXED, 但 chunk 仍 PENDING”的状态也会进入恢复队列。
+这保证可恢复, 不保证无间隙切换: 删旧与写新之间, 本篇可能暂时无法被召回。
+
+### 删除使用已有 DeletionOutbox
+
+重索引、墓碑对账和资源删除, 都把删除意图与元数据变更放在同一 SQLite 事务中。
+`IndexCleanupService` 按顺序执行幂等删除, 只有向量库确认并 flush 后才写
+`done_at`; 失败保留 `attempts` / `last_error`, 中止并显式报错。
+
+带 embedding 的扫描会先重试待处理清理, 资源删除 CLI 也会立即尝试清理。
+没有 embedding 配置时可单独运行 `shovel scan cleanup`。
+`--no-embed` 不打开向量库, 所以只保存删除意图, 不假装向量已撤下。
 
 ---
 
@@ -195,12 +242,20 @@ SQLite 那侧删干净了还不够。chunk id 里含 `content_hash`, 所以内�
 
 ### 判据是 hash, 不是 mtime
 
-`indexed_hash != content_hash` 才重新处理。用 `modified_at` 会在两个方向都出错:
+内容指纹、流水线状态、切块版本、embedding 模型版本和待补向量共同决定是否
+重新处理, 不是只看 `indexed_hash != content_hash`。用 `modified_at` 会在两个方向都出错:
 `touch` 过的文件被白白重扫一遍, 而某些同步工具会保留原始 mtime, 于是改过的
 文件被漏掉。
 
 (`local_fs` 的 `content_hash` 本身是 `st:{size}-{mtime_ns}`, 见资源模块文档 ——
 但那是连接器内部的选择, 管线这一层只认"这个串变了没有"。)
+
+增量扫描发现已有恢复任务时, 会暂时撤掉修改时间水位过滤, 重新枚举资源元数据,
+再按上述条件挑选文档。否则旧的失败文档、`--limit` 留下的文档和
+`--no-embed` 留下的文档可能永远位于水位线之前。没有恢复任务时仍沿用增量水位线。
+
+文件未变但向量集合被外部清空时, 用 `--force` 强制重建; 改切块参数但未改版本时
+也可使用它。恢复不会绕过资源的 include/exclude、大小及时间窗口限制。
 
 ### 删除对账依赖完整的 discover
 
@@ -255,7 +310,7 @@ _preflight()   解析资源, 确认状态可扫, 建 Job
 _discover()    跑完整个 discover, 落成观测集
 _process()     逐篇 fetch → parse → chunk
 _persist()     先删旧 chunk, 再写新 chunk
-_flush()       攒够 256 个向量写一次 Zvec
+_flush()       本篇向量落盘后再确认文档完成
 _reconcile()   墓碑对账 (仅在 discover 完整时)
 _close_job()   结算状态与统计
 ```
@@ -284,10 +339,14 @@ pypdf / python-docx / openpyxl / python-pptx 全是同步库, 而且是 CPU 密�
 ## 8. CLI
 
 ```bash
-shovel scan run <资源> [--mode] [--profile] [--target] [--limit] [--no-embed]
+shovel scan run <资源> [--mode] [--profile] [--target] [--limit] [--no-embed] [--force]
 shovel scan list [--resource] [--limit]
 shovel scan show <作业 id> [--events N]
+shovel scan cleanup [--resource-id <id>]
 ```
+
+`cleanup` 不要求资源仍然存在, 因此可以重试已删除资源的清理。
+资源移除后 CLI 会明确区分“记录已删除”与“向量清理完成”, 清理失败返回非零退出码。
 
 `show` 会渲染作业统计与事件日志。事件表里带**文档列** —— 因为 `run` 失败时
 提示语是"看是哪几篇", 不显示文档就兑现不了这句话。
@@ -296,17 +355,19 @@ shovel scan show <作业 id> [--events N]
 
 ## 9. DI 容器
 
-`container.py` 里加了四个 provider:
+`container.py` 将实际配置和运行时纳入 Host 的生命周期:
 
 ```text
-embedding_settings   Factory     config 里的 dict 再 validate 回 pydantic 模型
-embedder             Factory     带 expected_dimension 校验
-chunk_sink           Singleton   背后是打开的 zvec collection, 不重复开
-scan_service         Factory     一次扫描 = 一个独立实例
+runtime_settings   Dependency   实际 AppSettings, 保留 SecretStr 真实值
+db_engine          Resource     SQLite 异步引擎
+session_factory    Resource     共享会话工厂, 每个操作创建自己的 session
+runtime            Resource     工作队列、检索、对话、Memory 与惰性向量连接
 ```
 
-`chunk_sink` 是 Singleton 而其余是 Factory, 差别在于有没有持有句柄。
-需要注意: **embedder 与 sink 的释放不归容器管**, 调用方跑完要各自 `aclose()`。
+Runtime 持有一个惰性打开的 Zvec sink, 不为每次请求重复打开 collection。
+原生向量读写经过互斥与取消保护; Host 停止后统一释放连接。每次扫描创建
+独立 embedder 并在 finally 中关闭。Memory 在自己的单线程执行器上创建、
+调用、释放, 不与知识向量库共享客户端。
 
 ---
 
@@ -315,9 +376,12 @@ scan_service         Factory     一次扫描 = 一个独立实例
 - **OCR。** 扫描件 PDF 现在解析出空文本层, 不报错也不产块。
 - **真实 embedding 端点从未接触过。** 没有 API Key, 目前只有 `MockTransport`
   层面的验证。协议层是对的, 但真实端点的错误码、限流行为都没试过。
-- **`chunk_vector_id` 不含 `resource_id`。** 同一个文件被两个资源索引时,
-  Zvec 里会 id 碰撞。这是既有模型设计, 不是本模块引入的, 暂未处理。
 - **并发。** 目前一篇一篇处理。IO 等待是主要成本, 加并发有收益, 但会让
   "单篇失败不中断整轮"和事件日志的顺序都变复杂, 留到有实测数据之后再说。
 - **重跑 pending。** `--no-embed` 留下的 `vector_state=pending` 目前只能靠
-  重新扫一遍补齐, 还没有"只补向量"的专用入口。
+  普通扫描重读、重切并补齐, 还没有“不读源文件、只补向量”的专用入口。
+- **并行扫描写入。** Host 队列当前串行消费所有扫描、资源变更和清理,
+  并用 OS 锁阻止第二个 Runtime 写入相同数据库/向量目录。尚未实现多工作者
+  扫描租约; 直接调用底层 Service 的外部程序也必须遵守单写者约束。
+- **向量维度迁移。** 模型版本变化会触发重处理, 但不同维度仍要求先准备匹配的
+  collection; `--force` 不会销毁或改造已有 collection。

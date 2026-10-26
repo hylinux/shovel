@@ -1,0 +1,49 @@
+"""Ordered, additive runtime upgrades for existing local databases."""
+
+from __future__ import annotations
+
+from sqlalchemy import Connection, insert, select
+from sqlalchemy.ext.asyncio import AsyncEngine
+
+from shovel.db.base import Base, now_ts
+from shovel.db.model.retrieval import SchemaMigration
+
+_SEARCH_DDL = (
+    "CREATE VIRTUAL TABLE IF NOT EXISTS chunk_search "
+    "USING fts5(chunk_id UNINDEXED, text, tokenize='trigram')",
+    """CREATE TRIGGER IF NOT EXISTS chunk_search_insert AFTER INSERT ON chunk
+       WHEN new.granularity = 'chunk' BEGIN
+         INSERT INTO chunk_search(chunk_id, text) VALUES (new.id, new.text);
+       END""",
+    """CREATE TRIGGER IF NOT EXISTS chunk_search_delete AFTER DELETE ON chunk BEGIN
+         DELETE FROM chunk_search WHERE chunk_id = old.id;
+       END""",
+    """CREATE TRIGGER IF NOT EXISTS chunk_search_update AFTER UPDATE OF text, granularity ON chunk BEGIN
+         DELETE FROM chunk_search WHERE chunk_id = old.id;
+         INSERT INTO chunk_search(chunk_id, text)
+           SELECT new.id, new.text WHERE new.granularity = 'chunk';
+       END""",
+)
+
+
+def _upgrade(connection: Connection) -> None:
+    from shovel.db import model  # noqa: F401
+
+    Base.metadata.create_all(connection)
+    versions = set(connection.scalars(select(SchemaMigration.version)))
+    if 1 not in versions:
+        for statement in _SEARCH_DDL:
+            connection.exec_driver_sql(statement)
+        connection.exec_driver_sql(
+            "INSERT INTO chunk_search(chunk_id, text) SELECT id, text FROM chunk WHERE granularity = 'chunk'"
+        )
+        connection.execute(
+            insert(SchemaMigration).values(
+                version=1, name="hosted_operations_chat_and_keyword_index", applied_at=now_ts()
+            )
+        )
+
+
+async def upgrade_database(engine: AsyncEngine) -> None:
+    async with engine.begin() as connection:
+        await connection.run_sync(_upgrade)

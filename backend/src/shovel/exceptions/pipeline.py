@@ -165,13 +165,13 @@ class EmbeddingNotConfiguredError(PipelineError):
 
 
 class VectorSinkError(PipelineError):
-    """向量写入失败。"""
+    """向量写入或清理失败。"""
 
-    def __init__(self, reason: str) -> None:
+    def __init__(self, reason: str, *, hint: str | None = None) -> None:
         super().__init__(
-            "向量写入失败。",
+            f"向量索引操作失败: {reason}",
             exit_code=ExitCodes.GENERAL_ERROR,
-            hint="执行 `shovel init` 确认 collection 已建好, 再重试。",
+            hint=hint or "确认 collection 可用后重跑扫描; 删除任务可用 `shovel scan cleanup` 重试。",
             details=reason,
         )
 

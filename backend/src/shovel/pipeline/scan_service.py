@@ -35,11 +35,12 @@
 每一篇都会以同样方式失败, 继续跑只是把同一条错误刷一万遍, 所以直接
 中止 Job。这条界线就是下面 ``except`` 子句的分布。
 
-**3. 内容没变就跳过, 判据是 ``indexed_hash``。**
+**3. 内容没变且索引完整、版本匹配时才跳过。**
 
 不是 ``modified_at``。很多同步工具 (OneDrive、git checkout) 会在内容
 完全没变的情况下刷新 mtime, 只看时间会让一次日常同步触发全库重新
-embedding。``indexed_hash != content_hash`` 才是"真的需要重跑"。
+embedding。除内容指纹外, 还要检查流水线状态、待补向量和切块/模型版本。
+完成标记只在本篇向量落盘之后提交。
 """
 
 from __future__ import annotations
@@ -49,14 +50,17 @@ import contextlib
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 
-from sqlalchemy import delete, func, select, update
+from sqlalchemy import delete, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+from sqlalchemy.sql.elements import ColumnElement
 
 from shovel.db.base import now_ts
 from shovel.db.model.config import Resource, ScanProfile
 from shovel.db.model.content import Chunk, Document
 from shovel.db.model.execution import Job, JobEvent
+from shovel.db.model.retrieval import DeletionOutbox
 from shovel.domain.enums import (
+    DeletionScope,
     DocumentLifecycleState,
     DocumentPipeState,
     ErrorKind,
@@ -83,6 +87,7 @@ from shovel.pipeline.chunker import (
     chunk_document,
     default_config_for,
 )
+from shovel.pipeline.cleanup import IndexCleanupService
 from shovel.pipeline.embedder import Embedder, NullEmbedder
 from shovel.pipeline.parsers import ParsedDocument, ParseHint, can_parse, parse_bytes
 from shovel.pipeline.sink import ChunkVectorSink, NullVectorSink, VectorRecord
@@ -93,13 +98,6 @@ from shovel.services.connector_base import (
     DiscoveryScope,
 )
 from shovel.services.resource_service import ResourceService
-
-#: 每积累多少个向量就写一次 Zvec。
-#:
-#: 太小则往返次数过多, 太大则一次崩溃会丢掉更多已完成的工作 ——
-#: 注意 SQLite 那一侧是每篇文档一个事务, 所以"丢"的只是向量,
-#: 下次扫描会因为 ``vector_state=pending`` 把它们补回来。
-_VECTOR_FLUSH_SIZE = 256
 
 #: 心跳间隔 (秒)。``idx_job_zombie`` 靠它识别"进程被 kill 了但 Job
 #: 还停在 running"的僵尸作业。
@@ -156,11 +154,38 @@ class ScanService:
         *,
         embedder: Embedder | None = None,
         sink: ChunkVectorSink | None = None,
+        stopping: asyncio.Event | None = None,
     ) -> None:
         self._sessions = session_factory
         self._resources = resources
         self._embedder = embedder or NullEmbedder()
         self._sink = sink or NullVectorSink()
+        self._cleanup = IndexCleanupService(session_factory, self._sink)
+        self._stopping = stopping
+
+    @property
+    def _embedding_enabled(self) -> bool:
+        return not isinstance(self._embedder, NullEmbedder)
+
+    def _recovery_condition(self) -> ColumnElement[bool]:
+        conditions = [
+            Document.pipe_state != DocumentPipeState.INDEXED,
+            Document.indexed_hash.is_(None),
+            Document.indexed_hash != Document.content_hash,
+            Document.chunker_version.is_(None),
+            Document.chunker_version != CHUNKER_VERSION,
+        ]
+        if self._embedding_enabled:
+            conditions.extend([
+                Document.model_version.is_(None),
+                Document.model_version != self._embedder.model_version,
+                select(Chunk.id).where(
+                    Chunk.doc_uri == Document.uri,
+                    Chunk.resource_id == Document.resource_id,
+                    Chunk.vector_state == VectorState.PENDING,
+                ).exists(),
+            ])
+        return or_(*conditions)
 
     # ----------------------------------------------------------------- #
     # 入口
@@ -173,6 +198,8 @@ class ScanService:
         profile_name: str | None = None,
         target_ids: Sequence[str] = (),
         limit: int | None = None,
+        force: bool = False,
+        job_id: str | None = None,
     ) -> ScanOutcome:
         """扫一个资源。
 
@@ -185,7 +212,7 @@ class ScanService:
             ref, mode=mode, profile_name=profile_name, target_ids=target_ids,
         )
 
-        job_id = await self._open_job(resource, profile, scan_mode)
+        job_id = await self._open_job(resource, profile, scan_mode, job_id=job_id)
 
         outcome = ScanOutcome(
             job_id=job_id,
@@ -197,6 +224,8 @@ class ScanService:
         heartbeat = asyncio.create_task(self._heartbeat(job_id))
 
         try:
+            if await self._cancel_requested(job_id):
+                raise asyncio.CancelledError
             await self._run(
                 job_id=job_id,
                 resource=resource,
@@ -205,6 +234,7 @@ class ScanService:
                 scan_mode=scan_mode,
                 target_ids=target_ids,
                 limit=limit,
+                force=force,
                 outcome=outcome,
             )
 
@@ -223,6 +253,13 @@ class ScanService:
             await self._log(job_id, LogLevel.WARN, None, "JOB_CANCELLED", "扫描被取消。")
             raise
 
+        except Exception as exc:
+            outcome.state = JobState.FAILED
+            outcome.error_kind = ErrorKind.INTERNAL
+            outcome.error_detail = str(exc)
+            await self._log(job_id, LogLevel.ERROR, None, "JOB_ABORTED", str(exc))
+            raise
+
         finally:
             heartbeat.cancel()
             with contextlib.suppress(asyncio.CancelledError):
@@ -231,6 +268,26 @@ class ScanService:
             await self._close_job(job_id, outcome)
 
         return outcome
+
+    async def prepare_job(
+        self,
+        ref: str,
+        *,
+        mode: ScanMode | None = None,
+        profile_name: str | None = None,
+        target_ids: Sequence[str] = (),
+    ) -> Job:
+        """Validate submission and return a queued row for the caller's transaction."""
+        resource, profile, _connector, scan_mode = await self._preflight(
+            ref, mode=mode, profile_name=profile_name, target_ids=target_ids,
+        )
+        return Job(
+            resource_id=resource.id,
+            scan_profile_id=profile.id,
+            fired_by_kind=ScheduleKind.MANUAL,
+            scan_mode=scan_mode,
+            state=JobState.QUEUED,
+        )
 
     # ----------------------------------------------------------------- #
     # preflight
@@ -298,14 +355,18 @@ class ScanService:
         scan_mode: ScanMode,
         target_ids: Sequence[str],
         limit: int | None,
+        force: bool,
         outcome: ScanOutcome,
     ) -> None:
+        if self._embedding_enabled:
+            await self._cleanup.drain()
+
         # ---------- discover ----------
         await self._set_stage(job_id, Stage.DISCOVER)
 
         since = (
             await self._watermark(resource.id)
-            if scan_mode is ScanMode.INCREMENTAL
+            if scan_mode is ScanMode.INCREMENTAL and not force
             else None
         )
 
@@ -324,6 +385,7 @@ class ScanService:
             connector=connector,
             scope=scope,
             outcome=outcome,
+            force=force,
         )
 
         # 这一行是删除对账的门闸。放在 discover 完整跑完之后, 一行都
@@ -333,7 +395,6 @@ class ScanService:
         # ---------- per-document ----------
         await self._set_stage(job_id, Stage.FETCH)
 
-        buffer: list[VectorRecord] = []
         processed = 0
 
         for item in pending:
@@ -351,7 +412,6 @@ class ScanService:
                     connector=connector,
                     item=item,
                     outcome=outcome,
-                    buffer=buffer,
                 )
             except ParseError as exc:
                 # 单篇级: 记下来, 继续。
@@ -362,16 +422,16 @@ class ScanService:
 
             if written:
                 processed += 1
-
-            if len(buffer) >= _VECTOR_FLUSH_SIZE:
-                outcome.vectors_written += await self._flush(buffer)
-
-        outcome.vectors_written += await self._flush(buffer)
+            await self._save_progress(job_id, outcome)
 
         # ---------- reconcile ----------
+        if await self._cancel_requested(job_id):
+            raise asyncio.CancelledError
         if scan_mode is ScanMode.FULL_SWEEP:
             await self._set_stage(job_id, Stage.RECONCILE)
             outcome.tombstoned = await self._reconcile(job_id, resource.id)
+            if self._embedding_enabled:
+                await self._cleanup.drain(resource_id=resource.id)
 
         outcome.state = (
             JobState.COMPLETED_WITH_ERRORS if outcome.failed_docs else JobState.SUCCEEDED
@@ -388,6 +448,7 @@ class ScanService:
         connector: Connector,
         scope: DiscoveryScope,
         outcome: ScanOutcome,
+        force: bool,
     ) -> list[DiscoveredItem]:
         """列举条目, 逐条 upsert 进 document 表, 返回需要处理的那些。
 
@@ -401,6 +462,11 @@ class ScanService:
 
         async with self._sessions() as session:
             async for item in connector.discover(scope):
+                if outcome.discovered % 100 == 0:
+                    await session.commit()
+                    await self._save_progress(job_id, outcome)
+                    if await self._cancel_requested(job_id):
+                        raise asyncio.CancelledError
                 outcome.discovered += 1
 
                 hint = _hint_of(resource, item)
@@ -409,25 +475,37 @@ class ScanService:
                 )
 
                 if not can_parse(hint):
+                    if document.pipe_state is not DocumentPipeState.SKIPPED:
+                        session.add(DeletionOutbox(
+                            scope=DeletionScope.DOC,
+                            resource_id=resource.id,
+                            doc_uri=item.uri,
+                        ))
                     document.lifecycle_state = DocumentLifecycleState.SKIPPED
                     document.pipe_state = DocumentPipeState.SKIPPED
                     document.skip_reason = f"不支持的类型: {hint.suffix or '(无扩展名)'}"
                     continue
 
-                # 内容没变就不必重跑。这是增量真正省下时间的地方 ——
-                # 判据是 indexed_hash 而非 mtime, 理由见模块顶部。
-                if not document.needs_processing:
+                # 旧数据可能 hash 已匹配但向量仍 pending, 不能仅靠内容判定完成。
+                requires_processing = (
+                    await session.execute(
+                        select(Document.uri).where(
+                            Document.uri == item.uri,
+                            Document.resource_id == resource.id,
+                            self._recovery_condition(),
+                        )
+                    )
+                ).scalar_one_or_none() is not None
+                if not force and not requires_processing:
                     outcome.skipped_unchanged += 1
                     continue
 
                 seen.append(item)
 
-                # 逐批提交, 避免一次列举二十万个条目时把整批变更
-                # 全攒在内存里
-                if outcome.discovered % 500 == 0:
-                    await session.commit()
-
             await session.commit()
+
+        if self._embedding_enabled:
+            await self._cleanup.drain(resource_id=resource.id)
 
         return seen
 
@@ -484,7 +562,6 @@ class ScanService:
         connector: Connector,
         item: DiscoveredItem,
         outcome: ScanOutcome,
-        buffer: list[VectorRecord],
     ) -> bool:
         """fetch -> parse -> chunk -> embed -> persist。"""
 
@@ -514,6 +591,7 @@ class ScanService:
             doc_uri=item.uri,
             content_hash=content_hash,
             config=config,
+            resource_id=resource.id,
         )
 
         if not drafts:
@@ -525,7 +603,7 @@ class ScanService:
         embeddable = [d for d in drafts if d.granularity.should_embedded]
         vectors: list[list[float]] = []
 
-        if embeddable and not isinstance(self._embedder, NullEmbedder):
+        if embeddable and self._embedding_enabled:
             await self._set_stage(job_id, Stage.EMBED)
             vectors = await self._embedder.embed([d.embed_text for d in embeddable])
 
@@ -549,30 +627,20 @@ class ScanService:
             item=item,
             parsed=parsed,
             drafts=drafts,
-            content_hash=content_hash,
             embedded=bool(by_id),
         )
 
         outcome.chunks_written += written
 
-        # 旧向量必须显式删掉, 不能指望 upsert 覆盖。
-        #
-        # chunk id 里含 content_hash, 所以内容一变**所有** chunk 的 id 都
-        # 跟着变, 新 id 不会撞上任何旧 id —— upsert 只会在旁边多写一份,
-        # 旧的那批永远留在 Zvec 里。SQLite 那边 _persist 已经把旧行删了,
-        # 于是两边对不上: 检索命中一个 SQLite 里根本不存在的 chunk。
-        #
-        # 一篇文档在一轮扫描里只会走到这里一次, 所以不用担心把自己
-        # 刚写进去的向量删掉 —— 新向量此刻还在 buffer 里, 没落库。
-        if by_id:
-            await self._sink.delete_document(resource.id, item.uri)
-
-        for draft in embeddable:
-            vector = by_id.get(draft.id)
-
-            if vector:
-                buffer.append(_record_of(resource, item, parsed, draft, vector,
-                                         self._embedder.model_version))
+        if self._embedding_enabled:
+            await self._cleanup.drain(resource_id=resource.id)
+            records = [
+                _record_of(resource, item, parsed, draft, by_id[draft.id], self._embedder.model_version)
+                for draft in embeddable
+            ]
+            outcome.vectors_written += await self._flush(
+                records, resource.id, item.uri, content_hash,
+            )
 
         return True
 
@@ -583,7 +651,6 @@ class ScanService:
         item: DiscoveredItem,
         parsed: ParsedDocument,
         drafts: Sequence[ChunkDraft],
-        content_hash: str,
         embedded: bool,
     ) -> int:
         """把 chunk 写进 SQLite, 并更新 document 的流水线状态。
@@ -596,7 +663,7 @@ class ScanService:
             document = await session.get(Document, (item.uri, resource.id))
 
             if document is None:  # pragma: no cover - discover 已经建过
-                return 0
+                raise PipelineError("扫描中的文档已被删除, 已停止写入索引。")
 
             # 先删旧 chunk 再写新的。不能只 upsert: 文档改短之后,
             # 旧的尾部 chunk 不会被任何新 id 覆盖, 会变成永远搜得到
@@ -628,9 +695,13 @@ class ScanService:
                     chunk_meta=draft.meta,
                 ))
 
-            document.pipe_state = DocumentPipeState.INDEXED
+            session.add(DeletionOutbox(
+                scope=DeletionScope.DOC,
+                resource_id=resource.id,
+                doc_uri=item.uri,
+            ))
+            document.pipe_state = DocumentPipeState.CHUNKED
             document.pipe_error_kind = None
-            document.indexed_hash = content_hash
             document.chunker_version = CHUNKER_VERSION
             document.model_version = self._embedder.model_version if embedded else None
             document.ingested_at = now_ts()
@@ -653,16 +724,17 @@ class ScanService:
 
         return len(drafts)
 
-    async def _flush(self, buffer: list[VectorRecord]) -> int:
-        """把缓冲区里的向量写进 Zvec, 并把对应 chunk 标成 indexed。"""
-
-        if not buffer:
-            return 0
-
-        records = list(buffer)
-        buffer.clear()
-
+    async def _flush(
+        self,
+        records: list[VectorRecord],
+        resource_id: str,
+        doc_uri: str,
+        content_hash: str,
+    ) -> int:
+        """Commit the document's completion only after its vectors are durable."""
         written = await self._sink.upsert(records)
+        if written != len(records):
+            raise VectorSinkError(f"需要写入 {len(records)} 个向量, 实际写入 {written} 个。")
 
         # SQLite 里的 vector_state 是"向量库里到底有没有它"的账本。
         # 写 Zvec 成功之后才改它 —— 反过来会让一次写入失败留下一批
@@ -674,9 +746,14 @@ class ScanService:
                 .where(Chunk.id.in_([r.id for r in records]))
                 .values(vector_state=VectorState.INDEXED)
             )
+            await session.execute(
+                update(Document)
+                .where(Document.uri == doc_uri, Document.resource_id == resource_id)
+                .values(pipe_state=DocumentPipeState.INDEXED, indexed_hash=content_hash)
+            )
             await session.commit()
 
-        return written or len(records)
+        return written
 
     async def _fail_document(
         self,
@@ -757,7 +834,7 @@ class ScanService:
             condition = (
                 (Document.resource_id == resource_id)
                 & (Document.lifecycle_state == DocumentLifecycleState.ACTIVE)
-                & (Document.last_seen_run != job_id)
+                & or_(Document.last_seen_run.is_(None), Document.last_seen_run != job_id)
             )
 
             # 先把 uri 取出来: UPDATE 之后这些行就不再满足条件了,
@@ -793,16 +870,19 @@ class ScanService:
                 .values(vector_state=VectorState.PENDING)
             )
 
+            for uri in doomed:
+                session.add(DeletionOutbox(
+                    scope=DeletionScope.DOC,
+                    resource_id=resource_id,
+                    doc_uri=uri,
+                ))
             await session.commit()
-
-        for uri in doomed:
-            await self._sink.delete_document(resource_id, uri)
 
         count = len(doomed)
 
         await self._log(
             job_id, LogLevel.INFO, None, "RECONCILE_TOMBSTONED",
-            f"{count} 个条目在源端已不存在, 已标记为墓碑并撤下向量。",
+            f"{count} 个条目在源端已不存在, 已标记为墓碑并持久化向量清理意图。",
         )
 
         return count
@@ -815,9 +895,45 @@ class ScanService:
         resource: Resource,
         profile: ScanProfile,
         scan_mode: ScanMode,
+        *,
+        job_id: str | None = None,
     ) -> str:
         async with self._sessions() as session:
+            if job_id is not None:
+                existing = await session.get(Job, job_id)
+                if (
+                    existing is None
+                    or existing.resource_id != resource.id
+                    or existing.scan_profile_id != profile.id
+                    or existing.scan_mode != scan_mode
+                    or existing.state != JobState.QUEUED
+                ):
+                    raise PipelineError("排队的扫描作业不存在或与执行参数不匹配。")
+                existing.state = JobState.RUNNING
+                existing.started_at = now_ts()
+                existing.heartbeat_at = now_ts()
+                existing.finished_at = None
+                # A replay keeps its Job ID, but must rebuild this attempt's observed set.
+                await session.execute(
+                    update(Document).where(
+                        Document.resource_id == resource.id,
+                        Document.last_seen_run == job_id,
+                    ).values(last_seen_run=None)
+                )
+                existing.current_stage = Stage.DISCOVER
+                existing.stats = {"embedding_enabled": self._embedding_enabled}
+                existing.is_discovery_complete = False
+                existing.error_kind = None
+                existing.error_detail = None
+                for counter in (
+                    "discovered", "skipped_unchanged", "fetched", "parsed",
+                    "chunked", "embedded", "failed_docs", "chunks_written", "bytes_read",
+                ):
+                    setattr(existing, counter, 0)
+                await session.commit()
+                return existing.id
             job = Job(
+                stats={"embedding_enabled": self._embedding_enabled},
                 scan_profile_id=profile.id,
                 resource_id=resource.id,
                 fired_by_kind=ScheduleKind.MANUAL,
@@ -831,6 +947,21 @@ class ScanService:
             await session.commit()
 
             return job.id
+
+    async def _save_progress(self, job_id: str, outcome: ScanOutcome) -> None:
+        async with self._sessions() as session:
+            await session.execute(update(Job).where(Job.id == job_id).values(
+                discovered=outcome.discovered,
+                skipped_unchanged=outcome.skipped_unchanged,
+                fetched=outcome.fetched,
+                parsed=outcome.parsed,
+                chunked=outcome.chunked,
+                embedded=outcome.embedded,
+                failed_docs=outcome.failed_docs,
+                chunks_written=outcome.chunks_written,
+                bytes_read=outcome.bytes_read,
+            ))
+            await session.commit()
 
     async def _close_job(self, job_id: str, outcome: ScanOutcome) -> None:
         async with self._sessions() as session:
@@ -853,6 +984,7 @@ class ScanService:
             job.finished_at = now_ts()
             job.current_stage = None
             job.stats = {
+                "embedding_enabled": self._embedding_enabled,
                 "vectors_written": outcome.vectors_written,
                 "tombstoned": outcome.tombstoned,
                 "warnings": outcome.warnings[:50],
@@ -887,6 +1019,8 @@ class ScanService:
                 await session.commit()
 
     async def _cancel_requested(self, job_id: str) -> bool:
+        if self._stopping is not None and self._stopping.is_set():
+            return True
         async with self._sessions() as session:
             job = await session.get(Job, job_id)
             return bool(job and job.is_cancel_requested)
@@ -929,6 +1063,8 @@ class ScanService:
     async def _watermark(self, resource_id: str) -> int | None:
         """增量扫描的水位线: 上次见过的最大源端修改时间。
 
+        有待恢复文档时不应用水位线, 否则旧失败或待补向量的文件永远列举不到。
+
         取 ``max(modified_at_src)`` 而不是"上次扫描的结束时间"。后者会
         漏掉一类文档: 扫描过程中被修改的文件, 它的 mtime 早于扫描结束,
         于是下次扫描会认为它已经处理过。用源端时间做水位线则不会 ——
@@ -942,6 +1078,13 @@ class ScanService:
         )
 
         async with self._sessions() as session:
+            recovery = select(Document.uri).where(
+                Document.resource_id == resource_id,
+                Document.lifecycle_state == DocumentLifecycleState.ACTIVE,
+                self._recovery_condition(),
+            ).limit(1)
+            if (await session.execute(recovery)).scalar_one_or_none() is not None:
+                return None
             return (await session.execute(stmt)).scalar_one_or_none()
 
 

@@ -14,11 +14,13 @@ import shutil
 import tempfile
 from collections.abc import Iterator
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
 
 from shovel.db.base import chunk_vector_id
+from shovel.exceptions.pipeline import VectorSinkError
 from shovel.pipeline.sink import VectorRecord, ZvecChunkSink
 
 _DIM = 4
@@ -184,3 +186,13 @@ async def test_aclose_is_idempotent(collection: Any) -> None:
 
     await sink.aclose()
     await sink.aclose()
+
+
+async def test_rejected_deletion_is_not_acknowledged() -> None:
+    class RejectingCollection:
+        def delete_by_filter(self, expression: str) -> Any:
+            return SimpleNamespace(ok=False)
+
+    sink = ZvecChunkSink(RejectingCollection())
+    with pytest.raises(VectorSinkError):
+        await sink.delete_resource("res_1")

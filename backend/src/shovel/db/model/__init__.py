@@ -37,12 +37,15 @@ from .retrieval import (
     RetrievalLog,
     SchemaMigration,
 )
+from .runtime import ChatMessage, Conversation, Operation
 
 __all__ = [
     "AgentScope",
     "AppSetting",
     "BlobRef",
+    "ChatMessage",
     "Chunk",
+    "Conversation",
     "DeletionOutbox",
     "Document",
     "DocumentDerived",
@@ -62,6 +65,7 @@ __all__ = [
     "MemoryRevision",
     "MemoryWorking",
     "Mention",
+    "Operation",
     "Resource",
     "RetrievalFeedback",
     "RetrievalLog",

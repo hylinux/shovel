@@ -12,9 +12,28 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  UV_DEFAULT_INDEX: https://pypi.org/simple   # 覆盖 pyproject 里的内网源
+  UV_DEFAULT_INDEX: https://pypi.org/simple
 
 jobs:
+  windows-outlook:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+      - name: Install Python 3.14 x64
+        run: uv python install 3.14-x86_64
+      - name: Sync Windows dependencies
+        run: uv sync --python 3.14-x86_64 --locked --all-extras
+      - name: Exercise Outlook contracts and shared pipeline without a mailbox
+        run: >-
+          uv run --locked pytest --no-cov
+          backend\tests\test_outlook.py
+          backend\tests\test_parsers.py
+          backend\tests\test_chunker.py
+          backend\tests\test_scan_pipeline.py
+
   quality:
     runs-on: ubuntu-latest
     steps:
@@ -23,25 +42,18 @@ jobs:
         with:
           path: shovel
 
-      # 同级 checkout 依赖仓库，使 ../py-generic-host 成立
-      - uses: actions/checkout@v5
-        with:
-          repository: hylinux/py-generic-host
-          ref: main            # 或固定 tag: v1.0.1
-          path: py-generic-host
-
       - name: Install uv
         uses: astral-sh/setup-uv@v6
         with:
           enable-cache: true
-          cache-dependency-glob: "shovel/pyproject.toml"
+          cache-dependency-glob: "shovel/uv.lock"
 
       - name: Install Python 3.14
         run: uv python install 3.14
 
       - name: Sync dependencies
         working-directory: shovel
-        run: uv sync --all-extras --dev
+        run: uv sync --locked --all-extras --dev
 
       - name: Lint (ruff)
         working-directory: shovel
@@ -55,21 +67,35 @@ jobs:
 
       - name: Test (pytest)
         working-directory: shovel
-        shell: bash
+        run: uv run pytest
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: shovel/frontend/package-lock.json
+
+      - name: Validate and bundle workbench
+        working-directory: shovel/frontend
         run: |
-          set +e
-          uv run pytest
-          code=$?
-          set -e
-          if [ $code -eq 5 ]; then
-            echo "::warning::No tests collected."
-          elif [ $code -ne 0 ]; then
-            exit $code
-          fi
+          npm ci
+          npm run lint
+          npm run typecheck
+          npm test
+          npm run build
+          mkdir -p ../backend/src/shovel/static
+          cp -R out/. ../backend/src/shovel/static/
 
       - name: Build (smoke)
         working-directory: shovel
         run: uv build
+
+      - name: Install wheel and exercise packaged runtime
+        working-directory: shovel
+        run: |
+          uv venv .tools/package-smoke --python 3.14
+          uv pip install --python .tools/package-smoke/bin/python dist/*.whl
+          .tools/package-smoke/bin/python scripts/smoke_wheel.py
 
       - uses: actions/upload-artifact@v5
         with:

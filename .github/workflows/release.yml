@@ -20,12 +20,6 @@ jobs:
           path: shovel
           fetch-depth: 0
 
-      - uses: actions/checkout@v5
-        with:
-          repository: hylinux/py-generic-host
-          ref: main
-          path: py-generic-host
-
       - name: Install uv
         uses: astral-sh/setup-uv@v6
         with:
@@ -47,22 +41,41 @@ jobs:
 
       - name: Run tests before release
         working-directory: shovel
+        run: |
+          uv sync --locked --all-extras --dev
+          uv run ruff check .
+          uv run ruff format --check .
+          uv run mypy backend/src
+          uv run pytest
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: shovel/frontend/package-lock.json
+
+      - name: Build and bundle static workbench
+        working-directory: shovel/frontend
         shell: bash
         run: |
-          uv sync --all-extras --dev
-          set +e
-          uv run pytest
-          code=$?
-          set -e
-          if [ $code -eq 5 ]; then
-            echo "::warning::No tests collected, skipping test gate."
-          elif [ $code -ne 0 ]; then
-            exit $code
-          fi
+          npm ci
+          npm run lint
+          npm run typecheck
+          npm test
+          npm run build
+          mkdir -p ../backend/src/shovel/static
+          cp -R out/. ../backend/src/shovel/static/
 
       - name: Build distributions
         working-directory: shovel
         run: uv build
+
+      - name: Validate installed release wheel
+        working-directory: shovel
+        run: |
+          uv venv .tools/package-smoke --python 3.14
+          uv pip install --python .tools/package-smoke/bin/python dist/*.whl
+          .tools/package-smoke/bin/python scripts/smoke_wheel.py
 
       - name: List artifacts
         working-directory: shovel

@@ -1,0 +1,5 @@
+[
+  {"question":"灯塔项目的离线备份保留多少天？","keyword":"离线备份","document":"backup.txt","facts":["30"]},
+  {"question":"候鸟工具发布审批由谁负责？","keyword":"发布审批","document":"release.txt","facts":["林岚"]},
+  {"question":"松果服务的数据驻留地区是哪里？","keyword":"数据驻留","document":"privacy.txt","facts":["上海"]}
+]

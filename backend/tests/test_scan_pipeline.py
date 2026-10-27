@@ -1,0 +1,1133 @@
+"""扫描流水线的端到端测试: 真实 local_fs + 内存 SQLite + 假 embedder。
+
+这里刻意**不** mock 连接器和解析器 —— 这条链路的价值恰恰在于"接起来
+能不能跑", 把中间几段换成 mock 就只剩下在测 mock 自己。被替换掉的只有
+embedding 端点和向量库: 前者要网络, 后者要落盘, 都与被验证的编排逻辑
+无关。
+
+关注点是那些"接错了才会出问题"的地方: 增量跳过、单篇失败不中断整轮、
+discover 未完成时不敢对账、以及全量扫描后消失的文档会不会立碑。
+"""
+
+from __future__ import annotations
+
+import os
+from collections.abc import AsyncIterator, Sequence
+from pathlib import Path
+from typing import Any
+
+import pytest
+import pytest_asyncio
+from sqlalchemy import event, select, update
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+
+from shovel.db.base import Base
+from shovel.db.model.config import ScanProfile
+from shovel.db.model.content import Chunk, Document
+from shovel.db.model.execution import Job
+from shovel.db.model.retrieval import DeletionOutbox
+from shovel.domain.enums import (
+    DocumentLifecycleState,
+    DocumentPipeState,
+    ErrorKind,
+    Granularity,
+    JobState,
+    ScanMode,
+    VectorState,
+)
+from shovel.exceptions.pipeline import ResourceNotScannableError, VectorSinkError
+from shovel.pipeline.cleanup import IndexCleanupService
+from shovel.pipeline.embedder import NullEmbedder
+from shovel.pipeline.scan_service import ScanService
+from shovel.pipeline.sink import VectorRecord
+from shovel.services.credentials import InMemoryCredentialStore
+from shovel.services.resource_service import ResourceDraft, ResourceService
+
+_DIM = 8
+
+
+# --------------------------------------------------------------------------- #
+# 替身
+# --------------------------------------------------------------------------- #
+class FakeEmbedder:
+    """按文本长度造一个确定性向量, 并记录被调用了多少次。
+
+    确定性很重要: 断言"没变的文档不会重新 embedding"时, 靠的是调用
+    计数而不是向量内容, 但确定性能让失败时的诊断信息有意义。
+    """
+
+    def __init__(self) -> None:
+        self.calls = 0
+        self.texts: list[str] = []
+
+    @property
+    def dimension(self) -> int:
+        return _DIM
+
+    @property
+    def model_version(self) -> str:
+        return "fake-embed@1"
+
+    async def embed(self, texts: Sequence[str]) -> list[list[float]]:
+        self.calls += 1
+        self.texts.extend(texts)
+
+        return [[float(len(t) % 7) / 7.0] * _DIM for t in texts]
+
+
+class FakeSink:
+    """把向量攒在内存里, 顺便记录删除表达式。"""
+
+    def __init__(self) -> None:
+        self.records: dict[str, VectorRecord] = {}
+        self.deletes: list[str] = []
+
+    async def upsert(self, records: Sequence[VectorRecord]) -> int:
+        for record in records:
+            self.records[record.id] = record
+
+        return len(records)
+
+    async def delete_document(self, resource_id: str, doc_uri: str) -> int:
+        self.deletes.append(doc_uri)
+        stale = [k for k, v in self.records.items() if v.doc_uri == doc_uri and v.resource_id == resource_id]
+
+        for key in stale:
+            del self.records[key]
+
+        return len(stale)
+
+    async def delete_resource(self, resource_id: str) -> int:
+        self.deletes.append(resource_id)
+        stale = [k for k, v in self.records.items() if v.resource_id == resource_id]
+        for key in stale:
+            del self.records[key]
+        return len(stale)
+
+    async def aclose(self) -> None:
+        return None
+
+
+# --------------------------------------------------------------------------- #
+# 夹具
+# --------------------------------------------------------------------------- #
+@pytest_asyncio.fixture
+async def sessions() -> AsyncIterator[async_sessionmaker[AsyncSession]]:
+    import shovel.db.model  # noqa: F401  导入即注册全部表
+
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+
+    @event.listens_for(engine.sync_engine, "connect")
+    def _fk_on(dbapi_conn: Any, _record: Any) -> None:
+        cursor = dbapi_conn.cursor()
+        cursor.execute("PRAGMA foreign_keys=ON")
+        cursor.close()
+
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+
+    yield async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+
+    await engine.dispose()
+
+
+@pytest.fixture
+def resources(sessions: async_sessionmaker[AsyncSession]) -> ResourceService:
+    return ResourceService(sessions, InMemoryCredentialStore())
+
+
+@pytest.fixture
+def embedder() -> FakeEmbedder:
+    return FakeEmbedder()
+
+
+@pytest.fixture
+def sink() -> FakeSink:
+    return FakeSink()
+
+
+@pytest.fixture
+def service(
+    sessions: async_sessionmaker[AsyncSession],
+    resources: ResourceService,
+    embedder: FakeEmbedder,
+    sink: FakeSink,
+) -> ScanService:
+    return ScanService(sessions, resources, embedder=embedder, sink=sink)
+
+
+@pytest.fixture
+def corpus(tmp_path: Path) -> Path:
+    """一个小语料库: 两种文本格式 + 一个不该被索引的二进制文件。"""
+
+    (tmp_path / "notes.md").write_text(
+        "# 项目笔记\n\n第一段内容, 用来验证解析与切块。\n\n## 小节\n\n第二段内容。\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "readme.txt").write_text("纯文本文件的正文。\n\n第二段。\n", encoding="utf-8")
+    (tmp_path / "blob.bin").write_bytes(b"\x00\x01\x02binary garbage\x00")
+
+    return tmp_path
+
+
+@pytest_asyncio.fixture
+async def resource_id(resources: ResourceService, corpus: Path) -> str:
+    resource = await resources.create(
+        ResourceDraft(
+            name="notes",
+            connector_kind="local_fs",
+            config={"root_path": str(corpus)},
+        )
+    )
+    # verify 成功即进入 ACTIVE —— 能不能扫的唯一凭据是"刚刚真的读到了"
+    await resources.verify(resource.id)
+
+    return resource.id
+
+
+# --------------------------------------------------------------------------- #
+# 基本链路
+# --------------------------------------------------------------------------- #
+async def test_profile_sweeps_preserve_other_profile_membership(
+    service: ScanService,
+    sessions: async_sessionmaker[AsyncSession],
+    resource_id: str,
+    corpus: Path,
+) -> None:
+    assert (await service.scan(resource_id, mode=ScanMode.FULL_SWEEP)).ok
+    async with sessions() as session:
+        session.add(
+            ScanProfile(
+                resource_id=resource_id, name="text-only", scan_mode=ScanMode.FULL_SWEEP, include=["*.txt"]
+            )
+        )
+        await session.commit()
+    narrower = await service.scan(resource_id, profile_name="text-only")
+    assert narrower.ok
+    assert narrower.tombstoned == 0
+    (corpus / "readme.txt").unlink()
+    still_shared = await service.scan(resource_id, profile_name="text-only")
+    assert still_shared.ok and still_shared.tombstoned == 0
+    final = await service.scan(resource_id, mode=ScanMode.FULL_SWEEP)
+    assert final.ok and final.tombstoned == 1
+    async with sessions() as session:
+        documents = list(
+            await session.scalars(
+                select(Document).where(
+                    Document.lifecycle_state == DocumentLifecycleState.ACTIVE,
+                )
+            )
+        )
+    assert len(documents) == 1 and documents[0].title == "notes.md"
+
+
+async def test_processing_config_and_parser_versions_rebuild_without_source_changes(
+    service: ScanService,
+    sessions: async_sessionmaker[AsyncSession],
+    resource_id: str,
+    embedder: FakeEmbedder,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    assert (await service.scan(resource_id)).parsed == 2
+    assert (await service.scan(resource_id)).parsed == 0
+    async with sessions() as session:
+        profile = await session.scalar(select(ScanProfile).where(ScanProfile.resource_id == resource_id))
+        assert profile is not None
+        profile.pipeline = {"parser": {"max_chars": 1000}, "chunker": {"chunk_chars": 700}}
+        await session.commit()
+    assert (await service.scan(resource_id)).parsed == 2
+    calls = embedder.calls
+    assert (await service.scan(resource_id)).parsed == 0
+    assert embedder.calls == calls
+    monkeypatch.setattr("shovel.pipeline.scan_service.parser_versions", lambda: {"plain_text": "new-version"})
+    assert (await service.scan(resource_id)).parsed == 2
+    assert (await service.scan(resource_id)).parsed == 0
+
+
+async def test_keyword_only_repeat_is_not_reparsed(
+    sessions: async_sessionmaker[AsyncSession],
+    resources: ResourceService,
+    resource_id: str,
+) -> None:
+    service = ScanService(sessions, resources)
+    assert (await service.scan(resource_id)).parsed == 2
+    assert (await service.scan(resource_id)).parsed == 0
+
+
+async def test_overlapping_profiles_cannot_replace_shared_processing_contract(
+    service: ScanService,
+    sessions: async_sessionmaker[AsyncSession],
+    resource_id: str,
+) -> None:
+    assert (await service.scan(resource_id)).ok
+    async with sessions() as session:
+        session.add(
+            ScanProfile(
+                resource_id=resource_id,
+                name="incompatible",
+                scan_mode=ScanMode.FULL_SWEEP,
+                pipeline={"parser": {"max_chars": 10}},
+            )
+        )
+        await session.commit()
+    result = await service.scan(resource_id, profile_name="incompatible")
+    assert result.state == JobState.FAILED
+    assert result.tombstoned == 0
+    async with sessions() as session:
+        job = await session.get(Job, result.job_id)
+        assert job is not None and not job.is_discovery_complete
+
+
+async def test_connector_without_delete_detection_cannot_tombstone(
+    service: ScanService,
+    sessions: async_sessionmaker[AsyncSession],
+    resource_id: str,
+    corpus: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from dataclasses import replace
+
+    from shovel.services.connector_base import ConnectorCapability
+    from shovel.services.connector_local_fs import LocalFsConnector
+
+    assert (await service.scan(resource_id)).ok
+    (corpus / "readme.txt").unlink()
+    monkeypatch.setattr(
+        LocalFsConnector,
+        "spec",
+        replace(
+            LocalFsConnector.spec,
+            capabilities=LocalFsConnector.spec.capabilities - {ConnectorCapability.DELETE_DETECT},
+        ),
+    )
+    result = await service.scan(resource_id, mode=ScanMode.FULL_SWEEP)
+    assert result.ok and result.tombstoned == 0 and result.warnings
+    async with sessions() as session:
+        job = await session.get(Job, result.job_id)
+        assert job is not None and not job.may_reconcile_deletions
+
+
+async def test_changed_vector_document_becomes_stable_keyword_only_document(
+    service: ScanService,
+    sessions: async_sessionmaker[AsyncSession],
+    resource_id: str,
+    corpus: Path,
+    resources: ResourceService,
+) -> None:
+    assert (await service.scan(resource_id)).ok
+    (corpus / "readme.txt").write_text("Changed contents without vector generation.", encoding="utf-8")
+    keyword = ScanService(sessions, resources)
+    assert (await keyword.scan(resource_id)).parsed == 1
+    assert (await keyword.scan(resource_id)).parsed == 0
+
+
+async def test_scan_indexes_documents_end_to_end(
+    service: ScanService,
+    sessions: async_sessionmaker[AsyncSession],
+    resource_id: str,
+    sink: FakeSink,
+) -> None:
+    """一轮扫描要同时留下三样东西: document 行、chunk 行、向量。
+
+    少任何一样都是"看起来成功了但搜不到", 而那种故障只有用户去搜的时候
+    才会暴露, 离扫描已经很远。
+    """
+
+    outcome = await service.scan(resource_id, mode=ScanMode.FULL_SWEEP)
+
+    assert outcome.ok, outcome.error_detail
+    assert outcome.discovered >= 3
+    assert outcome.parsed == 2  # blob.bin 解析不了
+    assert outcome.chunks_written > 0
+    assert outcome.vectors_written > 0
+
+    async with sessions() as session:
+        docs = (await session.execute(select(Document))).scalars().all()
+        chunks = (await session.execute(select(Chunk))).scalars().all()
+
+    indexed = [d for d in docs if d.pipe_state is DocumentPipeState.INDEXED]
+    assert len(indexed) == 2
+    assert all(d.indexed_hash == d.content_hash for d in indexed)
+
+    # 只有检索块进向量库, parent 块留在 SQLite 供展开阅读
+    retrievable = [c for c in chunks if c.granularity is Granularity.CHUNK]
+    assert len(sink.records) == len(retrievable)
+    assert all(c.vector_state is VectorState.INDEXED for c in retrievable)
+
+
+async def test_unsupported_file_is_skipped_not_failed(
+    service: ScanService,
+    sessions: async_sessionmaker[AsyncSession],
+    resource_id: str,
+) -> None:
+    """用户目录里本来就有二进制文件, 算成失败会让扫描永远"带错完成"。"""
+
+    outcome = await service.scan(resource_id, mode=ScanMode.FULL_SWEEP)
+
+    assert outcome.failed_docs == 0
+    assert outcome.state is JobState.SUCCEEDED
+
+    async with sessions() as session:
+        stmt = select(Document).where(Document.uri.like("%blob.bin"))
+        blob = (await session.execute(stmt)).scalar_one()
+
+    assert blob.pipe_state is DocumentPipeState.SKIPPED
+
+
+# --------------------------------------------------------------------------- #
+# 增量
+# --------------------------------------------------------------------------- #
+async def test_second_scan_skips_unchanged(
+    service: ScanService,
+    resource_id: str,
+    embedder: FakeEmbedder,
+) -> None:
+    """没变的文档不该重新 embedding —— 那是整条链路上最贵的一步。"""
+
+    await service.scan(resource_id, mode=ScanMode.FULL_SWEEP)
+    calls_after_first = embedder.calls
+    assert calls_after_first > 0
+
+    outcome = await service.scan(resource_id, mode=ScanMode.FULL_SWEEP)
+
+    assert outcome.skipped_unchanged == 2
+    assert outcome.parsed == 0
+    assert embedder.calls == calls_after_first
+
+
+async def test_changed_content_is_reindexed(
+    service: ScanService,
+    sessions: async_sessionmaker[AsyncSession],
+    resource_id: str,
+    corpus: Path,
+) -> None:
+    """判据是内容哈希而不是 mtime: 内容变了就必须重切重 embed。"""
+
+    await service.scan(resource_id, mode=ScanMode.FULL_SWEEP)
+
+    (corpus / "readme.txt").write_text("改过的正文。\n\n新增的第二段内容。\n\n第三段。\n", encoding="utf-8")
+
+    outcome = await service.scan(resource_id, mode=ScanMode.FULL_SWEEP)
+
+    assert outcome.parsed == 1
+    assert outcome.skipped_unchanged == 1
+
+    async with sessions() as session:
+        stmt = select(Document).where(Document.uri.like("%readme.txt"))
+        doc = (await session.execute(stmt)).scalar_one()
+
+    assert doc.indexed_hash == doc.content_hash
+
+
+async def test_incremental_discovers_same_second_edits_and_old_mtime_arrivals(
+    service: ScanService,
+    sessions: async_sessionmaker[AsyncSession],
+    resource_id: str,
+    corpus: Path,
+    embedder: FakeEmbedder,
+) -> None:
+    target = corpus / "readme.txt"
+    timestamp = 2_000_000_000_100_000_000
+    os.utime(target, ns=(timestamp, timestamp))
+    await service.scan(resource_id, mode=ScanMode.FULL_SWEEP)
+    target.write_text("同一秒内发生的更新。", encoding="utf-8")
+    os.utime(target, ns=(timestamp + 100, timestamp + 100))
+    arrival = corpus / "preserved-time.txt"
+    arrival.write_text("同步到目录但保留旧时间戳的新文件。", encoding="utf-8")
+    os.utime(arrival, (1000, 1000))
+
+    outcome = await service.scan(resource_id, mode=ScanMode.INCREMENTAL)
+    assert outcome.state == JobState.SUCCEEDED
+    assert outcome.parsed == 2
+    async with sessions() as session:
+        doc = await session.get(Document, (arrival.as_uri(), resource_id))
+        assert doc is not None and doc.pipe_state == DocumentPipeState.INDEXED
+    calls = embedder.calls
+    again = await service.scan(resource_id, mode=ScanMode.INCREMENTAL)
+    assert again.parsed == 0
+    assert embedder.calls == calls
+
+
+@pytest.mark.parametrize("failure", ["missing-root", "walk-permission", "stat-permission"])
+async def test_incomplete_discovery_preserves_index_and_disables_reconciliation(
+    service: ScanService,
+    sessions: async_sessionmaker[AsyncSession],
+    resource_id: str,
+    corpus: Path,
+    sink: FakeSink,
+    monkeypatch: pytest.MonkeyPatch,
+    failure: str,
+) -> None:
+    await service.scan(resource_id, mode=ScanMode.FULL_SWEEP)
+    before = set(sink.records)
+    if failure == "missing-root":
+        corpus.rename(corpus.with_name(f"{corpus.name}-disconnected"))
+    elif failure == "walk-permission":
+        original_scandir = os.scandir
+
+        def fail_scandir(path: Any) -> Any:
+            if Path(path) == corpus:
+                raise PermissionError("source unreadable")
+            return original_scandir(path)
+
+        monkeypatch.setattr(os, "scandir", fail_scandir)
+    else:
+        original_stat = Path.stat
+
+        def fail_stat(path: Path, *args: Any, **kwargs: Any) -> Any:
+            if path == corpus / "readme.txt":
+                raise PermissionError("file unreadable")
+            return original_stat(path, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "stat", fail_stat)
+    try:
+        outcome = await service.scan(resource_id, mode=ScanMode.FULL_SWEEP)
+        assert outcome.state == JobState.FAILED
+        assert outcome.tombstoned == 0
+        assert set(sink.records) == before
+        async with sessions() as session:
+            job = await session.get(Job, outcome.job_id)
+            assert job is not None and not job.is_discovery_complete
+            assert not job.may_reconcile_deletions
+            documents = list(await session.scalars(select(Document)))
+            assert all(doc.lifecycle_state != DocumentLifecycleState.TOMBSTONED for doc in documents)
+    finally:
+        if failure == "missing-root":
+            corpus.with_name(f"{corpus.name}-disconnected").rename(corpus)
+
+
+async def test_shrinking_document_drops_stale_chunks(
+    service: ScanService,
+    sessions: async_sessionmaker[AsyncSession],
+    resource_id: str,
+    corpus: Path,
+) -> None:
+    """文档改短之后, 旧的尾部 chunk 必须消失。
+
+    只 upsert 不删的话, 那些 chunk 不会被任何新 id 覆盖, 会变成搜得到
+    却已不存在于原文的幽灵内容 —— 用户点进去看到的是早就删掉的段落。
+    """
+
+    long_text = "\n\n".join(f"第{i}段正文内容, 足够长以便切出独立的块。" * 8 for i in range(1, 8))
+    (corpus / "readme.txt").write_text(long_text, encoding="utf-8")
+
+    await service.scan(resource_id, mode=ScanMode.FULL_SWEEP)
+
+    async with sessions() as session:
+        stmt = select(Chunk).where(Chunk.doc_uri.like("%readme.txt"))
+        before = len((await session.execute(stmt)).scalars().all())
+
+    (corpus / "readme.txt").write_text("只剩一句话了。\n", encoding="utf-8")
+    await service.scan(resource_id, mode=ScanMode.FULL_SWEEP)
+
+    async with sessions() as session:
+        stmt = select(Chunk).where(Chunk.doc_uri.like("%readme.txt"))
+        after = (await session.execute(stmt)).scalars().all()
+
+    assert len(after) < before
+    assert all("第7段" not in c.text_ for c in after)
+
+
+async def test_reindex_purges_stale_vectors_from_the_sink(
+    service: ScanService,
+    sessions: async_sessionmaker[AsyncSession],
+    sink: FakeSink,
+    resource_id: str,
+    corpus: Path,
+) -> None:
+    """重新索引之后, 向量库里不能留下任何 SQLite 已经没有的 chunk。
+
+    chunk id 里含 content_hash, 所以内容一变**所有** id 都跟着变, 新 id
+    不会撞上任何旧 id。指望 upsert 覆盖是错的 —— 它只会在旁边多写一份,
+    于是检索能命中一个 SQLite 里根本不存在的 chunk。
+    """
+
+    (corpus / "readme.txt").write_text(
+        "\n\n".join(f"原始的第{i}段内容, 写长一点以便切出独立的块。" * 6 for i in range(4)),
+        encoding="utf-8",
+    )
+    await service.scan(resource_id, mode=ScanMode.FULL_SWEEP)
+
+    (corpus / "readme.txt").write_text(
+        "\n\n".join(f"换掉的第{i}段内容, 同样写长一点保证切块。" * 6 for i in range(4)),
+        encoding="utf-8",
+    )
+    await service.scan(resource_id, mode=ScanMode.FULL_SWEEP)
+
+    async with sessions() as session:
+        live = set((await session.execute(select(Chunk.id))).scalars().all())
+
+    assert set(sink.records) <= live, "向量库里有 SQLite 已经删掉的幽灵 chunk"
+    assert not any("原始的第" in r.text for r in sink.records.values())
+
+
+# --------------------------------------------------------------------------- #
+# 删除对账
+# --------------------------------------------------------------------------- #
+async def test_full_scan_tombstones_vanished_documents(
+    service: ScanService,
+    sessions: async_sessionmaker[AsyncSession],
+    resource_id: str,
+    corpus: Path,
+) -> None:
+    """全量扫描是唯一有完整观测集的时刻, 也是唯一敢判定"消失"的时刻。"""
+
+    await service.scan(resource_id, mode=ScanMode.FULL_SWEEP)
+
+    (corpus / "readme.txt").unlink()
+
+    outcome = await service.scan(resource_id, mode=ScanMode.FULL_SWEEP)
+
+    assert outcome.tombstoned == 1
+
+    async with sessions() as session:
+        stmt = select(Document).where(Document.uri.like("%readme.txt"))
+        doc = (await session.execute(stmt)).scalar_one()
+
+    assert doc.lifecycle_state is DocumentLifecycleState.TOMBSTONED
+
+
+async def test_tombstone_withdraws_the_vectors(
+    service: ScanService,
+    sink: FakeSink,
+    resource_id: str,
+    corpus: Path,
+) -> None:
+    """立碑的同时必须把向量撤下来。
+
+    lifecycle_state 只是 SQLite 里的一个标记, Zvec 并不知道它。不撤的话,
+    一篇已经从源端消失的文档照样能被检索命中 —— 而"立碑"对用户的承诺
+    恰恰是它不再出现在结果里。
+    """
+
+    await service.scan(resource_id, mode=ScanMode.FULL_SWEEP)
+
+    assert any(r.doc_uri.endswith("readme.txt") for r in sink.records.values())
+
+    (corpus / "readme.txt").unlink()
+    await service.scan(resource_id, mode=ScanMode.FULL_SWEEP)
+
+    assert not any(r.doc_uri.endswith("readme.txt") for r in sink.records.values())
+
+
+async def test_revived_document_gets_its_vectors_back(
+    service: ScanService,
+    sink: FakeSink,
+    resource_id: str,
+    corpus: Path,
+) -> None:
+    """复活不能只恢复 lifecycle, 向量也得回来。
+
+    立碑时撤掉了向量, 而复活时内容哈希通常没变 —— 如果不把 pipe_state
+    打回 PENDING, needs_processing 会返回 False, 于是文档回到 ACTIVE
+    却永远没有向量, 成了一篇"在库里但搜不到"的隐形文档。
+    """
+
+    await service.scan(resource_id, mode=ScanMode.FULL_SWEEP)
+
+    text = (corpus / "readme.txt").read_text(encoding="utf-8")
+    (corpus / "readme.txt").unlink()
+    await service.scan(resource_id, mode=ScanMode.FULL_SWEEP)
+
+    # 原样写回去: 内容哈希和立碑之前完全一致
+    (corpus / "readme.txt").write_text(text, encoding="utf-8")
+    await service.scan(resource_id, mode=ScanMode.FULL_SWEEP)
+
+    assert any(r.doc_uri.endswith("readme.txt") for r in sink.records.values())
+
+
+async def test_tombstoned_document_revives(
+    service: ScanService,
+    sessions: async_sessionmaker[AsyncSession],
+    resource_id: str,
+    corpus: Path,
+) -> None:
+    """立碑而不是删除, 是为了文件被移回来时能原地复活。"""
+
+    await service.scan(resource_id, mode=ScanMode.FULL_SWEEP)
+
+    text = (corpus / "readme.txt").read_text(encoding="utf-8")
+    (corpus / "readme.txt").unlink()
+    await service.scan(resource_id, mode=ScanMode.FULL_SWEEP)
+
+    (corpus / "readme.txt").write_text(text, encoding="utf-8")
+    await service.scan(resource_id, mode=ScanMode.FULL_SWEEP)
+
+    async with sessions() as session:
+        stmt = select(Document).where(Document.uri.like("%readme.txt"))
+        doc = (await session.execute(stmt)).scalar_one()
+
+    assert doc.lifecycle_state is DocumentLifecycleState.ACTIVE
+
+
+async def test_incremental_scan_never_tombstones(
+    service: ScanService,
+    sessions: async_sessionmaker[AsyncSession],
+    resource_id: str,
+    corpus: Path,
+) -> None:
+    """增量扫描看到的是一个子集, 据此判定删除会把整库误伤成墓碑。"""
+
+    await service.scan(resource_id, mode=ScanMode.FULL_SWEEP)
+
+    (corpus / "readme.txt").unlink()
+
+    outcome = await service.scan(resource_id, mode=ScanMode.INCREMENTAL)
+
+    assert outcome.tombstoned == 0
+
+    async with sessions() as session:
+        stmt = select(Document).where(Document.uri.like("%readme.txt"))
+        doc = (await session.execute(stmt)).scalar_one()
+
+    assert doc.lifecycle_state is DocumentLifecycleState.ACTIVE
+
+
+# --------------------------------------------------------------------------- #
+# 容错
+# --------------------------------------------------------------------------- #
+async def test_one_bad_document_does_not_abort_the_run(
+    service: ScanService,
+    sessions: async_sessionmaker[AsyncSession],
+    resource_id: str,
+    corpus: Path,
+) -> None:
+    """单篇失败要被隔离。二十万篇里有一篇坏文件就整轮作废是不可接受的。"""
+
+    # 扩展名声称是 PDF, 内容却不是 —— 解析必然失败
+    (corpus / "broken.pdf").write_bytes(b"this is definitely not a pdf")
+
+    outcome = await service.scan(resource_id, mode=ScanMode.FULL_SWEEP)
+
+    assert outcome.failed_docs == 1
+    assert outcome.parsed == 2  # 另外两篇照常完成
+    assert outcome.state is JobState.COMPLETED_WITH_ERRORS
+
+    async with sessions() as session:
+        stmt = select(Document).where(Document.uri.like("%broken.pdf"))
+        doc = (await session.execute(stmt)).scalar_one()
+
+    assert doc.pipe_state is DocumentPipeState.FAILED
+    assert doc.pipe_error_kind is not None
+
+
+async def test_draft_resource_is_rejected_without_creating_a_job(
+    sessions: async_sessionmaker[AsyncSession],
+    resources: ResourceService,
+    service: ScanService,
+    corpus: Path,
+) -> None:
+    """立刻失败的 Job 对用户没有价值, 只会把作业历史填满噪声。"""
+
+    resource = await resources.create(
+        ResourceDraft(
+            name="draft-only",
+            connector_kind="local_fs",
+            config={"root_path": str(corpus)},
+        )
+    )
+
+    with pytest.raises(ResourceNotScannableError):
+        await service.scan(resource.id)
+
+    async with sessions() as session:
+        jobs = (await session.execute(select(Job))).scalars().all()
+
+    assert jobs == []
+
+
+# --------------------------------------------------------------------------- #
+# 作业记录
+# --------------------------------------------------------------------------- #
+async def test_job_records_counters_and_discovery_flag(
+    service: ScanService,
+    sessions: async_sessionmaker[AsyncSession],
+    resource_id: str,
+) -> None:
+    """``is_discovery_complete`` 是删除对账的硬门闸, 必须真的被置位。"""
+
+    outcome = await service.scan(resource_id, mode=ScanMode.FULL_SWEEP)
+
+    async with sessions() as session:
+        job = await session.get(Job, outcome.job_id)
+
+    assert job is not None
+    assert job.is_discovery_complete is True
+    assert job.finished_at is not None
+    assert job.current_stage is None
+    assert job.discovered == outcome.discovered
+    assert job.chunks_written == outcome.chunks_written
+
+
+async def test_limit_truncates_processing_but_not_discovery(
+    service: ScanService,
+    sessions: async_sessionmaker[AsyncSession],
+    resource_id: str,
+) -> None:
+    """limit 只截断处理量。discover 仍须完整, 否则对账会误判。"""
+
+    outcome = await service.scan(resource_id, mode=ScanMode.FULL_SWEEP, limit=1)
+
+    assert outcome.discovered >= 3
+    assert outcome.parsed <= 1
+
+    async with sessions() as session:
+        docs = (await session.execute(select(Document))).scalars().all()
+
+    assert len(docs) >= 3
+    assert any(d.pipe_state is DocumentPipeState.PENDING for d in docs)
+
+
+async def test_no_embed_is_completed_by_an_ordinary_incremental_scan(
+    sessions: async_sessionmaker[AsyncSession],
+    resources: ResourceService,
+    service: ScanService,
+    resource_id: str,
+    sink: FakeSink,
+) -> None:
+    text_only = ScanService(sessions, resources, embedder=NullEmbedder())
+    first = await text_only.scan(resource_id)
+    assert first.ok
+    assert first.vectors_written == 0
+    async with sessions() as session:
+        docs = (
+            await session.scalars(
+                select(Document).where(Document.lifecycle_state == DocumentLifecycleState.ACTIVE)
+            )
+        ).all()
+        assert all(d.pipe_state is DocumentPipeState.CHUNKED for d in docs)
+        assert all(d.indexed_hash is None for d in docs)
+
+    recovered = await service.scan(resource_id)
+    assert recovered.ok
+    assert recovered.parsed == 2
+    assert recovered.vectors_written == len(sink.records) > 0
+
+
+async def test_legacy_indexed_documents_with_pending_vectors_are_retried(
+    service: ScanService,
+    sessions: async_sessionmaker[AsyncSession],
+    resource_id: str,
+) -> None:
+    await service.scan(resource_id)
+    async with sessions() as session:
+        await session.execute(
+            update(Chunk)
+            .where(Chunk.granularity == Granularity.CHUNK)
+            .values(vector_state=VectorState.PENDING)
+        )
+        await session.commit()
+
+    result = await service.scan(resource_id)
+    assert result.ok
+    assert result.parsed == 2
+    async with sessions() as session:
+        pending = (
+            await session.scalars(select(Chunk).where(Chunk.vector_state == VectorState.PENDING))
+        ).all()
+    assert pending == []
+
+
+async def test_limit_does_not_strand_older_pending_documents(
+    service: ScanService,
+    resource_id: str,
+    corpus: Path,
+) -> None:
+    import os
+
+    os.utime(corpus / "notes.md", (1000, 1000))
+    os.utime(corpus / "readme.txt", (2000, 2000))
+    first = await service.scan(resource_id, limit=1)
+    assert first.parsed == 1
+    second = await service.scan(resource_id)
+    assert second.ok
+    assert second.parsed == 1
+    assert first.vectors_written > 0
+    assert second.vectors_written > 0
+
+
+@pytest.mark.parametrize("write_before_failure", [False, True])
+async def test_vector_failure_does_not_acknowledge_document_completion(
+    service: ScanService,
+    sessions: async_sessionmaker[AsyncSession],
+    resource_id: str,
+    sink: FakeSink,
+    monkeypatch: pytest.MonkeyPatch,
+    write_before_failure: bool,
+) -> None:
+    original = sink.upsert
+
+    async def fail(records: Sequence[VectorRecord]) -> int:
+        if write_before_failure:
+            await original(records)
+        raise VectorSinkError("interrupted vector write")
+
+    monkeypatch.setattr(sink, "upsert", fail)
+    first = await service.scan(resource_id)
+    assert first.state is JobState.FAILED
+    async with sessions() as session:
+        unfinished = (
+            await session.scalars(select(Document).where(Document.pipe_state == DocumentPipeState.CHUNKED))
+        ).all()
+        assert len(unfinished) == 1
+        assert unfinished[0].indexed_hash is None
+
+    monkeypatch.setattr(sink, "upsert", original)
+    second = await service.scan(resource_id)
+    assert second.ok
+    assert second.parsed == 2
+    third = await service.scan(resource_id, mode=ScanMode.FULL_SWEEP)
+    assert third.parsed == 0
+    async with sessions() as session:
+        live = set(await session.scalars(select(Chunk.id).where(Chunk.granularity == Granularity.CHUNK)))
+    assert set(sink.records) == live
+
+
+async def test_short_vector_write_is_not_reported_as_success(
+    service: ScanService,
+    resource_id: str,
+    sink: FakeSink,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def short_write(records: Sequence[VectorRecord]) -> int:
+        return 0
+
+    monkeypatch.setattr(sink, "upsert", short_write)
+    result = await service.scan(resource_id)
+    assert result.state is JobState.FAILED
+
+
+async def test_old_chunker_version_is_rebuilt_without_a_file_change(
+    service: ScanService,
+    sessions: async_sessionmaker[AsyncSession],
+    resource_id: str,
+) -> None:
+    from shovel.pipeline.chunker import CHUNKER_VERSION
+
+    await service.scan(resource_id)
+    async with sessions() as session:
+        await session.execute(
+            update(Document)
+            .where(Document.pipe_state == DocumentPipeState.INDEXED)
+            .values(chunker_version="legacy")
+        )
+        await session.commit()
+
+    result = await service.scan(resource_id)
+    assert result.ok
+    assert result.parsed == 2
+    async with sessions() as session:
+        versions = set(
+            await session.scalars(
+                select(Document.chunker_version).where(Document.pipe_state == DocumentPipeState.INDEXED)
+            )
+        )
+    assert versions == {CHUNKER_VERSION}
+
+
+async def test_embedding_model_change_rebuilds_unchanged_documents(
+    service: ScanService,
+    sessions: async_sessionmaker[AsyncSession],
+    resources: ResourceService,
+    resource_id: str,
+    sink: FakeSink,
+) -> None:
+    class NewEmbedder(FakeEmbedder):
+        @property
+        def model_version(self) -> str:
+            return "fake-embed@2"
+
+    await service.scan(resource_id)
+    changed = ScanService(sessions, resources, embedder=NewEmbedder(), sink=sink)
+    result = await changed.scan(resource_id)
+    assert result.ok
+    assert result.parsed == 2
+    assert all(r.model_version == "fake-embed@2" for r in sink.records.values())
+
+
+async def test_force_rebuild_repairs_a_lost_vector_index(
+    service: ScanService,
+    resource_id: str,
+    sink: FakeSink,
+) -> None:
+    await service.scan(resource_id)
+    sink.records.clear()
+    result = await service.scan(resource_id, force=True)
+    assert result.ok
+    assert result.parsed == 2
+    assert len(sink.records) > 0
+
+
+async def test_same_files_in_two_resources_have_distinct_chunks(
+    service: ScanService,
+    sessions: async_sessionmaker[AsyncSession],
+    resources: ResourceService,
+    resource_id: str,
+    corpus: Path,
+    sink: FakeSink,
+) -> None:
+    other = await resources.create(
+        ResourceDraft(
+            name="second-copy",
+            connector_kind="local_fs",
+            config={"root_path": str(corpus)},
+        )
+    )
+    await resources.verify(other.id)
+    assert (await service.scan(resource_id)).ok
+    original_ids = set(sink.records)
+    assert (await service.scan(other.id)).ok
+    other_ids = {r.id for r in sink.records.values() if r.resource_id == other.id}
+    assert original_ids.isdisjoint(other_ids)
+    assert original_ids <= set(sink.records)
+    async with sessions() as session:
+        ids = set(await session.scalars(select(Chunk.id).where(Chunk.granularity == Granularity.CHUNK)))
+    assert ids == set(sink.records)
+
+
+async def test_failed_tombstone_deletion_is_retried_by_next_scan(
+    service: ScanService,
+    sessions: async_sessionmaker[AsyncSession],
+    resource_id: str,
+    corpus: Path,
+    sink: FakeSink,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    await service.scan(resource_id)
+    original = sink.delete_document
+
+    async def fail(resource: str, uri: str) -> int:
+        raise VectorSinkError("deletion interrupted")
+
+    monkeypatch.setattr(sink, "delete_document", fail)
+    (corpus / "readme.txt").unlink()
+    result = await service.scan(resource_id, mode=ScanMode.FULL_SWEEP)
+    assert result.state is JobState.FAILED
+    async with sessions() as session:
+        intent = (await session.scalars(select(DeletionOutbox).where(DeletionOutbox.done_at.is_(None)))).one()
+        assert intent.attempts == 1
+        assert intent.last_error is not None
+
+    monkeypatch.setattr(sink, "delete_document", original)
+    assert (await service.scan(resource_id)).ok
+    assert not any(r.doc_uri.endswith("readme.txt") for r in sink.records.values())
+    async with sessions() as session:
+        pending = list(await session.scalars(select(DeletionOutbox).where(DeletionOutbox.done_at.is_(None))))
+    assert pending == []
+
+
+async def test_no_embed_tombstones_keep_a_real_cleanup_intent(
+    service: ScanService,
+    sessions: async_sessionmaker[AsyncSession],
+    resources: ResourceService,
+    resource_id: str,
+    corpus: Path,
+    sink: FakeSink,
+) -> None:
+    await service.scan(resource_id)
+    (corpus / "readme.txt").unlink()
+    text_only = ScanService(sessions, resources, embedder=NullEmbedder())
+    result = await text_only.scan(resource_id, mode=ScanMode.FULL_SWEEP)
+    assert result.ok
+    assert result.tombstoned == 1
+    assert any(r.doc_uri.endswith("readme.txt") for r in sink.records.values())
+    await IndexCleanupService(sessions, sink).drain()
+    assert not any(r.doc_uri.endswith("readme.txt") for r in sink.records.values())
+
+
+async def test_resource_deletion_survives_cleanup_failure_and_restart(
+    service: ScanService,
+    sessions: async_sessionmaker[AsyncSession],
+    resources: ResourceService,
+    resource_id: str,
+    sink: FakeSink,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    await service.scan(resource_id)
+    assert await resources.delete(resource_id) == resource_id
+    original = sink.delete_resource
+
+    async def fail(resource: str) -> int:
+        raise VectorSinkError("resource deletion interrupted")
+
+    monkeypatch.setattr(sink, "delete_resource", fail)
+    with pytest.raises(VectorSinkError):
+        await IndexCleanupService(sessions, sink).drain()
+    async with sessions() as session:
+        intent = (await session.scalars(select(DeletionOutbox).where(DeletionOutbox.done_at.is_(None)))).one()
+        assert intent.resource_id == resource_id
+        assert intent.attempts == 1
+        assert intent.last_error is not None
+        assert list(await session.scalars(select(Document))) == []
+
+    monkeypatch.setattr(sink, "delete_resource", original)
+    assert await IndexCleanupService(sessions, sink).drain() == 1
+    assert sink.records == {}
+    assert await IndexCleanupService(sessions, sink).drain() == 0
+
+
+async def test_unexpected_failure_records_failed_job(
+    service: ScanService,
+    sessions: async_sessionmaker[AsyncSession],
+    resource_id: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def fail(**kwargs: Any) -> bool:
+        raise RuntimeError("unexpected failure")
+
+    monkeypatch.setattr(service, "_process", fail)
+    with pytest.raises(RuntimeError, match="unexpected failure"):
+        await service.scan(resource_id)
+    async with sessions() as session:
+        job = (await session.scalars(select(Job))).one()
+    assert job.state is JobState.FAILED
+    assert job.error_kind is ErrorKind.INTERNAL
+    assert job.finished_at is not None
+
+
+async def test_interrupted_write_and_reindex_with_real_vectors(
+    sessions: async_sessionmaker[AsyncSession],
+    resources: ResourceService,
+    resource_id: str,
+    corpus: Path,
+    embedder: FakeEmbedder,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import zvec
+
+    from shovel.pipeline.sink import ZvecChunkSink
+    from shovel.vector.schema import chunk_collection_schema
+    from shovel.vector.store import init_zvec_runtime
+
+    init_zvec_runtime()
+    path = corpus / "node_modules" / "index"
+    path.parent.mkdir()
+    collection = zvec.create_and_open(str(path), chunk_collection_schema(dim=_DIM))
+    sink = ZvecChunkSink(collection)
+    service = ScanService(sessions, resources, embedder=embedder, sink=sink)
+    original = sink.upsert
+
+    async def interrupted(records: Sequence[VectorRecord]) -> int:
+        await original(records)
+        raise VectorSinkError("write landed, completion was interrupted")
+
+    try:
+        monkeypatch.setattr(sink, "upsert", interrupted)
+        assert (await service.scan(resource_id)).state is JobState.FAILED
+        monkeypatch.setattr(sink, "upsert", original)
+        assert (await service.scan(resource_id)).ok
+        async with sessions() as session:
+            before = set(
+                await session.scalars(select(Chunk.id).where(Chunk.granularity == Granularity.CHUNK))
+            )
+        assert set(collection.fetch(list(before))) == before
+
+        (corpus / "readme.txt").write_text("replacement text", encoding="utf-8")
+        assert (await service.scan(resource_id, mode=ScanMode.FULL_SWEEP)).ok
+        async with sessions() as session:
+            after = set(await session.scalars(select(Chunk.id).where(Chunk.granularity == Granularity.CHUNK)))
+        assert int(collection.stats.doc_count) == len(after)
+        assert set(collection.fetch(list(after))) == after
+        assert collection.fetch(list(before - after)) == {}
+    finally:
+        await sink.aclose()

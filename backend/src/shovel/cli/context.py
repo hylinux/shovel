@@ -4,12 +4,12 @@ from shovel.services.config_server import ShovelContext
 
 
 class CliContext(ShovelContext):
-
-    def __init__(self):
+    def __init__(self) -> None:
         """
         根据操作系统读出默认的用户Profile路径
         """
         super().__init__()
+        self.request_key: str | None = None
+
 
 cli_context = CliContext()
-

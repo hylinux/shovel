@@ -11,13 +11,14 @@ from shovel.cli.exception import CliExceptionHandler
 P = ParamSpec("P")
 R = TypeVar("R")
 
+
 def command_handler() -> Callable[
     [Callable[P, R]],
     Callable[P, R | None],
 ]:
 
     def decorator(
-            func: Callable[P, R],
+        func: Callable[P, R],
     ) -> Callable[P, R | None]:
 
         @wraps(func)
@@ -27,7 +28,6 @@ def command_handler() -> Callable[
         ) -> R | None:
 
             try:
-
                 return func(
                     *args,
                     **kwargs,
@@ -42,4 +42,3 @@ def command_handler() -> Callable[
         return wrapper
 
     return decorator
-

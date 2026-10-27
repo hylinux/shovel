@@ -1,8 +1,8 @@
-#---------------------------------------------------------
+# ---------------------------------------------------------
 # 配置载入的错误处理
 #
 # 目标: 把库内部抛出的技术性异常, 翻译成用户能直接照做的提示。
-#---------------------------------------------------------
+# ---------------------------------------------------------
 from __future__ import annotations
 
 import re
@@ -10,15 +10,22 @@ import tomllib
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from shovel.exceptions.config import ConfigError as _BaseConfigError
+
 if TYPE_CHECKING:
     from pydantic import ValidationError
 
 
-class ConfigError(Exception):
+class ConfigError(_BaseConfigError):
     """配置载入失败。
 
     message 已经是面向最终用户的可读文本, CLI 捕获后直接打印即可,
     不需要再展示 traceback (配置错误是用户错误, 不是程序缺陷)。
+
+    继承 :class:`shovel.exceptions.config.ConfigError` 而不是裸 Exception:
+    CLI 的异常处理器只认 ShovelError, 其余一律归到"发生了未知错误,
+    加 --debug 看 traceback"。而配置写错了恰恰是最不需要 traceback、
+    最需要把那段精心排版的提示原样打出来的场景。
     """
 
 
@@ -26,11 +33,12 @@ class ConfigError(Exception):
 # 代码片段渲染
 # ================================================================
 
+
 def render_snippet(
-        text: str,
-        lineno: int,
-        colno: int,
-        context: int = 2,
+    text: str,
+    lineno: int,
+    colno: int,
+    context: int = 2,
 ) -> str:
     """渲染出错位置前后若干行, 并用 ^ 指向具体列。
 
@@ -73,7 +81,7 @@ _TOML_EOF = re.compile(r"\(at end of document\)")
 _TOML_HINTS: tuple[tuple[str, str], ...] = (
     (
         "Invalid value",
-        "该位置的值无效。注意 TOML 没有 null —— 想表示\"未设置\"请直接删掉这一行; "
+        '该位置的值无效。注意 TOML 没有 null —— 想表示"未设置"请直接删掉这一行; '
         "字符串必须用双引号包裹; 布尔值是小写的 true / false。",
     ),
     (
@@ -82,8 +90,7 @@ _TOML_HINTS: tuple[tuple[str, str], ...] = (
     ),
     (
         "Invalid statement",
-        "该行不是合法的 TOML 语句。检查是否误用了 JSON 的 { } / : 语法, "
-        "或表头写成了 [name] 以外的形式。",
+        "该行不是合法的 TOML 语句。检查是否误用了 JSON 的 { } / : 语法, 或表头写成了 [name] 以外的形式。",
     ),
     (
         "Cannot overwrite a value",
@@ -105,8 +112,7 @@ _TOML_HINTS: tuple[tuple[str, str], ...] = (
     ),
     (
         "Invalid escape",
-        "字符串里有非法的转义序列。反斜杠请写成 \\\\ , "
-        "或改用单引号字面量 (单引号内不做转义)。",
+        "字符串里有非法的转义序列。反斜杠请写成 \\\\ , 或改用单引号字面量 (单引号内不做转义)。",
     ),
     (
         "Unescaped",
@@ -131,9 +137,9 @@ def _toml_hint(msg: str) -> str:
 
 
 def format_toml_error(
-        path: Path,
-        text: str,
-        exc: tomllib.TOMLDecodeError,
+    path: Path,
+    text: str,
+    exc: tomllib.TOMLDecodeError,
 ) -> str:
     """把 TOMLDecodeError 格式化成带位置和片段的可读文本。"""
 
@@ -192,8 +198,8 @@ _VALIDATION_HINTS: dict[str, str] = {
 
 
 def format_validation_error(
-        path: Path,
-        exc: ValidationError,
+    path: Path,
+    exc: ValidationError,
 ) -> str:
     """把 pydantic 的 ValidationError 逐字段展开成可读文本。"""
 
@@ -221,7 +227,8 @@ def format_validation_error(
 
         lines.append("")
 
-    lines.append("  可执行 'shovel config --check' 重新校验, "
-                 "或 'shovel config --force' 生成一份合法的默认配置。")
+    lines.append(
+        "  可执行 'shovel config --check' 重新校验, 或 'shovel config --force' 生成一份合法的默认配置。"
+    )
 
     return "\n".join(lines)

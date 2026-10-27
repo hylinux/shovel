@@ -10,27 +10,25 @@ from shovel.config.settings import AppSettings
 
 
 class ShovelContext:
-
-    def __init__(self):
+    def __init__(self) -> None:
         """
         根据操作系统读出默认的用户Profile路径
         """
         self.debug = os.environ.get("SHOVEL_DEBUG") == "1"
 
     # 创建默认的配置文件
-    def create_default_config_file(self, *, force: bool = False,) -> Path | None:
+    def create_default_config_file(
+        self,
+        *,
+        force: bool = False,
+    ) -> Path | None:
         config_file = self.get_default_config_file()
 
         return AppSettings().save(config_file, overwrite=force)
 
-
-
-
-
     # 验证各种初始化的目录, 这里是总的验证
     def validate_enviroment(self) -> None:
         pass
-
 
     # 验证整个profile 是否存在
 
@@ -38,7 +36,6 @@ class ShovelContext:
         profile_dir = self.get_default_profile_dir()
 
         return Path.exists(profile_dir)
-
 
     def validate_config_exists(self) -> bool:
         return Path.exists(self.get_default_config_file())
@@ -51,9 +48,6 @@ class ShovelContext:
 
     def validate_logs_dir(self) -> bool:
         return Path.exists(self.get_default_logs_dir())
-
-
-
 
     def get_os_name(self) -> str:
         system = platform.system()
@@ -69,7 +63,6 @@ class ShovelContext:
             return f"Linux {release}"
 
         return platform.platform()
-
 
     def get_default_profile_dir(self) -> Path:
         home = Path.home()
@@ -106,31 +99,36 @@ class ShovelContext:
 
         return config_dir / "settings.toml"
 
-
     def get_default_config_dir(self) -> Path:
         profile_dir = self.get_default_profile_dir()
 
         return profile_dir / "config"
 
+    def get_default_knowledge_dir(self) -> Path:
+        profile_dir = self.get_default_profile_dir()
+
+        return profile_dir / "knowledge"
+
+    def get_default_memory_dir(self) -> Path:
+        profile_file = self.get_default_profile_dir()
+
+        return profile_file / "memory"
 
     def get_package_version(
-            self,
-            package_name: str,
-            default: str = "unknown",
+        self,
+        package_name: str,
+        default: str = "unknown",
     ) -> str:
         try:
             return metadata.version(package_name)
         except metadata.PackageNotFoundError:
             return default
 
-
     def get_shovel_version(self) -> str:
         return self.get_package_version(
             PRODUCT.package_name,
             PRODUCT.default_version,
         )
-
-
 
     def get_generic_host_version(self) -> str:
         return self.get_package_version(

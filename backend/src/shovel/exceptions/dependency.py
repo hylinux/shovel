@@ -26,4 +26,3 @@ class MissingDependencyError(DependencyError):
 
 class UnsupportedDependencyVersionError(DependencyError):
     pass
-

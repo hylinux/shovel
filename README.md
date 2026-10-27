@@ -65,6 +65,16 @@ and the Generic Host/FastAPI backend on `http://127.0.0.1:9999`. Next.js proxies
 configuration keys `dev_frontend_port`, `dev_http_host`, and `dev_http_port` control
 these addresses. Both services stop when either exits or the command is stopped.
 
+`run dev` also prints detailed backend diagnostics to the terminal: HTTP route,
+status and duration, operation/job IDs, scan stages and counts, retrieval, model
+calls, and Memory actions. Responses include `X-Shovel-Request-ID` for correlating
+requests with these logs. Backend diagnostics omit request/response bodies,
+credentials, document text and source paths. Next.js server output and browser
+console logs are forwarded with the `web` prefix; browser console output is
+forwarded verbatim, so do not log sensitive data there. These additional
+diagnostics are scoped to `run dev`, not `run prd` or other CLI commands.
+Normal production lifecycle and error logs are unchanged.
+
 Production uses **only Python/FastAPI**, serving an already-exported frontend:
 
 ```powershell

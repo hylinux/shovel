@@ -11,6 +11,7 @@ from shovel.db.base import now_ts
 from shovel.db.model.retrieval import DeletionOutbox
 from shovel.domain.enums import DeletionScope
 from shovel.exceptions.pipeline import VectorSinkError
+from shovel.runtime.diagnostics import trace
 
 if TYPE_CHECKING:
     from shovel.pipeline.sink import ChunkVectorSink
@@ -28,6 +29,7 @@ class IndexCleanupService:
     async def drain(self, *, resource_id: str | None = None) -> int:
         """Retry persisted deletions; acknowledge only after the sink flushes."""
         completed = 0
+        trace("cleanup.started", resource_id=resource_id)
         while True:
             stmt = (
                 select(DeletionOutbox)
@@ -45,10 +47,18 @@ class IndexCleanupService:
             async with self._sessions() as session:
                 intent = (await session.execute(stmt)).scalar_one_or_none()
                 if intent is None:
+                    trace("cleanup.completed", resource_id=resource_id, completed=completed)
                     return completed
                 intent.attempts += 1
                 await session.commit()
 
+                trace(
+                    "cleanup.deleting",
+                    deletion_id=intent.id,
+                    resource_id=intent.resource_id,
+                    scope=intent.scope.value,
+                    attempt=intent.attempts,
+                )
                 try:
                     if intent.resource_id is None:
                         raise VectorSinkError(f"Deletion {intent.id} has no resource_id.")
@@ -61,6 +71,7 @@ class IndexCleanupService:
                 except VectorSinkError as exc:
                     intent.last_error = exc.details or exc.message
                     await session.commit()
+                    trace("cleanup.failed", deletion_id=intent.id, error_type=type(exc).__name__)
                     raise
 
                 intent.done_at = now_ts()

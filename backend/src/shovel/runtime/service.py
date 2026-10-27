@@ -11,6 +11,7 @@ from shovel.config.settings import AppSettings
 from shovel.db.migrations import upgrade_database
 from shovel.exceptions.pipeline import VectorSinkError
 from shovel.pipeline.sink import ZvecChunkSink, open_chunk_sink
+from shovel.runtime.diagnostics import trace
 from shovel.runtime.locking import RuntimeLock
 from shovel.services.resource_service import ResourceService
 
@@ -63,6 +64,7 @@ class Runtime:
     async def sink(self) -> ZvecChunkSink:
         async with self._sink_lock:
             if self._sink is None:
+                trace("index.opening")
                 task = asyncio.create_task(
                     asyncio.to_thread(open_chunk_sink, self.settings.zvec.knowledge_path)
                 )
@@ -72,10 +74,12 @@ class Runtime:
                     self._sink = await task
                     raise
                 except FileNotFoundError as exc:
+                    trace("index.open.failed", error_type=type(exc).__name__)
                     raise VectorSinkError(
                         "知识库向量集合不存在,清理意图仍保留。",
                         hint="运行 shovel init 初始化向量集合;不配置模型也可以使用资源管理和关键词检索。",
                     ) from exc
+                trace("index.opened")
             return self._sink
 
     async def close(self) -> None:
@@ -97,15 +101,24 @@ async def create_runtime(
     resources: ResourceService,
 ) -> AsyncGenerator[Runtime]:
     with RuntimeLock(settings):
+        trace("runtime.initializing")
         await asyncio.to_thread(_prepare_database_path, str(engine.url.database or ""))
         await upgrade_database(engine)
         runtime = Runtime(settings, sessions, resources)
         try:
             await runtime.operations.recover()
             await runtime.chat.recover()
+            trace(
+                "runtime.ready",
+                model_configured=settings.model.is_configured,
+                embedding_configured=settings.embedding.is_configured,
+                memory_configured=runtime.memory.configured,
+            )
             yield runtime
         finally:
+            trace("runtime.stopping")
             await runtime.close()
+            trace("runtime.stopped")
 
 
 def _prepare_database_path(database_url_path: str) -> None:

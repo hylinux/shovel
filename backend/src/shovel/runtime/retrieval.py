@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import re
 from collections import defaultdict
+from time import perf_counter
 from typing import TYPE_CHECKING, Any
 
 from sqlalchemy import and_, column, or_, select, table, text
@@ -19,6 +20,7 @@ from shovel.domain.enums import (
     VectorState,
 )
 from shovel.pipeline.embedder import build_embedder
+from shovel.runtime.diagnostics import trace
 from shovel.runtime.errors import RuntimeFailure
 from shovel.runtime.schemas import SearchInput
 
@@ -89,16 +91,19 @@ class RetrievalService:
         return identifiers
 
     async def search(self, request: SearchInput) -> dict[str, Any]:
+        started = perf_counter()
         scope = await self._scope(request.resource_ids)
         mode = request.mode
         if mode == "auto":
             mode = "hybrid" if self.runtime.settings.embedding.is_configured else "keyword"
         if mode in {"vector", "hybrid"} and not self.runtime.settings.embedding.is_configured:
             raise RuntimeFailure("向量检索需要配置 [embedding];可改用 keyword。", status=503)
+        trace("retrieval.started", mode=mode, resource_count=len(scope), limit=request.limit)
         candidate_count = min(300, request.limit * 10)
         rankings: list[list[str]] = []
         if scope and mode in {"keyword", "hybrid"}:
             rankings.append(await self._keyword(request, scope, candidate_count))
+            trace("retrieval.keyword.completed", candidates=len(rankings[-1]))
         model_version: str | None = None
         if scope and mode in {"vector", "hybrid"}:
             embedder = build_embedder(
@@ -130,6 +135,7 @@ class RetrievalService:
                         )
                     )
                 rankings.append([identifier for identifier in identifiers if identifier in valid])
+                trace("retrieval.vector.completed", candidates=len(rankings[-1]))
             finally:
                 await embedder.aclose()
         scores: defaultdict[str, float] = defaultdict(float)
@@ -200,4 +206,11 @@ class RetrievalService:
             )
             session.add(log)
             await session.commit()
+        trace(
+            "retrieval.completed",
+            retrieval_id=log.id,
+            mode=mode,
+            hits=len(hits),
+            elapsed_ms=round((perf_counter() - started) * 1000, 2),
+        )
         return {"mode": mode, "items": hits, "retrieval_id": log.id}

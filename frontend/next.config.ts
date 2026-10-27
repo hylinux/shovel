@@ -6,6 +6,10 @@ export default function nextConfig(phase: string): NextConfig {
   return {
     ...(development
       ? {
+          logging: {
+            incomingRequests: true,
+            browserToTerminal: true,
+          },
           async rewrites() {
             const host = process.env.SHOVEL_BACKEND_HOST || "127.0.0.1";
             const port = process.env.SHOVEL_BACKEND_PORT || "9999";

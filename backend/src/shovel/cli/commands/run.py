@@ -36,6 +36,7 @@ from shovel.cli.decorators import command_handler
 from shovel.cli.ui.console import console
 from shovel.cli.ui.logo import get_logo, get_tagline
 from shovel.config.settings import AppSettings, load_settings
+from shovel.runtime.diagnostics import development_logging, trace
 from shovel.runtime.hosting import build_host
 
 # -----------------------------------------------------------------------------
@@ -124,6 +125,11 @@ def run_prd(
 
 
 async def _run_dev_async(frontend_dir_override: Path | None = None) -> None:
+    with development_logging():
+        await _run_dev_logged(frontend_dir_override)
+
+
+async def _run_dev_logged(frontend_dir_override: Path | None) -> None:
     console.print()
     console.print(get_logo())
     console.print(get_tagline())
@@ -351,6 +357,7 @@ async def _run_frontend(
         console.error("`npm` not found on PATH. Please install Node.js first.")
         raise typer.Exit(code=1) from exc
 
+    trace("frontend.started", pid=proc.pid, port=frontend_port)
     pumps: list[asyncio.Task[Any]] = []
     if capture_output:
         pumps.append(
@@ -371,6 +378,7 @@ async def _run_frontend(
                 timeout=_PUMP_DRAIN_TIMEOUT,
             )
             await _cancel_all(still_running)
+        trace("frontend.stopped", pid=proc.pid, exit_code=proc.returncode)
 
 
 async def _terminate(proc: asyncio.subprocess.Process) -> None:

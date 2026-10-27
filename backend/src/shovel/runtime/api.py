@@ -26,6 +26,7 @@ from shovel.exceptions.resource import (
     ResourceNotFoundError,
     UnknownConnectorError,
 )
+from shovel.runtime.diagnostics import DevelopmentRequestLogging
 from shovel.runtime.errors import NotFound, RuntimeFailure
 from shovel.runtime.hosting import resolve_runtime
 from shovel.runtime.schemas import (
@@ -203,8 +204,16 @@ class LocalAccessMiddleware:
         await self.app(scope, receive, send)
 
 
-def configure_api(app: FastAPI, provider: Callable[[], object], settings: AppSettings) -> None:
+def configure_api(
+    app: FastAPI,
+    provider: Callable[[], object],
+    settings: AppSettings,
+    *,
+    development: bool = False,
+) -> None:
     app.add_middleware(LocalAccessMiddleware, settings=settings)
+    if development:
+        app.add_middleware(DevelopmentRequestLogging)
     app.state.runtime_provider = provider
     router = APIRouter(prefix="/api/v1")
 

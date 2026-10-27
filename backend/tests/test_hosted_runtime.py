@@ -6,6 +6,7 @@ import os
 import socket
 import threading
 from collections.abc import AsyncIterator
+from contextlib import nullcontext
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -30,6 +31,7 @@ from shovel.pipeline.scan_service import ScanService
 from shovel.runtime.api import configure_api
 from shovel.runtime.chat import HttpChatModel
 from shovel.runtime.client import execute_command
+from shovel.runtime.diagnostics import development_logging, trace, trace_context
 from shovel.runtime.errors import RuntimeFailure
 from shovel.runtime.hosting import build_cli_host, build_host, mount_frontend, resolve_runtime
 from shovel.runtime.locking import RuntimeLock
@@ -105,6 +107,154 @@ async def index_notes(runtime: Runtime, path: Path, name: str = "notes") -> str:
     assert await runtime.operations.run_once()
     assert (await runtime.operations.get(operation.id)).state == "succeeded"
     return resource_id
+
+
+@pytest.mark.parametrize("development", [False, True])
+async def test_dev_diagnostics_trace_runtime_without_logging_payloads(
+    runtime: Runtime,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    development: bool,
+) -> None:
+    directory = tmp_path / "private-source-path"
+    directory.mkdir()
+    (directory / "note.txt").write_text("Shovel private-document-body", encoding="utf-8")
+    runtime.settings.log_level = "ERROR" if development else "DEBUG"
+    runtime.settings.memory.embedder.model = "test-memory"
+    runtime.memory._memory = FakeMemory()
+    runtime.chat.model._client = httpx.AsyncClient(
+        transport=httpx.MockTransport(
+            lambda _request: httpx.Response(
+                200, json={"choices": [{"message": {"content": "private-model-answer [1]"}}]}
+            )
+        )
+    )
+    app = FastAPI()
+    configure_api(app, lambda: runtime, runtime.settings, development=development)
+    with development_logging() if development else nullcontext():
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://127.0.0.1:9999"
+        ) as client:
+            created = await client.post(
+                "/api/v1/resources",
+                json={
+                    "name": "private-resource-name",
+                    "connector_kind": "local_fs",
+                    "config": {"root_path": str(directory)},
+                },
+                headers={"Authorization": "Bearer private-header", "Idempotency-Key": "private-key"},
+            )
+            assert created.status_code == 202
+            assert await runtime.operations.run_once()
+            resource_id = created.json()["resource_id"]
+            scan = await client.post(f"/api/v1/resources/{resource_id}/scans", json={"embed": False})
+            assert scan.status_code == 202
+            assert await runtime.operations.run_once()
+            assert (await runtime.operations.get(scan.json()["id"])).state == "succeeded"
+            conversation = (await client.post("/api/v1/conversations", json={})).json()["id"]
+            answer = await client.post(
+                f"/api/v1/conversations/{conversation}/messages?private-query-value",
+                json={"content": "Shovel private-user-message", "memory_enabled": True},
+            )
+            assert answer.status_code == 200, answer.text
+            assert answer.json()["citations"]
+            rejected = await client.post("/api/v1/credentials", json={"secret": "private-secret", "extra": 1})
+            assert rejected.status_code == 422
+    trace("outside.dev.scope")
+    output = capsys.readouterr().out
+    events = (
+        "http.started",
+        "http.completed",
+        "operation.queued",
+        "operation.started",
+        "operation.completed",
+        "resource.verify.started",
+        "resource.verify.completed",
+        "scan.discovery.completed",
+        "document.fetch",
+        "document.parse",
+        "document.chunk",
+        "document.persist",
+        "document.completed",
+        "scan.completed",
+        "retrieval.completed",
+        "model.completed",
+        "memory.completed",
+        "chat.completed",
+    )
+    if development:
+        for event in events:
+            assert event in output
+        assert f"job_id={scan.json()['job_id']}" in output
+        assert "elapsed_ms=" in output and "status=422" in output
+        assert "/api/v1/resources/{ref}/scans" in output
+        request_id = created.headers["x-shovel-request-id"]
+        queued = next(line for line in output.splitlines() if "operation.queued" in line)
+        assert request_id in queued
+    else:
+        assert not any(event in output for event in events)
+        assert "x-shovel-request-id" not in created.headers
+    assert "private-" not in output
+    assert "User prefers Chinese" not in output
+    assert "test-private-key" not in output
+    assert "outside.dev.scope" not in output
+
+
+@pytest.mark.parametrize("fail", [False, True])
+def test_dev_entry_scopes_logs_without_affecting_production(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], fail: bool
+) -> None:
+    from shovel.cli.commands import run as run_module
+
+    modes: list[bool] = []
+
+    async def serve() -> None:
+        trace("production.must.not.trace")
+
+    def host(_settings: AppSettings, *, development: bool, frontend: Path | None = None) -> Any:
+        modes.append(development)
+        return SimpleNamespace(run_async=serve, exit_code=0)
+
+    async def supervise(*_args: Any, **_kwargs: Any) -> int:
+        trace("development.entry.trace")
+        if fail:
+            raise RuntimeError("test shutdown")
+        return 0
+
+    monkeypatch.setattr(run_module, "_load_settings_or_exit", lambda: settings_at(tmp_path))
+    monkeypatch.setattr(run_module, "_resolve_frontend_dir", lambda _override: tmp_path)
+    monkeypatch.setattr(run_module, "build_host", host)
+    monkeypatch.setattr(run_module, "_supervise", supervise)
+    if fail:
+        with pytest.raises(RuntimeError, match="test shutdown"):
+            asyncio.run(run_module._run_dev_async(tmp_path))
+    else:
+        asyncio.run(run_module._run_dev_async(tmp_path))
+    assert "development.entry.trace" in capsys.readouterr().out
+    run_module.run_prd(frontend_dir=tmp_path)
+    trace("after.dev.must.not.trace")
+    assert "must.not.trace" not in capsys.readouterr().out
+    assert modes == [True, False]
+
+
+async def test_concurrent_dev_requests_keep_separate_log_contexts(
+    runtime: Runtime, capsys: pytest.CaptureFixture[str]
+) -> None:
+    app = FastAPI()
+    configure_api(app, lambda: runtime, runtime.settings, development=True)
+    with development_logging():
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://127.0.0.1:9999"
+        ) as client:
+            responses = await asyncio.gather(client.get("/api/v1/status"), client.get("/api/v1/connectors"))
+        with trace_context(component="test"):
+            trace("after.requests")
+    lines = capsys.readouterr().out.splitlines()
+    identifiers = [response.headers["x-shovel-request-id"] for response in responses]
+    assert len(set(identifiers)) == 2
+    for identifier in identifiers:
+        assert len([line for line in lines if "http." in line and identifier in line]) == 2
+    assert not any(identifier in lines[-1] for identifier in identifiers)
 
 
 async def test_profile_api_retains_scope_and_rejects_changes_during_scans(
@@ -1081,11 +1231,15 @@ async def test_real_mem0_local_qdrant_recall_persistence_and_forget(
     assert await runtime.memory.list() == []
 
 
-async def test_real_web_host_static_api_and_online_cli(tmp_path: Path) -> None:
+@pytest.mark.parametrize("development", [False, True])
+async def test_real_web_host_static_api_and_online_cli(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], development: bool
+) -> None:
     settings = settings_at(tmp_path)
     with socket.socket() as probe:
         probe.bind(("127.0.0.1", 0))
         settings.http_port = probe.getsockname()[1]
+    settings.dev_http_port = settings.http_port
     settings.http_host = "127.0.0.1"
     directory = tmp_path / "static"
     directory.mkdir()
@@ -1093,37 +1247,42 @@ async def test_real_web_host_static_api_and_online_cli(tmp_path: Path) -> None:
     root = tmp_path / "notes"
     root.mkdir()
     (root / "host.txt").write_text("Online CLI uses the shared background queue.", encoding="utf-8")
-    host = build_host(settings, development=False, frontend=directory)
-    await host.start_async()
-    try:
-        async with httpx.AsyncClient(base_url=f"http://127.0.0.1:{settings.http_port}") as client:
-            async with asyncio.timeout(15):
-                while True:
-                    try:
-                        response = await client.get("/api/v1/status")
-                        if response.status_code == 200:
-                            break
-                    except httpx.ConnectError:
-                        pass
-                    await asyncio.sleep(0.05)
-            assert "Hosted Shovel" in (await client.get("/")).text
-            assert (await client.get("/api/missing")).status_code == 404
-            created = await execute_command(
-                settings,
-                "resource.create",
-                {
-                    "name": "online",
-                    "connector_kind": "local_fs",
-                    "config": {"root_path": str(root)},
-                },
-            )
-            assert created["state"] == "succeeded"
-            scanned = await execute_command(settings, "scan", {"embed": False}, ref="online")
-            assert scanned["state"] == "succeeded"
-            assert scanned["result"]["parsed"] == 1
-            result = await client.post("/api/v1/search", json={"query": "shared", "mode": "keyword"})
-            assert result.json()["items"][0]["resource_name"] == "online"
-            assert len((await client.get("/api/v1/operations")).json()["items"]) == 2
-    finally:
-        host.lifetime.stop_application()
-        await host.stop_async()
+    with development_logging() if development else nullcontext():
+        host = build_host(settings, development=development, frontend=directory)
+        await host.start_async()
+        try:
+            async with httpx.AsyncClient(base_url=f"http://127.0.0.1:{settings.http_port}") as client:
+                async with asyncio.timeout(15):
+                    while True:
+                        try:
+                            response = await client.get("/api/v1/status")
+                            if response.status_code == 200:
+                                break
+                        except httpx.ConnectError:
+                            pass
+                        await asyncio.sleep(0.05)
+                assert ("x-shovel-request-id" in response.headers) == development
+                assert "Hosted Shovel" in (await client.get("/")).text
+                assert (await client.get("/api/missing")).status_code == 404
+                created = await execute_command(
+                    settings,
+                    "resource.create",
+                    {
+                        "name": "online",
+                        "connector_kind": "local_fs",
+                        "config": {"root_path": str(root)},
+                    },
+                )
+                assert created["state"] == "succeeded"
+                scanned = await execute_command(settings, "scan", {"embed": False}, ref="online")
+                assert scanned["state"] == "succeeded"
+                assert scanned["result"]["parsed"] == 1
+                result = await client.post("/api/v1/search", json={"query": "shared", "mode": "keyword"})
+                assert result.json()["items"][0]["resource_name"] == "online"
+                assert len((await client.get("/api/v1/operations")).json()["items"]) == 2
+        finally:
+            host.lifetime.stop_application()
+            await host.stop_async()
+    output = capsys.readouterr().out
+    for event in ("runtime.ready", "worker.started", "document.parse", "http.completed", "runtime.stopped"):
+        assert (event in output) == development

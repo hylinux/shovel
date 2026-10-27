@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import asdict
+from time import perf_counter
 from typing import TYPE_CHECKING, Any
 
 import structlog
@@ -19,6 +20,7 @@ from shovel.pipeline.cleanup import IndexCleanupService
 from shovel.pipeline.embedder import build_embedder
 from shovel.pipeline.scan_service import ScanOutcome, ScanService
 from shovel.pipeline.sink import NullVectorSink
+from shovel.runtime.diagnostics import trace, trace_context
 from shovel.runtime.errors import NotFound, RuntimeFailure
 from shovel.runtime.requests import request_fingerprint, request_operation_id
 from shovel.runtime.schemas import HistoryPruneInput, ProfileInput, ResourceInput, ResourceUpdate, ScanInput
@@ -80,6 +82,7 @@ class OperationService:
                 session.add(operation)
                 await session.commit()
         self.runtime.wake.set()
+        trace("operation.queued", operation_id=operation.id, kind=kind, resource_id=resource_id)
         return operation
 
     async def _replay(self, key: str | None, fingerprint: str) -> Operation | None:
@@ -89,6 +92,8 @@ class OperationService:
             previous = await session.get(Operation, request_operation_id(key))
         if previous is not None and previous.request_fingerprint != fingerprint:
             raise RuntimeFailure("此请求键已用于不同的操作或参数;请为新意图使用新的请求键。", status=409)
+        if previous is not None:
+            trace("operation.replayed", operation_id=previous.id, kind=previous.kind, state=previous.state)
         return previous
 
     @staticmethod
@@ -132,6 +137,12 @@ class OperationService:
             session.add(operation)
             await session.commit()
         self.runtime.wake.set()
+        trace(
+            "operation.queued",
+            operation_id=operation.id,
+            kind=operation.kind,
+            resource_id=operation.resource_id,
+        )
         return operation
 
     async def scan(
@@ -190,6 +201,13 @@ class OperationService:
             session.add(operation)
             await session.commit()
         self.runtime.wake.set()
+        trace(
+            "operation.queued",
+            operation_id=operation.id,
+            kind=operation.kind,
+            resource_id=job.resource_id,
+            job_id=job.id,
+        )
         return operation
 
     async def resource_action(
@@ -275,6 +293,7 @@ class OperationService:
                         .values(state="cancelled", finished_at=now_ts())
                     )
                 await session.commit()
+                trace("scan.cancel_requested", job_id=job.id, state=job.state.value)
             return job
 
     async def retry(self, identifier: str) -> Operation:
@@ -295,9 +314,11 @@ class OperationService:
                 job.is_cancel_requested = False
             await session.commit()
         self.runtime.wake.set()
+        trace("operation.retry_queued", operation_id=operation.id, kind=operation.kind)
         return operation
 
     async def recover(self) -> None:
+        trace("operations.recovery.started")
         async with self.runtime.sessions() as session:
             interrupted = list(await session.scalars(select(Operation).where(Operation.state == "running")))
             for operation in interrupted:
@@ -374,6 +395,11 @@ class OperationService:
             if pending_cleanup is not None and queued_cleanup is None:
                 session.add(Operation(kind="cleanup", payload={}))
             await session.commit()
+        trace(
+            "operations.recovery.completed",
+            interrupted=len(interrupted),
+            cleanup_queued=pending_cleanup is not None and queued_cleanup is None,
+        )
 
     async def run_once(self) -> bool:
         async with self.runtime.sessions() as session:
@@ -395,12 +421,24 @@ class OperationService:
                 return True
             await session.commit()
         operation = await self.get(identifier)
+        started = perf_counter()
+        trace(
+            "operation.started",
+            operation_id=identifier,
+            kind=operation.kind,
+            resource_id=operation.resource_id,
+            job_id=operation.job_id,
+            attempt=operation.attempts,
+        )
         result: dict[str, Any] = {}
         state = "succeeded"
         error: str | None = None
         propagate_cancellation = False
         try:
-            result, state = await self._execute(operation)
+            with trace_context(
+                operation_id=identifier, resource_id=operation.resource_id, job_id=operation.job_id
+            ):
+                result, state = await self._execute(operation)
             if state in {"failed", "completed_with_errors"}:
                 error = self.runtime.redact(
                     str(
@@ -444,6 +482,14 @@ class OperationService:
                         job.state = JobState.CANCELLED
                         job.finished_at = now_ts()
             await session.commit()
+        trace(
+            "operation.completed",
+            operation_id=identifier,
+            kind=operation.kind,
+            job_id=operation.job_id,
+            state=row.state if row is not None else state,
+            elapsed_ms=round((perf_counter() - started) * 1000, 2),
+        )
         if propagate_cancellation:
             raise asyncio.CancelledError
         return True
@@ -531,8 +577,11 @@ class OperationService:
                 resource_id=ref,
             )
             result = {"resource_id": resource.id}
+            trace("resource.ready", resource_id=resource.id, connector_kind=resource.connector_kind)
             if creation.verify:
+                trace("resource.verify.started")
                 verification = await resources.verify(ref)
+                trace("resource.verify.completed", ok=verification.ok)
                 result["verification"] = asdict(verification)
                 if not verification.ok:
                     return {
@@ -575,7 +624,9 @@ class OperationService:
                 "completed": completed,
             }, "succeeded"
         if operation.kind == "resource.verify":
+            trace("resource.verify.started")
             verification = await resources.verify(ref)
+            trace("resource.verify.completed", ok=verification.ok)
             return asdict(verification), "succeeded" if verification.ok else "completed_with_errors"
         if operation.kind == "resource.update":
             change = ResourceUpdate.model_validate(operation.payload)

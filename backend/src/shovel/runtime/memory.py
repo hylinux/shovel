@@ -5,11 +5,13 @@ import inspect
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from functools import partial
+from time import perf_counter
 from typing import Any
 
 from shovel.config.settings import AppSettings
 from shovel.memory.config import memory_paths
 from shovel.memory.store import open_memory
+from shovel.runtime.diagnostics import trace
 from shovel.runtime.errors import NotFound, RuntimeFailure
 
 _SCOPE = {"user_id": "local-user", "agent_id": "shovel"}
@@ -44,11 +46,21 @@ class MemoryService:
         return self._memory
 
     async def _call[T](self, action: Callable[[], T]) -> T:
+        started = perf_counter()
+        trace("memory.started", action=action.__name__)
         try:
-            return await asyncio.get_running_loop().run_in_executor(self._executor, action)
-        except RuntimeFailure:
+            result = await asyncio.get_running_loop().run_in_executor(self._executor, action)
+            trace(
+                "memory.completed",
+                action=action.__name__,
+                elapsed_ms=round((perf_counter() - started) * 1000, 2),
+            )
+            return result
+        except RuntimeFailure as exc:
+            trace("memory.failed", action=action.__name__, error_type=type(exc).__name__)
             raise
         except Exception as exc:
+            trace("memory.failed", action=action.__name__, error_type=type(exc).__name__)
             raise RuntimeFailure(
                 f"Memory 操作失败 ({type(exc).__name__})。",
                 status=502,

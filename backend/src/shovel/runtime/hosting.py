@@ -24,6 +24,7 @@ from starlette.types import Scope
 
 from shovel.config.settings import AppSettings
 from shovel.container import AppContainer
+from shovel.runtime.diagnostics import trace
 from shovel.runtime.errors import RuntimeFailure
 from shovel.runtime.locking import endpoint_file
 from shovel.runtime.service import Runtime
@@ -73,6 +74,7 @@ class RuntimeWorker(BackgroundService):  # type: ignore[misc]  # Framework does 
         assert self._runtime is not None
         runtime = self._runtime
         runtime.worker_state = "running"
+        trace("worker.started")
         try:
             while not stopping.is_set():
                 runtime.wake.clear()
@@ -93,6 +95,7 @@ class RuntimeWorker(BackgroundService):  # type: ignore[misc]  # Framework does 
         finally:
             if runtime.worker_state != "failed":
                 runtime.worker_state = "stopped"
+            trace("worker.stopped", state=runtime.worker_state)
 
     async def stop(self, stopping: asyncio.Event) -> None:
         if self._runtime is not None:
@@ -150,7 +153,9 @@ def build_host(
         .enable_health_checks(False)
         .use_urls(host, port)
         .add_hosted_service(worker)
-        .configure_endpoint(lambda _ctx, app: configure_api(app, container.runtime, settings))
+        .configure_endpoint(
+            lambda _ctx, app: configure_api(app, container.runtime, settings, development=development)
+        )
     )
     if frontend is not None:
         builder.configure_endpoint(lambda _ctx, app: mount_frontend(app, frontend))

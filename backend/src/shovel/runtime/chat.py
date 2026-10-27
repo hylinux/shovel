@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import re
+from time import perf_counter
 from typing import TYPE_CHECKING, Any
 from urllib.parse import quote
 
@@ -13,6 +14,7 @@ from sqlalchemy import func, select, update
 from shovel.config.model_settings import DefaultAgentModelSettings, ModelProviderType
 from shovel.db.base import now_ts
 from shovel.db.model.runtime import ChatMessage, Conversation
+from shovel.runtime.diagnostics import trace, trace_context
 from shovel.runtime.errors import NotFound, RuntimeFailure
 from shovel.runtime.schemas import MessageInput, SearchInput
 
@@ -80,6 +82,8 @@ class HttpChatModel:
 
     async def complete(self, messages: list[dict[str, str]]) -> str:
         url, headers, body = self._request(messages)
+        started = perf_counter()
+        trace("model.started", provider=self.settings.model_provider_type.value, messages=len(messages))
         if self._client is None:
             self._client = httpx.AsyncClient(timeout=httpx.Timeout(self.settings.timeout_seconds, connect=10))
         try:
@@ -98,6 +102,7 @@ class HttpChatModel:
             )
             if not isinstance(content, str) or not content.strip():
                 raise ValueError("empty model response")
+            trace("model.completed", elapsed_ms=round((perf_counter() - started) * 1000, 2))
             return content.strip()
         except (httpx.TransportError, httpx.TimeoutException) as exc:
             raise RuntimeFailure("无法连接对话模型或模型请求超时。", status=502) from exc
@@ -175,9 +180,12 @@ class ChatService:
         if lock.locked():
             raise RuntimeFailure("此对话正在生成回答,请等待完成后再发送。", status=409)
         async with lock:
-            return await self._send(identifier, request)
+            with trace_context(conversation_id=identifier):
+                return await self._send(identifier, request)
 
     async def _send(self, identifier: str, request: MessageInput) -> ChatMessage:
+        started = perf_counter()
+        trace("chat.started", memory_enabled=request.memory_enabled)
         async with self.runtime.sessions() as session:
             if await session.get(Conversation, identifier) is None:
                 raise NotFound("对话", identifier)
@@ -299,8 +307,15 @@ class ChatService:
                     update(Conversation).where(Conversation.id == identifier).values(updated_at=now_ts())
                 )
                 await session.commit()
+                trace(
+                    "chat.completed",
+                    citations=len(saved.citations),
+                    warnings=len(warnings),
+                    elapsed_ms=round((perf_counter() - started) * 1000, 2),
+                )
                 return saved
         except BaseException as exc:
+            trace("chat.failed", error_type=type(exc).__name__)
             if isinstance(exc, asyncio.CancelledError):
                 failure_message = "模型请求被中断,请重新发送。"
             elif isinstance(exc, RuntimeFailure):

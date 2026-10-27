@@ -52,6 +52,7 @@ import hashlib
 import json
 from collections.abc import Sequence
 from dataclasses import asdict, dataclass, field
+from time import perf_counter
 
 from sqlalchemy import delete, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -98,6 +99,7 @@ from shovel.pipeline.parsers import ParsedDocument, ParseHint, can_parse, parse_
 from shovel.pipeline.parsers.base import DEFAULT_MAX_CHARS
 from shovel.pipeline.parsers.registry import parser_versions
 from shovel.pipeline.sink import ChunkVectorSink, NullVectorSink, VectorRecord
+from shovel.runtime.diagnostics import trace
 from shovel.services.connector_base import (
     Connector,
     ConnectorCapability,
@@ -239,6 +241,15 @@ class ScanService:
         )
 
         job_id = await self._open_job(resource, profile, scan_mode, job_id=job_id)
+        started = perf_counter()
+        trace(
+            "scan.started",
+            job_id=job_id,
+            resource_id=resource.id,
+            profile_id=profile.id,
+            mode=scan_mode.value,
+            embedding_enabled=self._embedding_enabled,
+        )
 
         outcome = ScanOutcome(
             job_id=job_id,
@@ -293,6 +304,19 @@ class ScanService:
                 await heartbeat
 
             await self._close_job(job_id, outcome)
+            trace(
+                "scan.completed",
+                job_id=job_id,
+                state=outcome.state.value,
+                discovered=outcome.discovered,
+                skipped=outcome.skipped_unchanged,
+                parsed=outcome.parsed,
+                failed_docs=outcome.failed_docs,
+                chunks_written=outcome.chunks_written,
+                vectors_written=outcome.vectors_written,
+                tombstoned=outcome.tombstoned,
+                elapsed_ms=round((perf_counter() - started) * 1000, 2),
+            )
 
         return outcome
 
@@ -427,6 +451,13 @@ class ScanService:
             scope=scope,
             outcome=outcome,
             force=force,
+        )
+        trace(
+            "scan.discovery.completed",
+            job_id=job_id,
+            discovered=outcome.discovered,
+            pending=len(pending),
+            skipped=outcome.skipped_unchanged,
         )
 
         # 这一行是删除对账的门闸。放在 discover 完整跑完之后, 一行都
@@ -651,6 +682,9 @@ class ScanService:
     ) -> bool:
         """fetch -> parse -> chunk -> embed -> persist。"""
 
+        started = perf_counter()
+        document_id = hashlib.sha256(item.uri.encode()).hexdigest()[:16]
+        trace("document.fetch", job_id=job_id, document_id=document_id)
         payload = await _read(connector, item)
         outcome.fetched += 1
         outcome.bytes_read += len(payload)
@@ -668,6 +702,7 @@ class ScanService:
 
         # 解析是 CPU 密集的 (pypdf 解压、lxml 建树)。丢进线程池,
         # 让事件循环还能响应取消信号和心跳。
+        trace("document.parse", job_id=job_id, document_id=document_id, bytes_read=len(payload))
         parsed: ParsedDocument = await asyncio.to_thread(parse_bytes, payload, hint)
         outcome.parsed += 1
 
@@ -684,6 +719,7 @@ class ScanService:
         content_hash = item.content_hash or f"len:{len(payload):x}"
 
         config = _chunker_config(profile, parsed)
+        trace("document.chunk", job_id=job_id, document_id=document_id)
         drafts = chunk_document(
             parsed,
             doc_uri=item.uri,
@@ -703,6 +739,7 @@ class ScanService:
 
         if embeddable and self._embedding_enabled:
             await self._set_stage(job_id, Stage.EMBED)
+            trace("document.embed", job_id=job_id, document_id=document_id, chunks=len(embeddable))
             vectors = await self._embedder.embed([d.embed_text for d in embeddable])
 
             if len(vectors) != len(embeddable):
@@ -717,6 +754,7 @@ class ScanService:
 
         # ---------- persist ----------
         await self._set_stage(job_id, Stage.PERSIST)
+        trace("document.persist", job_id=job_id, document_id=document_id, chunks=len(drafts))
         written = await self._persist(
             resource=resource,
             item=item,
@@ -729,6 +767,7 @@ class ScanService:
 
         if self._embedding_enabled:
             await self._cleanup.drain(resource_id=resource.id)
+            trace("document.vector_flush", job_id=job_id, document_id=document_id)
             records = [
                 _record_of(resource, item, parsed, draft, by_id[draft.id], self._embedder.model_version)
                 for draft in embeddable
@@ -740,6 +779,13 @@ class ScanService:
                 content_hash,
             )
 
+        trace(
+            "document.completed",
+            job_id=job_id,
+            document_id=document_id,
+            chunks_written=written,
+            elapsed_ms=round((perf_counter() - started) * 1000, 2),
+        )
         return True
 
     async def _persist(
@@ -1153,6 +1199,7 @@ class ScanService:
             if job is not None and job.current_stage is not stage:
                 job.current_stage = stage
                 await session.commit()
+                trace("scan.stage", job_id=job_id, stage=stage.value)
 
     async def _cancel_requested(self, job_id: str) -> bool:
         if self._stopping is not None and self._stopping.is_set():
@@ -1195,6 +1242,7 @@ class ScanService:
                 )
             )
             await session.commit()
+        trace("scan.event", job_id=job_id, code=code, level=level.value)
 
     async def _watermark(self, resource_id: str, profile_id: str | None = None) -> int | None:
         """增量扫描的水位线: 上次见过的最大源端修改时间。

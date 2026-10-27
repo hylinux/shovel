@@ -91,12 +91,14 @@ def test_headings_break_parent_groups() -> None:
     "违约责任"和"付款方式"被塞进同一个父块, 展开时会读到无关条款。
     """
 
-    drafts = _cut(_doc(
-        Block(text="第一章", kind=BlockKind.HEADING, level=1),
-        _para("第一章的正文。", path=("第一章",)),
-        Block(text="第二章", kind=BlockKind.HEADING, level=1),
-        _para("第二章的正文。", path=("第二章",)),
-    ))
+    drafts = _cut(
+        _doc(
+            Block(text="第一章", kind=BlockKind.HEADING, level=1),
+            _para("第一章的正文。", path=("第一章",)),
+            Block(text="第二章", kind=BlockKind.HEADING, level=1),
+            _para("第二章的正文。", path=("第二章",)),
+        )
+    )
 
     parents = _of(drafts, Granularity.PARENT)
 
@@ -108,11 +110,13 @@ def test_atomic_blocks_are_never_split() -> None:
     """代码块从中间切开就不再是可运行的代码。"""
 
     code = "\n".join(f"line_{i} = compute(value_{i})" for i in range(40))
-    drafts = _cut(_doc(
-        _para("代码之前的说明文字。"),
-        Block(text=code, kind=BlockKind.CODE),
-        _para("代码之后的说明文字。"),
-    ))
+    drafts = _cut(
+        _doc(
+            _para("代码之前的说明文字。"),
+            Block(text=code, kind=BlockKind.CODE),
+            _para("代码之后的说明文字。"),
+        )
+    )
 
     chunks = _of(drafts, Granularity.CHUNK)
     holder = [c for c in chunks if "line_0 " in c.text]
@@ -174,12 +178,14 @@ def test_tiny_trailing_blocks_are_merged() -> None:
 # 上下文前缀
 # --------------------------------------------------------------------------- #
 def test_context_prefix_carries_the_heading_path() -> None:
-    """"逾期超过三十日的" 这种条款脱离标题就完全不可检索。"""
+    """ "逾期超过三十日的" 这种条款脱离标题就完全不可检索。"""
 
-    drafts = _cut(_doc(
-        Block(text="违约责任", kind=BlockKind.HEADING, level=1),
-        _para("逾期超过三十日的, 守约方可以解除合同。", path=("违约责任",)),
-    ))
+    drafts = _cut(
+        _doc(
+            Block(text="违约责任", kind=BlockKind.HEADING, level=1),
+            _para("逾期超过三十日的, 守约方可以解除合同。", path=("违约责任",)),
+        )
+    )
 
     chunk = _of(drafts, Granularity.CHUNK)[0]
 
@@ -193,10 +199,12 @@ def test_context_prefix_does_not_pollute_the_text() -> None:
     在引用里看到自动拼上去的标题会让用户怀疑引用是编的。
     """
 
-    drafts = _cut(_doc(
-        Block(text="第三章", kind=BlockKind.HEADING, level=1),
-        _para("这是正文本身。", path=("第三章",)),
-    ))
+    drafts = _cut(
+        _doc(
+            Block(text="第三章", kind=BlockKind.HEADING, level=1),
+            _para("这是正文本身。", path=("第三章",)),
+        )
+    )
 
     chunk = _of(drafts, Granularity.CHUNK)[-1]
 
@@ -241,7 +249,11 @@ def test_id_matches_the_shared_formula() -> None:
     first = _of(drafts, Granularity.CHUNK)[0]
 
     assert first.id == chunk_vector_id(
-        _URI, _HASH, CHUNKER_VERSION, Granularity.CHUNK.value, first.chunk_index,
+        _URI,
+        _HASH,
+        CHUNKER_VERSION,
+        Granularity.CHUNK.value,
+        first.chunk_index,
     )
 
 

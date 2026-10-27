@@ -13,7 +13,6 @@ from shovel.cli.ui.symbols import Symbols
 
 
 class ConsoleService:
-
     def __init__(self) -> None:
 
         self._console = Console(
@@ -21,11 +20,10 @@ class ConsoleService:
             soft_wrap=True,
         )
 
-
     def print(
-            self,
-            *objects: Any,
-            **kwargs: Any,
+        self,
+        *objects: Any,
+        **kwargs: Any,
     ) -> None:
 
         self._console.print(
@@ -33,69 +31,53 @@ class ConsoleService:
             **kwargs,
         )
 
-
     def print_json(
-            self,
-            *objects: Any,
-            **kwargs: Any,
+        self,
+        *objects: Any,
+        **kwargs: Any,
     ) -> None:
         self._console.print_json(
             *objects,
             **kwargs,
         )
 
-
-
     def success(
-            self,
-            message: str,
+        self,
+        message: str,
     ) -> None:
         self._console.print(
             f"{Symbols.SUCCESS} [success]{message}[/success]",
         )
 
-
     def error(
-            self,
-            message: str,
+        self,
+        message: str,
     ) -> None:
-        self._console.print(
-            f"{Symbols.ERROR} [error]{message}[/error]"
-        )
-
+        self._console.print(f"{Symbols.ERROR} [error]{message}[/error]")
 
     def warning(
-            self,
-            message: str,
+        self,
+        message: str,
     ) -> None:
-        self._console.print(
-            f"{Symbols.WARNING} [warning]{message}[/warning]"
-        )
-
+        self._console.print(f"{Symbols.WARNING} [warning]{message}[/warning]")
 
     def info(
-            self,
-            message: str,
+        self,
+        message: str,
     ) -> None:
-        self._console.print(
-            f"{Symbols.INFO} [info]{message}[/info]"
-        )
-
+        self._console.print(f"{Symbols.INFO} [info]{message}[/info]")
 
     def debug(
-            self,
-            message: str,
+        self,
+        message: str,
     ) -> None:
-        self._console.print(
-            f"{Symbols.DEBUG} [debug]{message}[/debug]"
-        )
-
+        self._console.print(f"{Symbols.DEBUG} [debug]{message}[/debug]")
 
     def error_panel(
-            self,
-            message: str,
-            *,
-            title: str = "Error",
+        self,
+        message: str,
+        *,
+        title: str = "Error",
     ) -> None:
         self._console.print(
             Panel(
@@ -107,12 +89,11 @@ class ConsoleService:
             )
         )
 
-
     def warning_panel(
-            self,
-            message: str,
-            *,
-            title: str = "Warning",
+        self,
+        message: str,
+        *,
+        title: str = "Warning",
     ) -> None:
         self._console.print(
             Panel(
@@ -122,14 +103,13 @@ class ConsoleService:
                 width=80,
                 padding=(1, 2),
             )
-
         )
 
     def info_panel(
-            self,
-            message: str,
-            *,
-            title: str = "Info",
+        self,
+        message: str,
+        *,
+        title: str = "Info",
     ) -> None:
 
         self._console.print(
@@ -143,10 +123,10 @@ class ConsoleService:
         )
 
     def title_panel(
-            self,
-            title: str,
-            message: str,
-            width: int = 80,
+        self,
+        title: str,
+        message: str,
+        width: int = 80,
     ) -> None:
         self._console.print(
             Panel(
@@ -159,9 +139,9 @@ class ConsoleService:
         )
 
     def about_panel(
-            self,
-            message: str,
-            width: int = 80,
+        self,
+        message: str,
+        width: int = 80,
     ) -> None:
 
         self._console.print(
@@ -175,25 +155,16 @@ class ConsoleService:
         )
 
     def print_panel(
-            self,
-            objects: RenderableType,
-            border_style: str = "bright_blue",
+        self,
+        objects: RenderableType,
+        border_style: str = "bright_blue",
     ) -> None:
-        self._console.print(
-            Panel.fit(
-                objects,
-                border_style=border_style,
-                padding=(1, 2)
-
-            )
-        )
-
+        self._console.print(Panel.fit(objects, border_style=border_style, padding=(1, 2)))
 
     def print_exception(self) -> None:
         self._console.print_exception(
             show_locals=False,
         )
-
 
     @contextmanager
     def status(
@@ -210,4 +181,3 @@ class ConsoleService:
 
 
 console = ConsoleService()
-

@@ -1,9 +1,9 @@
-#---------------------------------------------------------
+# ---------------------------------------------------------
 # 纯文本解析器 (txt / log / 代码)
 #
 # 日期: 2026-09-29
 # 作者: HongWei Guo <hongweig@163.com>
-#---------------------------------------------------------
+# ---------------------------------------------------------
 """最简单的一个解析器, 但有一件事不简单: 猜编码。
 
 Windows 上的中文 txt 大量是 GBK/GB18030 而不是 UTF-8。用 utf-8 强解会
@@ -61,7 +61,7 @@ def decode(payload: bytes) -> tuple[str, str]:
     for encoding in _ENCODINGS:
         try:
             return payload.decode(encoding), encoding
-        except (UnicodeDecodeError, LookupError):
+        except UnicodeDecodeError, LookupError:
             continue
 
     raise UnicodeDecodeError("utf-8", payload[:16], 0, 1, "无法确定文本编码")
@@ -77,11 +77,13 @@ class PlainTextParser:
     spec: ClassVar[ParserSpec] = ParserSpec(
         name="plain_text",
         version="1",
-        doc_classes=frozenset({
-            DocClass.PLAIN_TEXT,
-            DocClass.CODE,
-            DocClass.UNKNOWN,
-        }),
+        doc_classes=frozenset(
+            {
+                DocClass.PLAIN_TEXT,
+                DocClass.CODE,
+                DocClass.UNKNOWN,
+            }
+        ),
         suffixes=frozenset({".txt", ".log", ".text"}),
         is_fallback=True,
     )
@@ -111,8 +113,7 @@ class PlainTextParser:
         kind = BlockKind.CODE if is_code else BlockKind.PARAGRAPH
 
         blocks = tuple(
-            Block(text=segment, kind=kind, locator=f"line {start}")
-            for segment, start in _segments(body)
+            Block(text=segment, kind=kind, locator=f"line {start}") for segment, start in _segments(body)
         )
 
         kept, truncated = take(blocks, hint.max_chars)

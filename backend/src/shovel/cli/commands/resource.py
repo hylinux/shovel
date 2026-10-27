@@ -1,9 +1,9 @@
-#---------------------------------------------------------
+# ---------------------------------------------------------
 # shovel resource 子命令
 #
 # 日期: 2026-09-29
 # 作者: HongWei Guo <hongweig@163.com>
-#---------------------------------------------------------
+# ---------------------------------------------------------
 """资源的命令行入口。
 
 ## 关于密钥输入
@@ -94,9 +94,7 @@ def _read_secret(from_stdin: bool, prompt: bool) -> str | None:
     if from_stdin:
         secret = sys.stdin.read().strip()
         if not secret:
-            raise InvalidConnectorConfigError(
-                "(secret)", "从 stdin 读到的密钥是空的。"
-            )
+            raise InvalidConnectorConfigError("(secret)", "从 stdin 读到的密钥是空的。")
         return secret
 
     if prompt:
@@ -119,22 +117,16 @@ def _parse_config(raw: str | None, pairs: list[str] | None) -> dict[str, Any]:
         try:
             parsed = json.loads(raw)
         except json.JSONDecodeError as exc:
-            raise InvalidConnectorConfigError(
-                "(config)", f"--config-json 不是合法 JSON: {exc}"
-            ) from exc
+            raise InvalidConnectorConfigError("(config)", f"--config-json 不是合法 JSON: {exc}") from exc
 
         if not isinstance(parsed, dict):
-            raise InvalidConnectorConfigError(
-                "(config)", "--config-json 必须是一个 JSON 对象。"
-            )
+            raise InvalidConnectorConfigError("(config)", "--config-json 必须是一个 JSON 对象。")
 
         config.update(parsed)
 
     for pair in pairs or []:
         if "=" not in pair:
-            raise InvalidConnectorConfigError(
-                "(config)", f"--set 的格式是 key=value, 收到的是 {pair!r}。"
-            )
+            raise InvalidConnectorConfigError("(config)", f"--set 的格式是 key=value, 收到的是 {pair!r}。")
         key, _, value = pair.partition("=")
         config[key.strip()] = _coerce(value.strip())
 
@@ -306,15 +298,24 @@ def add(
     )
 
     settings = load_settings(cli_context.get_default_config_file())
-    receipt = asyncio.run(execute_command(
-        settings, "resource.create",
-        {
-            "name": draft.name, "connector_kind": draft.connector_kind, "config": draft.config,
-            "description": draft.description, "sensitivity": draft.sensitivity,
-            "authority": draft.authority, "identity_ref": draft.identity_ref, "verify": verify_now,
-        },
-        secret=draft.secret,
-    ))
+    receipt = asyncio.run(
+        execute_command(
+            settings,
+            "resource.create",
+            {
+                "name": draft.name,
+                "connector_kind": draft.connector_kind,
+                "config": draft.config,
+                "description": draft.description,
+                "sensitivity": draft.sensitivity,
+                "authority": draft.authority,
+                "identity_ref": draft.identity_ref,
+                "verify": verify_now,
+            },
+            secret=draft.secret,
+            request_key=cli_context.request_key,
+        )
+    )
     resource = _run(lambda svc: svc.get(str(receipt["resource_id"])))
 
     console.success(f"资源 '{resource.name}' 已创建 (id={resource.id}, 状态={resource.state.value})。")
@@ -479,10 +480,14 @@ def remove(
 
 
 def _execute_resource(
-    action: str, ref: str, payload: dict[str, Any] | None = None,
+    action: str,
+    ref: str,
+    payload: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     settings = load_settings(cli_context.get_default_config_file())
-    return asyncio.run(execute_command(settings, f"resource.{action}", payload, ref=ref))
+    return asyncio.run(
+        execute_command(settings, f"resource.{action}", payload, ref=ref, request_key=cli_context.request_key)
+    )
 
 
 # --------------------------------------------------------------------------- #

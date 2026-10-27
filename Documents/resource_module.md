@@ -150,11 +150,11 @@ Connector 收到的是**已经解出来的** config 与 credential, 返回的是
 ### 能力 (Capability) 不是装饰性元数据
 
 ```python
-DISCOVER        # 能列举。最低要求, 任何连接器都必须有
-INCREMENTAL     # 能只列举"变过的"。没有它就只能 FULL_SWEEP
-WATCH           # 能被动收变更通知, 而不是轮询
-RANDOM_READ     # 能按条目单独取内容
-DELETE_DETECT   # 全量结果可信为"完整列表", 因而能用差集推断删除
+DISCOVER  # 能列举。最低要求, 任何连接器都必须有
+INCREMENTAL  # 能只列举"变过的"。没有它就只能 FULL_SWEEP
+WATCH  # 能被动收变更通知, 而不是轮询
+RANDOM_READ  # 能按条目单独取内容
+DELETE_DETECT  # 全量结果可信为"完整列表", 因而能用差集推断删除
 ```
 
 能力直接决定调度器允许配哪些 `ScanMode`。一个没有 `INCREMENTAL` 的连接器
@@ -170,8 +170,11 @@ DELETE_DETECT   # 全量结果可信为"完整列表", 因而能用差集推断�
 from typing import ClassVar
 from pydantic import BaseModel, ConfigDict
 from shovel.services.connector_base import (
-    ConnectorCapability, ConnectorSpec, DiscoveredItem,
-    DiscoveryScope, VerifyResult,
+    ConnectorCapability,
+    ConnectorSpec,
+    DiscoveredItem,
+    DiscoveryScope,
+    VerifyResult,
 )
 from shovel.services.connector_registry import register
 
@@ -181,7 +184,7 @@ class NotionConfig(BaseModel):
     workspace_id: str
 
 
-@register                       # 注意: 不继承 Connector
+@register  # 注意: 不继承 Connector
 class NotionConnector:
     spec: ClassVar[ConnectorSpec] = ConnectorSpec(
         kind="notion",
@@ -194,8 +197,8 @@ class NotionConnector:
 
     def __init__(self, config, credential=None): ...
     async def verify(self) -> VerifyResult: ...
-    async def discover(self, scope: DiscoveryScope): ...   # async generator
-    async def open(self, item: DiscoveredItem): ...        # async generator
+    async def discover(self, scope: DiscoveryScope): ...  # async generator
+    async def open(self, item: DiscoveredItem): ...  # async generator
 ```
 
 然后在 `connector_registry.register_builtin_connectors()` 里加一行 import +
@@ -331,9 +334,9 @@ env:NOTION_TOKEN         去环境变量里取
 
 ```python
 session.add(resource)
-await session.flush()          # 先拿到 id, 才能算出 keyring 的 account
-self._credentials.set(ref, secret)   # 先写凭据
-await session.commit()               # 再落库
+await session.flush()  # 先拿到 id, 才能算出 keyring 的 account
+self._credentials.set(ref, secret)  # 先写凭据
+await session.commit()  # 再落库
 ```
 
 反过来的话, 凭据写失败就会留下一行"指向一个不存在的密钥"的资源 ——
@@ -448,6 +451,6 @@ shovel resource remove notes      # 删除, 级联 profile / schedule
 * **只有 `local_fs` 一个真实连接器。** 本轮的目标是把协议跑通, 让后来的
   连接器有个能照抄的参考实现, 而不是堆数量。
 * `discover()` 已由扫描 pipeline 消费, 见 `Documents/scan_pipeline.md`。
-* `ScanProfile` / `Schedule` 的完整 CRUD 留给调度模块。本轮只有
-  `_build_default_profile`。
+* `ScanProfile` 已提供共享持久操作、CLI、REST 和 Web 管理；字段校验、配置失效、
+  按 Profile 成员范围删除对账已接入。`Schedule` 仍只是领域模型，尚无自动调度器。
 * `WATCH` 能力没有任何实现。

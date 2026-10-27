@@ -32,20 +32,15 @@ class CliExceptionHandler:
     """
 
     def __init__(
-            self,
-            *,
-            debug: bool | None = None,
+        self,
+        *,
+        debug: bool | None = None,
     ) -> None:
-        self._debug = (
-            is_debug_enabled()
-            if debug is None
-            else debug
-        )
-
+        self._debug = is_debug_enabled() if debug is None else debug
 
     def handle(
-            self,
-            exc: Exception,
+        self,
+        exc: Exception,
     ) -> NoReturn:
 
         if isinstance(
@@ -56,10 +51,9 @@ class CliExceptionHandler:
 
         self._handle_unexpected_error(exc)
 
-
     def _handle_shovel_error(
-            self,
-            exc: ShovelError,
+        self,
+        exc: ShovelError,
     ) -> NoReturn:
         # escape: 错误文本里常常带着配置片段/文件路径, 其中的方括号
         # 会被 rich 当成样式标签吃掉 —— 报错信息漏字比报错本身更难查。
@@ -74,13 +68,11 @@ class CliExceptionHandler:
             if exc.details:
                 console.debug(f"Details: {exc.details}")
 
-
         raise typer.Exit(exc.exit_code)
 
-
     def _handle_unexpected_error(
-            self,
-            exc: Exception,
+        self,
+        exc: Exception,
     ) -> NoReturn:
 
         console.error("An unexpected error occurred.")
@@ -90,10 +82,6 @@ class CliExceptionHandler:
             console.print_exception()
 
         else:
-            console.info(
-                "Run with '--debug' or set SHOVEL_DEBUG=1 to see the full traceback."
-            )
-
+            console.info("Run with '--debug' or set SHOVEL_DEBUG=1 to see the full traceback.")
 
         raise typer.Exit(ExitCodes.GENERAL_ERROR)
-

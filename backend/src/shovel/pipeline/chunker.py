@@ -1,9 +1,9 @@
-#---------------------------------------------------------
+# ---------------------------------------------------------
 # 切块器: 文本块 -> 两层 chunk
 #
 # 日期: 2026-09-29
 # 作者: HongWei Guo <hongweig@163.com>
-#---------------------------------------------------------
+# ---------------------------------------------------------
 """把 ``ParsedDocument`` 切成可检索的 chunk。
 
 ## 为什么是两层
@@ -194,36 +194,46 @@ def chunk_document(
         prefix = _context_prefix(parsed, group)
 
         parent_id = chunk_vector_id(
-            doc_uri, content_hash, CHUNKER_VERSION,
-            Granularity.PARENT.value, parent_index,
+            doc_uri,
+            content_hash,
+            CHUNKER_VERSION,
+            Granularity.PARENT.value,
+            parent_index,
             resource_id=resource_id,
         )
 
-        drafts.append(ChunkDraft(
-            id=parent_id,
-            granularity=Granularity.PARENT,
-            chunk_index=parent_index,
-            text=parent_text,
-            context_prefix=prefix,
-            token_estimate=estimate_tokens(parent_text),
-            meta=_locator_meta(group),
-        ))
+        drafts.append(
+            ChunkDraft(
+                id=parent_id,
+                granularity=Granularity.PARENT,
+                chunk_index=parent_index,
+                text=parent_text,
+                context_prefix=prefix,
+                token_estimate=estimate_tokens(parent_text),
+                meta=_locator_meta(group),
+            )
+        )
 
         for piece in _split_group(group, cfg):
-            drafts.append(ChunkDraft(
-                id=chunk_vector_id(
-                    doc_uri, content_hash, CHUNKER_VERSION,
-                    Granularity.CHUNK.value, chunk_index,
-                    resource_id=resource_id,
-                ),
-                granularity=Granularity.CHUNK,
-                chunk_index=chunk_index,
-                text=piece.text,
-                parent_id=parent_id,
-                context_prefix=_context_prefix(parsed, piece.blocks),
-                token_estimate=estimate_tokens(piece.text),
-                meta=_locator_meta(piece.blocks),
-            ))
+            drafts.append(
+                ChunkDraft(
+                    id=chunk_vector_id(
+                        doc_uri,
+                        content_hash,
+                        CHUNKER_VERSION,
+                        Granularity.CHUNK.value,
+                        chunk_index,
+                        resource_id=resource_id,
+                    ),
+                    granularity=Granularity.CHUNK,
+                    chunk_index=chunk_index,
+                    text=piece.text,
+                    parent_id=parent_id,
+                    context_prefix=_context_prefix(parsed, piece.blocks),
+                    token_estimate=estimate_tokens(piece.text),
+                    meta=_locator_meta(piece.blocks),
+                )
+            )
             chunk_index += 1
 
     return tuple(drafts)
@@ -390,7 +400,7 @@ def _sentence_boundary(text: str, start: int, end: int, cfg: ChunkerConfig) -> i
 
 
 def _hard_split(text: str, limit: int) -> list[str]:
-    return [text[i:i + limit] for i in range(0, len(text), limit)]
+    return [text[i : i + limit] for i in range(0, len(text), limit)]
 
 
 def _merge_tiny(pieces: list[_Piece], cfg: ChunkerConfig) -> list[_Piece]:

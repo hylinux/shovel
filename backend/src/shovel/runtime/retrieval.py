@@ -43,7 +43,7 @@ class RetrievalService:
         return sorted(set(requested) if requested else allowed)
 
     @staticmethod
-    def _chunks(scope: list[str]) -> Select[Chunk]:
+    def _chunks(scope: list[str]) -> Select[tuple[Chunk]]:
         return (
             select(Chunk)
             .join(Document, and_(Chunk.doc_uri == Document.uri, Chunk.resource_id == Document.resource_id))

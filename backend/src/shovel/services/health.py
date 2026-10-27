@@ -1,4 +1,4 @@
-#---------------------------------------------------------------------
+# ---------------------------------------------------------------------
 # 外部依赖连通性自检
 #
 # 'shovel init' 承诺"检查默认大模型的连接", 这里是它的实现。
@@ -18,7 +18,7 @@
 #
 # 日期: 2026-09-29
 # 作者: HongWei Guo <hongweig@163.com>
-#---------------------------------------------------------------------
+# ---------------------------------------------------------------------
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -45,8 +45,8 @@ class HealthStatus(Enum):
 @dataclass(slots=True, frozen=True)
 class HealthResult:
     status: HealthStatus
-    target: str      # 被检查的对象, 例如 "127.0.0.1:6379"
-    detail: str      # 给用户看的一句话
+    target: str  # 被检查的对象, 例如 "127.0.0.1:6379"
+    detail: str  # 给用户看的一句话
 
     @property
     def ok(self) -> bool:
@@ -93,8 +93,7 @@ def check_model(settings: DefaultAgentModelSettings) -> HealthResult:
             status=HealthStatus.SKIPPED,
             target=target,
             detail=(
-                "model.base_endpoint is empty, skipped. "
-                "Shovel will not guess a vendor endpoint for you."
+                "model.base_endpoint is empty, skipped. Shovel will not guess a vendor endpoint for you."
             ),
         )
 
@@ -130,10 +129,7 @@ def check_model(settings: DefaultAgentModelSettings) -> HealthResult:
         return HealthResult(
             status=HealthStatus.FAILED,
             target=target,
-            detail=(
-                f"The model endpoint returned HTTP {response.status_code} "
-                f"for {url}."
-            ),
+            detail=(f"The model endpoint returned HTTP {response.status_code} for {url}."),
         )
 
     return HealthResult(
@@ -144,7 +140,7 @@ def check_model(settings: DefaultAgentModelSettings) -> HealthResult:
 
 
 def _probe_request(
-        settings: DefaultAgentModelSettings,
+    settings: DefaultAgentModelSettings,
 ) -> tuple[str, dict[str, str]]:
     """按 provider 给出探活 URL 与请求头。"""
 

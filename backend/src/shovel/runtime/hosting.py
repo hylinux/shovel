@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import cast
 from urllib.parse import urlsplit
 
+import structlog
 from dependency_injector import providers
 from fastapi import FastAPI
 from py_generic_host.di.protocols import AppContainerProtocol
@@ -71,14 +72,27 @@ class RuntimeWorker(BackgroundService):  # type: ignore[misc]  # Framework does 
     async def execute_async(self, stopping: asyncio.Event) -> None:
         assert self._runtime is not None
         runtime = self._runtime
-        while not stopping.is_set():
-            runtime.wake.clear()
-            if await runtime.operations.run_once():
-                continue
-            try:
-                await asyncio.wait_for(runtime.wake.wait(), timeout=1)
-            except TimeoutError:
-                continue
+        runtime.worker_state = "running"
+        try:
+            while not stopping.is_set():
+                runtime.wake.clear()
+                if await runtime.operations.run_once():
+                    continue
+                try:
+                    await asyncio.wait_for(runtime.wake.wait(), timeout=1)
+                except TimeoutError:
+                    continue
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            runtime.worker_state = "failed"
+            runtime.worker_error = runtime.redact(f"{type(exc).__name__}: {exc}")
+            structlog.get_logger("shovel.worker").error("worker.failed", error=runtime.worker_error)
+            stopping.set()
+            raise
+        finally:
+            if runtime.worker_state != "failed":
+                runtime.worker_state = "stopped"
 
     async def stop(self, stopping: asyncio.Event) -> None:
         if self._runtime is not None:

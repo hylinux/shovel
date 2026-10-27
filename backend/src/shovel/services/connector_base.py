@@ -1,9 +1,9 @@
-#---------------------------------------------------------
+# ---------------------------------------------------------
 # 连接器协议与能力声明
 #
 # 日期: 2026-09-29
 # 作者: HongWei Guo <hongweig@163.com>
-#---------------------------------------------------------
+# ---------------------------------------------------------
 """Connector 是"怎么连上一个数据源、怎么把里面的东西列出来"的抽象。
 
 ## 与 Resource 表的分工
@@ -59,7 +59,7 @@ class ConnectorCapability(StrEnum):
     #: 能列举出数据源里有哪些条目。这是最低要求, 任何连接器都必须有。
     DISCOVER = "discover"
 
-    #: 能只列举"自上次以来变过的"。没有这个能力就只能 FULL_SWEEP。
+    #: 支持增量处理。可提供可靠游标, 也可枚举元数据后由指纹判定变化。
     INCREMENTAL = "incremental"
 
     #: 能被动接收变更通知(文件系统事件、webhook), 而不是靠轮询。
@@ -132,8 +132,7 @@ class ConnectorSpec:
     def __post_init__(self) -> None:
         if ConnectorCapability.DISCOVER not in self.capabilities:
             raise ValueError(
-                f"连接器 '{self.kind}' 必须声明 DISCOVER 能力: "
-                "一个列举不出任何条目的数据源没有存在意义。"
+                f"连接器 '{self.kind}' 必须声明 DISCOVER 能力: 一个列举不出任何条目的数据源没有存在意义。"
             )
 
         if not 0.0 <= self.default_authority <= 1.0:
@@ -200,8 +199,8 @@ class DiscoveredItem:
     把整个知识库读一遍, 增量也就没意义了。
     """
 
-    #: 在该资源内稳定且唯一的标识。**不要用绝对路径** ——
-    #: 详见 local_fs 连接器里关于"根目录改名"的说明。
+    #: 在该资源内稳定且唯一的标识。local_fs 使用相对路径, 但 Document URI
+    #: 含绝对路径; 根目录变化仍属于新 scope, 旧索引会失效重建。
     external_id: str
 
     #: 可定位到原件的 URI, 给人看、给 agent 引用用。
@@ -246,12 +245,13 @@ class DiscoveryScope:
     #: TARGETED 模式下用户点名的 external_id。非空时其余过滤条件仍然生效。
     target_ids: tuple[str, ...] = ()
 
-    #: 增量模式的水位线: 只要严格晚于这个时间戳的。
+    #: 增量游标提示。无法保证源时间戳单调的连接器必须忽略它, 防止漏发现。
     since: int | None = None
 
     @classmethod
-    def from_profile(cls, profile: Any, *, since: int | None = None,
-                     target_ids: Iterable[str] = ()) -> DiscoveryScope:
+    def from_profile(
+        cls, profile: Any, *, since: int | None = None, target_ids: Iterable[str] = ()
+    ) -> DiscoveryScope:
         """从一个 ``ScanProfile`` ORM 对象投影出 scope。
 
         用 duck typing 而不是 import ScanProfile: 保持"连接器层不依赖 db 层"

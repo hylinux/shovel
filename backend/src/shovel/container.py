@@ -1,9 +1,9 @@
-#---------------------------------------------------------------------
+# ---------------------------------------------------------------------
 # 定义在应用生命周期中使用的DI 容器
 #
 # 日期: 2026-09-15
 # 作者: HongWei Guo <hongweig@163.com>
-#---------------------------------------------------------------------
+# ---------------------------------------------------------------------
 from __future__ import annotations
 
 from dependency_injector import containers, providers
@@ -19,7 +19,6 @@ from shovel.services.resource_service import ResourceService
 
 
 class AppContainer(containers.DeclarativeContainer):
-
     # Settings
     config = providers.Configuration(strict=True)
     runtime_settings = providers.Dependency(instance_of=AppSettings)
@@ -28,14 +27,14 @@ class AppContainer(containers.DeclarativeContainer):
     # 需要SQLite的DB
     db_engine = providers.Resource(
         create_async_database_engine,
-        url = config.database.url,
-        echo = config.database.echo,
+        url=config.database.url,
+        echo=config.database.echo,
     )
 
     # 数据库的session
     session_factory = providers.Resource(
         create_async_session_factory,
-        engine = db_engine,
+        engine=db_engine,
     )
 
     # 凭据存储: keyring 优先, env 兜底
@@ -53,8 +52,8 @@ class AppContainer(containers.DeclarativeContainer):
     # credential store"(例如测试、dry-run)成为可能。
     resource_service = providers.Factory(
         ResourceService,
-        session_factory = session_factory,
-        credentials = credential_store,
+        session_factory=session_factory,
+        credentials=credential_store,
     )
 
     runtime = providers.Resource(

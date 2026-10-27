@@ -1,9 +1,9 @@
-#---------------------------------------------------------
+# ---------------------------------------------------------
 # Excel 解析器 (openpyxl)
 #
 # 日期: 2026-09-29
 # 作者: HongWei Guo <hongweig@163.com>
-#---------------------------------------------------------
+# ---------------------------------------------------------
 """把工作表切成"带表头的行组"。
 
 表格是所有格式里最容易做错的一种, 错法有两个极端:
@@ -58,7 +58,6 @@ _MAX_CELL_CHARS = 500
 
 
 class ExcelParser:
-
     spec: ClassVar[ParserSpec] = ParserSpec(
         name="excel",
         version="1",
@@ -149,9 +148,7 @@ def _sheet_blocks(sheet: Any) -> tuple[list[Block], bool]:
     # 表头判定: 第一行**全部**是非数字才算表头。
     # 只要有一格是数字, 它就更可能是数据行 —— 这时宁可用 "列1/列2"
     # 当表头, 也不能把一行真实数据吃掉当标题。
-    has_header = all(
-        cell and not _looks_numeric(cell) for cell in header
-    )
+    has_header = all(cell and not _looks_numeric(cell) for cell in header)
 
     if not has_header:
         header = [f"列{i + 1}" for i in range(width)]
@@ -170,18 +167,20 @@ def _sheet_blocks(sheet: Any) -> tuple[list[Block], bool]:
     header_line = "| " + " | ".join(header) + " |"
 
     if not body:
-        return [Block(
-            text="\n".join([header_line, rule]),
-            kind=BlockKind.TABLE,
-            path=(title,),
-            locator=f"{title}!1",
-            meta={"sheet": title, "cols": width},
-        )], cut
+        return [
+            Block(
+                text="\n".join([header_line, rule]),
+                kind=BlockKind.TABLE,
+                path=(title,),
+                locator=f"{title}!1",
+                meta={"sheet": title, "cols": width},
+            )
+        ], cut
 
     first_data_row = 2 if has_header else 1
 
     for start in range(0, len(body), _ROWS_PER_BLOCK):
-        group = body[start:start + _ROWS_PER_BLOCK]
+        group = body[start : start + _ROWS_PER_BLOCK]
         lines = [header_line, rule]
 
         for row in group:
@@ -190,14 +189,16 @@ def _sheet_blocks(sheet: Any) -> tuple[list[Block], bool]:
         row_from = first_data_row + start
         row_to = row_from + len(group) - 1
 
-        blocks.append(Block(
-            text="\n".join(lines),
-            kind=BlockKind.TABLE,
-            path=(title,),
-            # Excel 用户认得 "Sheet1!2:21" 这种写法, 它能直接定位
-            locator=f"{title}!{row_from}:{row_to}",
-            meta={"sheet": title, "rows": len(group), "cols": width},
-        ))
+        blocks.append(
+            Block(
+                text="\n".join(lines),
+                kind=BlockKind.TABLE,
+                path=(title,),
+                # Excel 用户认得 "Sheet1!2:21" 这种写法, 它能直接定位
+                locator=f"{title}!{row_from}:{row_to}",
+                meta={"sheet": title, "rows": len(group), "cols": width},
+            )
+        )
 
     return blocks, cut
 

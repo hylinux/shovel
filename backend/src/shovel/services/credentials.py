@@ -1,9 +1,9 @@
-#---------------------------------------------------------
+# ---------------------------------------------------------
 # 凭据存储
 #
 # 日期: 2026-09-29
 # 作者: HongWei Guo <hongweig@163.com>
-#---------------------------------------------------------
+# ---------------------------------------------------------
 """资源的密钥怎么存。
 
 ## 核心约定: 数据库里只有引用, 没有秘密
@@ -214,9 +214,7 @@ class KeyringCredentialStore:
             import keyring
             from keyring.backends.fail import Keyring as FailKeyring
         except ImportError as exc:
-            raise CredentialBackendUnavailableError(
-                "未安装 keyring 包。"
-            ) from exc
+            raise CredentialBackendUnavailableError("未安装 keyring 包。") from exc
 
         backend = keyring.get_keyring()
 
@@ -224,9 +222,7 @@ class KeyringCredentialStore:
         # 调用即抛异常的 FailKeyring。必须显式识别它, 否则错误信息
         # 会变成一句用户看不懂的 NoKeyringError。
         if isinstance(backend, FailKeyring):
-            raise CredentialBackendUnavailableError(
-                "keyring 没有找到任何可用的系统后端。"
-            )
+            raise CredentialBackendUnavailableError("keyring 没有找到任何可用的系统后端。")
 
         return backend
 

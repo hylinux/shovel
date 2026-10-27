@@ -23,7 +23,7 @@ from shovel.db.model.config import Resource
 from shovel.db.model.content import Document
 from shovel.db.model.execution import Job
 from shovel.db.model.retrieval import DeletionOutbox, SchemaMigration
-from shovel.db.model.runtime import Conversation, Operation
+from shovel.db.model.runtime import ChatMessage, Conversation, Operation
 from shovel.domain.enums import JobState, ScanMode
 from shovel.pipeline.embedder import build_embedder
 from shovel.pipeline.scan_service import ScanService
@@ -34,6 +34,7 @@ from shovel.runtime.errors import RuntimeFailure
 from shovel.runtime.hosting import build_cli_host, build_host, mount_frontend, resolve_runtime
 from shovel.runtime.locking import RuntimeLock
 from shovel.runtime.memory import MemoryService
+from shovel.runtime.requests import request_operation_id
 from shovel.runtime.schemas import MessageInput, ResourceInput, ScanInput, SearchInput
 from shovel.runtime.service import Runtime, create_runtime
 from shovel.services.resource_service import ResourceDraft, ResourceService
@@ -106,6 +107,214 @@ async def index_notes(runtime: Runtime, path: Path, name: str = "notes") -> str:
     return resource_id
 
 
+async def test_profile_api_retains_scope_and_rejects_changes_during_scans(
+    runtime: Runtime,
+    api: httpx.AsyncClient,
+    tmp_path: Path,
+) -> None:
+    resource_id = await add_notes(runtime, tmp_path / "profiles")
+    path = f"/api/v1/resources/{resource_id}/profiles/text"
+    saved = await api.put(path, json={"include": ["*.txt"]}, headers={"Idempotency-Key": "profile-v1"})
+    assert saved.status_code == 202
+    await runtime.operations.run_once()
+    assert (await runtime.operations.get(saved.json()["id"])).state == "succeeded"
+    assert len((await api.get(f"/api/v1/resources/{resource_id}/profiles")).json()["items"]) == 2
+    assert (await api.put(path, json={"pipeline": {"parser": {"invalid": 2}}})).status_code == 422
+    scan = await runtime.operations.scan(resource_id, ScanInput(profile_name="text", embed=False))
+    changed = await api.put(path, json={"include": ["*.md"]})
+    await runtime.operations.run_once()
+    await runtime.operations.run_once()
+    assert (await runtime.operations.get(scan.id)).state == "succeeded"
+    assert (await runtime.operations.get(changed.json()["id"])).state == "succeeded"
+    # A running Job cannot have its configuration changed by another writer.
+    async with runtime.sessions() as session:
+        job = await session.get(Job, scan.job_id)
+        assert job is not None
+        job.state = JobState.RUNNING
+        await session.commit()
+    blocked = await api.put(path, json={"exclude": ["*.txt"]})
+    await runtime.operations.run_once()
+    assert (await runtime.operations.get(blocked.json()["id"])).state == "failed"
+    async with runtime.sessions() as session:
+        job = await session.get(Job, scan.job_id)
+        assert job is not None
+        job.state = JobState.SUCCEEDED
+        await session.commit()
+    removed = await api.delete(path)
+    await runtime.operations.run_once()
+    failed_delete = await runtime.operations.get(removed.json()["id"])
+    assert failed_delete.state == "failed" and failed_delete.result["profile_deleted"]
+    recreated = await api.put(path, json={"include": ["*.txt"]})
+    await runtime.operations.run_once()
+    replacement = await runtime.operations.get(recreated.json()["id"])
+    assert replacement.state == "succeeded"
+    assert replacement.result["id"] != failed_delete.result["profile_id"]
+    init_vector_store(runtime.settings.zvec)
+    await runtime.operations.retry(failed_delete.id)
+    await runtime.operations.run_once()
+    assert (await runtime.operations.get(removed.json()["id"])).state == "succeeded"
+    replay = await api.put(path, json={"include": ["*.txt"]}, headers={"Idempotency-Key": "profile-v1"})
+    assert replay.json()["id"] == saved.json()["id"]
+    assert len((await api.get(f"/api/v1/resources/{resource_id}/profiles")).json()["items"]) == 2
+
+
+async def test_conversation_paging_rename_delete_and_busy_guard(
+    runtime: Runtime,
+    api: httpx.AsyncClient,
+) -> None:
+    identifier = (await api.post("/api/v1/conversations", json={})).json()["id"]
+    async with runtime.sessions() as session:
+        session.add_all(
+            [
+                ChatMessage(
+                    conversation_id=identifier,
+                    role="user",
+                    content=str(sequence),
+                    sequence=sequence,
+                )
+                for sequence in range(1, 106)
+            ]
+        )
+        await session.commit()
+    latest = (await api.get(f"/api/v1/conversations/{identifier}/messages?limit=100")).json()
+    assert len(latest["items"]) == 100
+    assert latest["items"][0]["sequence"] == 6 and latest["next_before"] == 6
+    older = (await api.get(f"/api/v1/conversations/{identifier}/messages?before=6")).json()
+    assert [row["sequence"] for row in older["items"]] == [1, 2, 3, 4, 5]
+    assert (
+        await api.patch(f"/api/v1/conversations/{identifier}", json={"title": "renamed"})
+    ).status_code == 200
+    lock = runtime.chat._locks.setdefault(identifier, asyncio.Lock())
+    async with lock:
+        assert (await api.delete(f"/api/v1/conversations/{identifier}")).status_code == 409
+    assert (await api.delete(f"/api/v1/conversations/{identifier}")).status_code == 200
+    async with runtime.sessions() as session:
+        assert not list(
+            await session.scalars(
+                select(ChatMessage).where(
+                    ChatMessage.conversation_id == identifier,
+                )
+            )
+        )
+
+
+async def test_history_prune_preserves_request_identity_and_active_work(
+    runtime: Runtime,
+    api: httpx.AsyncClient,
+) -> None:
+    from shovel.db.base import now_ts
+    from shovel.db.model.retrieval import RetrievalLog
+
+    past = now_ts() - 90 * 86400
+    async with runtime.sessions() as session:
+        session.add_all(
+            [
+                Operation(id="old-unkeyed", kind="cleanup", state="succeeded", finished_at=past),
+                Operation(
+                    id="old-keyed",
+                    kind="cleanup",
+                    state="succeeded",
+                    request_key="retained",
+                    finished_at=past,
+                ),
+                Operation(id="old-active", kind="cleanup", state="running", finished_at=past),
+                RetrievalLog(query_text="expired", queried_at=past),
+            ]
+        )
+        await session.commit()
+    response = await api.post("/api/v1/history/prune", json={"keep_days": 30})
+    # Do not let the deliberately running fixture be picked as new work.
+    await runtime.operations.run_once()
+    receipt = await runtime.operations.get(response.json()["id"])
+    assert receipt.state == "succeeded"
+    assert receipt.result["operations"] == 1 and receipt.result["retrievals"] == 1
+    async with runtime.sessions() as session:
+        assert await session.get(Operation, "old-unkeyed") is None
+        assert await session.get(Operation, "old-keyed") is not None
+        assert await session.get(Operation, "old-active") is not None
+
+
+@pytest.mark.parametrize(
+    "status,content",
+    [
+        (202, b"not-json"),
+        (202, b"[]"),
+        (202, b"{}"),
+        (503, b'{"error":"unavailable"}'),
+    ],
+)
+async def test_uncertain_cli_responses_always_preserve_recovery_id(
+    runtime: Runtime,
+    monkeypatch: pytest.MonkeyPatch,
+    status: int,
+    content: bytes,
+) -> None:
+    actual_client = httpx.AsyncClient
+
+    async def remote(_settings: AppSettings, _client: httpx.AsyncClient) -> str:
+        return "http://127.0.0.1:9999"
+
+    monkeypatch.setattr("shovel.runtime.client._remote", remote)
+    monkeypatch.setattr(
+        "shovel.runtime.client.httpx.AsyncClient",
+        lambda **kwargs: actual_client(
+            transport=httpx.MockTransport(lambda request: httpx.Response(status, content=content)),
+            **kwargs,
+        ),
+    )
+    identifier = request_operation_id("uncertain-response")
+    with pytest.raises(RuntimeFailure, match=identifier):
+        await execute_command(runtime.settings, "cleanup", {}, request_key="uncertain-response")
+
+
+async def test_legacy_operation_migration_preserves_rows_and_is_repeatable(tmp_path: Path) -> None:
+    context = create_async_database_engine(f"sqlite+aiosqlite:///{(tmp_path / 'old.db').as_posix()}")
+    engine = await anext(context)
+    try:
+        async with engine.begin() as connection:
+            await connection.execute(
+                text("""CREATE TABLE operation(
+                id TEXT PRIMARY KEY, kind TEXT NOT NULL, state TEXT NOT NULL,
+                resource_id TEXT, job_id TEXT, payload TEXT NOT NULL, result TEXT NOT NULL,
+                error TEXT, queued_at INTEGER NOT NULL, started_at INTEGER,
+                finished_at INTEGER, attempts INTEGER NOT NULL)""")
+            )
+            await connection.execute(
+                text("""INSERT INTO operation VALUES
+                ('legacy', 'cleanup', 'succeeded', NULL, NULL, '{}', :result,
+                 NULL, 1, 1, 2, 1)"""),
+                {"result": json.dumps({"completed": 1})},
+            )
+        await upgrade_database(engine)
+        await upgrade_database(engine)
+        async with create_async_session_factory(engine)() as session:
+            row = await session.get(Operation, "legacy")
+            assert row is not None and row.result == {"completed": 1} and row.request_key is None
+            assert list(await session.scalars(select(SchemaMigration.version))) == [1, 2, 3]
+    finally:
+        await context.aclose()
+
+
+async def test_worker_failure_is_visible_and_requests_host_shutdown(
+    runtime: Runtime,
+    api: httpx.AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from shovel.runtime.hosting import RuntimeWorker
+
+    async def fail() -> bool:
+        raise RuntimeError("injected-worker-crash")
+
+    monkeypatch.setattr(runtime.operations, "run_once", fail)
+    worker = RuntimeWorker(lambda: runtime)
+    worker._runtime = runtime
+    stopping = asyncio.Event()
+    with pytest.raises(RuntimeError, match="injected-worker-crash"):
+        await worker.execute_async(stopping)
+    assert stopping.is_set() and runtime.worker_state == "failed"
+    assert (await api.get("/api/v1/status")).status_code == 503
+
+
 async def test_resource_scan_search_and_cleanup_api(
     runtime: Runtime,
     api: httpx.AsyncClient,
@@ -165,6 +374,93 @@ async def test_resource_scan_search_and_cleanup_api(
     assert (await api.get(f"/api/v1/resources/{resource_id}")).status_code == 404
     assert (await api.post("/api/v1/search", json={"query": "Shovel"})).json()["items"] == []
     assert (await api.get(f"/api/v1/operations/{deletion['id']}")).status_code == 200
+
+
+async def test_idempotent_requests_replay_receipts_and_reject_changed_intent(
+    runtime: Runtime, api: httpx.AsyncClient, tmp_path: Path
+) -> None:
+    root = tmp_path / "idempotent"
+    root.mkdir()
+    (root / "one.txt").write_text("持久操作只能执行一次。", encoding="utf-8")
+    payload = {"name": "idempotent", "connector_kind": "local_fs", "config": {"root_path": str(root)}}
+    headers = {"Idempotency-Key": "create-once"}
+    first, second = await asyncio.gather(
+        api.post("/api/v1/resources", json=payload, headers=headers),
+        api.post("/api/v1/resources", json=payload, headers=headers),
+    )
+    assert first.status_code == second.status_code == 202
+    assert first.json()["id"] == second.json()["id"] == request_operation_id("create-once")
+    await runtime.operations.run_once()
+    resource_id = first.json()["resource_id"]
+    repeated = await api.post("/api/v1/resources", json=payload, headers=headers)
+    assert repeated.json()["state"] == "succeeded"
+    conflict = await api.post("/api/v1/resources", json={**payload, "name": "different"}, headers=headers)
+    assert conflict.status_code == 409
+    scan_headers = {"Idempotency-Key": "scan-once"}
+    path = f"/api/v1/resources/{resource_id}/scans"
+    first, second = await asyncio.gather(
+        api.post(path, json={"embed": False}, headers=scan_headers),
+        api.post(path, json={"embed": False}, headers=scan_headers),
+    )
+    assert first.json()["job_id"] == second.json()["job_id"]
+    await runtime.operations.run_once()
+    init_vector_store(runtime.settings.zvec)
+    delete_headers = {"Idempotency-Key": "delete-once"}
+    deleted = await api.delete(f"/api/v1/resources/{resource_id}", headers=delete_headers)
+    await runtime.operations.run_once()
+    replayed = await api.delete(f"/api/v1/resources/{resource_id}", headers=delete_headers)
+    assert replayed.status_code == 202
+    assert replayed.json()["id"] == deleted.json()["id"]
+    assert replayed.json()["result"]["cleanup_complete"]
+    async with runtime.sessions() as session:
+        assert await session.scalar(select(func.count()).select_from(Operation)) == 3
+
+
+async def test_cli_lost_submission_response_can_be_queried_and_resubmitted_safely(
+    runtime: Runtime, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import shovel.runtime.client as client_module
+
+    resource_id = await add_notes(runtime, tmp_path / "reconnect")
+    app = FastAPI()
+    configure_api(app, lambda: runtime, runtime.settings)
+    transport = httpx.ASGITransport(app=app)
+    original_client = httpx.AsyncClient
+    lost = True
+
+    async def remote(*_args: Any) -> str:
+        return "http://127.0.0.1:9999"
+
+    async def deliver(request: httpx.Request) -> httpx.Response:
+        nonlocal lost
+        response = await transport.handle_async_request(request)
+        if lost and request.method == "POST" and request.url.path.endswith("/scans"):
+            lost = False
+            await response.aclose()
+            raise httpx.ReadError("submission response was lost", request=request)
+        return response
+
+    monkeypatch.setattr(client_module, "_remote", remote)
+    monkeypatch.setattr(
+        client_module.httpx,
+        "AsyncClient",
+        lambda **kwargs: original_client(**kwargs, transport=httpx.MockTransport(deliver)),
+    )
+    with pytest.raises(RuntimeFailure, match=request_operation_id("lost-response")):
+        await execute_command(
+            runtime.settings, "scan", {"embed": False}, ref=resource_id, request_key="lost-response"
+        )
+    await runtime.operations.run_once()
+    recovered = await client_module.manage_operation(
+        runtime.settings, request_operation_id("lost-response"), wait=True
+    )
+    repeated = await execute_command(
+        runtime.settings, "scan", {"embed": False}, ref=resource_id, request_key="lost-response"
+    )
+    assert repeated["id"] == recovered["id"]
+    assert repeated["state"] == "succeeded"
+    async with runtime.sessions() as session:
+        assert await session.scalar(select(func.count()).select_from(Job)) == 1
 
 
 async def test_queue_recovery_preserves_job_and_request(runtime: Runtime, tmp_path: Path) -> None:
@@ -543,7 +839,7 @@ async def test_existing_database_upgrade_and_fts_backfill(tmp_path: Path) -> Non
         await upgrade_database(engine)
         await upgrade_database(engine)
         async with create_async_session_factory(engine)() as session:
-            assert list(await session.scalars(select(SchemaMigration.version))) == [1]
+            assert list(await session.scalars(select(SchemaMigration.version))) == [1, 2, 3]
             assert await session.scalar(text("SELECT count(*) FROM chunk_search")) == 1
             assert (
                 await session.scalar(

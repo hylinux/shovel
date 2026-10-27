@@ -1,9 +1,9 @@
-#---------------------------------------------------------
+# ---------------------------------------------------------
 # 定义数据访问层
 #
 # 日期: 2026-09-15
 # 作者: HongWei Guo <hongweig@163.com>
-#---------------------------------------------------------
+# ---------------------------------------------------------
 from __future__ import annotations
 
 from collections.abc import AsyncGenerator
@@ -25,21 +25,21 @@ from shovel.db.base import Base
 #: Per-connection pragmas. journal_mode is persistent (stored in the file
 #: header); the rest must be re-applied on every connection.
 PRAGMAS = {
-    "journal_mode": "WAL",       # concurrent readers while a scan writes
-    "foreign_keys": "ON",        # OFF by default in SQLite -- cascades silently fail
-    "synchronous": "NORMAL",     # WAL makes FULL unnecessary for our durability needs
-    "busy_timeout": "10000",     # scanner and UI do collide; wait rather than fail
+    "journal_mode": "WAL",  # concurrent readers while a scan writes
+    "foreign_keys": "ON",  # OFF by default in SQLite -- cascades silently fail
+    "synchronous": "NORMAL",  # WAL makes FULL unnecessary for our durability needs
+    "busy_timeout": "10000",  # scanner and UI do collide; wait rather than fail
     "temp_store": "MEMORY",
-    "cache_size": "-64000",      # ~64 MB: helpful, still polite on a laptop
-    "mmap_size": "268435456",    # 256 MB
+    "cache_size": "-64000",  # ~64 MB: helpful, still polite on a laptop
+    "mmap_size": "268435456",  # 256 MB
 }
 
 
-
-def create_database_engine(url: str,
-                  *,
-                  echo: bool | None = False,
-                  ) -> Engine:
+def create_database_engine(
+    url: str,
+    *,
+    echo: bool | None = False,
+) -> Engine:
     if not url:
         raise ValueError(
             "database url 为空。请检查 settings.toml 中 database.url 是否配置, "
@@ -58,9 +58,6 @@ def create_database_engine(url: str,
     return engine
 
 
-
-
-
 def to_sync_url(url: str) -> str:
     """把异步 URL 降级成同步 URL。
 
@@ -72,9 +69,9 @@ def to_sync_url(url: str) -> str:
 
 
 def init_database(
-        url: str,
-        *,
-        echo: bool | None = False,
+    url: str,
+    *,
+    echo: bool | None = False,
 ) -> list[str]:
     """建好(或补全)所有表, 返回本次实际新建的表名。
 
@@ -98,9 +95,9 @@ def init_database(
 
 
 async def create_async_database_engine(
-        url: str,
-        *,
-        echo: bool | None = False,      # config 可能注入 None
+    url: str,
+    *,
+    echo: bool | None = False,  # config 可能注入 None
 ) -> AsyncGenerator[AsyncEngine]:
     """
     创建并管理数据库 Engine 生命周期.
@@ -128,7 +125,7 @@ async def create_async_database_engine(
 
 
 def create_async_session_factory(
-        engine: AsyncEngine,
+    engine: AsyncEngine,
 ) -> async_sessionmaker[AsyncSession]:
     """
     创建AsyncSession factory.
@@ -148,10 +145,8 @@ def session_factory(engine: Engine) -> sessionmaker[Session]:
     return sessionmaker(engine, expire_on_commit=False, future=True)
 
 
-
 def _apply_pragmas(dbapi_conn: Any, _record: Any) -> None:
     cur = dbapi_conn.cursor()
     for key, value in PRAGMAS.items():
         cur.execute(f"PRAGMA {key}={value}")
     cur.close()
-

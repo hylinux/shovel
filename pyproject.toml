@@ -25,7 +25,7 @@ dependencies = [
     # 文档解析器。每种格式一个库, 都是同步的 CPU 密集调用, 统一用
     # asyncio.to_thread 挪出事件循环 —— 见 pipeline/parsers/
     "openpyxl>=3.1.5",      # .xlsx
-    "py-generic-host",
+    "py-generic-host @ git+https://github.com/hylinux/py-generic-host.git@25323282dedb3d0c9537129b477d14f7b9abd631",
     "pypdf>=6.19.0",        # .pdf
     "python-docx>=1.2.0",   # .docx
     "python-pptx>=1.0.2",   # .pptx
@@ -51,11 +51,8 @@ dev = [
 ]
 
 
-[tool.uv.sources]
-py-generic-host = { path = "../py-generic-host", editable = true }
-
 [[tool.uv.index]]
-url = "https://packagefeedproxy.microsoft.io/pypi/simple/"
+url = "https://pypi.org/simple"
 default = true
 
 
@@ -63,7 +60,7 @@ default = true
 shovel = "shovel.cli:app"
 
 [build-system]
-requires = ["uv_build>=0.11.26,<0.12"]
+requires = ["uv_build==0.13.5"]
 build-backend = "uv_build"
 
 
@@ -117,6 +114,7 @@ disallow_untyped_decorators = false
 # ---------- Pytest ----------
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
+markers = ["live: explicitly opted-in tests that call configured external model endpoints"]
 
 addopts = """
 -ra

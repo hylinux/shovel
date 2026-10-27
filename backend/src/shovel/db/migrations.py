@@ -42,6 +42,31 @@ def _upgrade(connection: Connection) -> None:
                 version=1, name="hosted_operations_chat_and_keyword_index", applied_at=now_ts()
             )
         )
+    if 2 not in versions:
+        columns = {row[1] for row in connection.exec_driver_sql("PRAGMA table_info(operation)")}
+        for name in ("request_key", "request_fingerprint"):
+            if name not in columns:
+                connection.exec_driver_sql(f"ALTER TABLE operation ADD COLUMN {name} TEXT")
+        connection.exec_driver_sql(
+            "CREATE UNIQUE INDEX IF NOT EXISTS uq_operation_request_key ON operation(request_key)"
+        )
+        connection.execute(
+            insert(SchemaMigration).values(
+                version=2, name="idempotent_operation_requests", applied_at=now_ts()
+            )
+        )
+    if 3 not in versions:
+        connection.exec_driver_sql(
+            """INSERT OR IGNORE INTO profile_document(profile_id, doc_uri, resource_id, last_seen_run)
+            SELECT p.id, d.uri, d.resource_id, d.last_seen_run FROM document d
+            JOIN scan_profile p ON p.resource_id = d.resource_id AND p.name = 'default'
+            WHERE d.lifecycle_state = 'active'"""
+        )
+        connection.execute(
+            insert(SchemaMigration).values(
+                version=3, name="profile_scoped_document_membership", applied_at=now_ts()
+            )
+        )
 
 
 async def upgrade_database(engine: AsyncEngine) -> None:

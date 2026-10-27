@@ -1,9 +1,9 @@
-#---------------------------------------------------------
+# ---------------------------------------------------------
 # 资源状态机
 #
 # 日期: 2026-09-29
 # 作者: HongWei Guo <hongweig@163.com>
-#---------------------------------------------------------
+# ---------------------------------------------------------
 """``ResourceState`` 的合法转移表。
 
 为什么要把转移规则单独拎出来, 而不是让 service 层各处自己 `if` 一下:
@@ -41,56 +41,70 @@ from shovel.exceptions.resource import InvalidResourceStateTransitionError
 #:   转移(连上了/连不上了), 不该强制绕道 ``VERIFYING``。
 #: * 任何非终态都可以退回 ``DRAFT`` —— ``update_config`` 改掉连接配置后,
 #:   旧的校验结果对新配置不构成任何证据, 必须回到"未经校验"的起点。
-_TRANSITIONS: Final[MappingProxyType[ResourceState, frozenset[ResourceState]]] = (
-    MappingProxyType({
-        ResourceState.DRAFT: frozenset({
-            ResourceState.VERIFYING,
-            ResourceState.REVOKED,
-        }),
-        ResourceState.VERIFYING: frozenset({
-            ResourceState.ACTIVE,
-            ResourceState.DEGRADED,
-            ResourceState.DRAFT,
-            ResourceState.REVOKED,
-        }),
-        ResourceState.ACTIVE: frozenset({
-            ResourceState.DEGRADED,
-            ResourceState.PAUSED,
-            ResourceState.VERIFYING,
-            ResourceState.DRAFT,
-            ResourceState.REVOKED,
-        }),
-        ResourceState.DEGRADED: frozenset({
-            ResourceState.ACTIVE,
-            ResourceState.PAUSED,
-            ResourceState.VERIFYING,
-            ResourceState.DRAFT,
-            ResourceState.REVOKED,
-        }),
-        ResourceState.PAUSED: frozenset({
-            ResourceState.ACTIVE,
-            ResourceState.VERIFYING,
-            ResourceState.DRAFT,
-            ResourceState.REVOKED,
-        }),
+_TRANSITIONS: Final[MappingProxyType[ResourceState, frozenset[ResourceState]]] = MappingProxyType(
+    {
+        ResourceState.DRAFT: frozenset(
+            {
+                ResourceState.VERIFYING,
+                ResourceState.REVOKED,
+            }
+        ),
+        ResourceState.VERIFYING: frozenset(
+            {
+                ResourceState.ACTIVE,
+                ResourceState.DEGRADED,
+                ResourceState.DRAFT,
+                ResourceState.REVOKED,
+            }
+        ),
+        ResourceState.ACTIVE: frozenset(
+            {
+                ResourceState.DEGRADED,
+                ResourceState.PAUSED,
+                ResourceState.VERIFYING,
+                ResourceState.DRAFT,
+                ResourceState.REVOKED,
+            }
+        ),
+        ResourceState.DEGRADED: frozenset(
+            {
+                ResourceState.ACTIVE,
+                ResourceState.PAUSED,
+                ResourceState.VERIFYING,
+                ResourceState.DRAFT,
+                ResourceState.REVOKED,
+            }
+        ),
+        ResourceState.PAUSED: frozenset(
+            {
+                ResourceState.ACTIVE,
+                ResourceState.VERIFYING,
+                ResourceState.DRAFT,
+                ResourceState.REVOKED,
+            }
+        ),
         # 终态: 吊销是单向门。想再用, 建一个新资源。
         ResourceState.REVOKED: frozenset(),
-    })
+    }
 )
 
 
 #: 允许被扫描的状态。必须与 ``Resource.is_scannable`` 保持一致 ——
 #: 两处若不一致, 调度器和 UI 会对同一个资源给出相反的答案。
-SCANNABLE_STATES: Final[frozenset[ResourceState]] = frozenset({
-    ResourceState.ACTIVE,
-    ResourceState.DEGRADED,
-})
+SCANNABLE_STATES: Final[frozenset[ResourceState]] = frozenset(
+    {
+        ResourceState.ACTIVE,
+        ResourceState.DEGRADED,
+    }
+)
 
 #: 终态集合。语义上等价于 "转移表里出边为空", 这里显式写出来是为了让
 #: 调用方能直接问 ``is_terminal()`` 而不必自己去数出边。
-TERMINAL_STATES: Final[frozenset[ResourceState]] = frozenset({
-    ResourceState.REVOKED,
-})
+TERMINAL_STATES: Final[frozenset[ResourceState]] = frozenset(
+    {
+        ResourceState.REVOKED,
+    }
+)
 
 
 def allowed_targets(state: ResourceState) -> frozenset[ResourceState]:
@@ -196,17 +210,13 @@ def _assert_transitions_complete() -> None:
     missing = set(ResourceState) - set(_TRANSITIONS)
     if missing:
         raise RuntimeError(
-            "ResourceState members missing a transition rule: "
-            f"{sorted(m.value for m in missing)}"
+            f"ResourceState members missing a transition rule: {sorted(m.value for m in missing)}"
         )
 
     # 转移目标也必须是合法状态, 且不能指向自己
     for source, targets in _TRANSITIONS.items():
         if source in targets:
-            raise RuntimeError(
-                f"ResourceState '{source.value}' 的转移表里包含自己, "
-                "自转移不是合法转移。"
-            )
+            raise RuntimeError(f"ResourceState '{source.value}' 的转移表里包含自己, 自转移不是合法转移。")
 
 
 _assert_transitions_complete()

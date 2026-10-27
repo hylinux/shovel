@@ -1,9 +1,9 @@
-#---------------------------------------------------------
+# ---------------------------------------------------------
 # 本地文件系统连接器
 #
 # 日期: 2026-09-29
 # 作者: HongWei Guo <hongweig@163.com>
-#---------------------------------------------------------
+# ---------------------------------------------------------
 """``local_fs``: 把本机上的一个目录当作数据源。
 
 这是第一个真实连接器, 它的作用不只是"能扫本地目录", 更重要的是把
@@ -15,15 +15,20 @@ from __future__ import annotations
 
 import fnmatch
 import os
+import stat as stat_module
 import time
 from collections.abc import AsyncIterator, Iterator
 from pathlib import Path, PurePosixPath
-from typing import ClassVar
+from typing import ClassVar, NoReturn
 
 from pydantic import BaseModel, ConfigDict, Field, SecretStr, field_validator
 
 from shovel.domain.enums import DocClass, Modality, Sensitivity
-from shovel.exceptions.resource import ConnectorCapabilityError, ConnectorPathEscapeError
+from shovel.exceptions.resource import (
+    ConnectorCapabilityError,
+    ConnectorDiscoveryError,
+    ConnectorPathEscapeError,
+)
 from shovel.services.connector_base import (
     ConnectorCapability,
     ConnectorSpec,
@@ -98,13 +103,28 @@ _DOC_CLASS_TO_MODALITY: dict[DocClass, Modality] = {
 #: 无论用户怎么配 include, 都不该进知识库的目录。
 #: 这不是"默认 exclude", 而是硬性跳过 —— 把 .git 或 node_modules 索引进去
 #: 除了烧掉几个小时的 embedding 额度之外没有任何收益。
-_ALWAYS_SKIP_DIRS = frozenset({
-    ".git", ".hg", ".svn",
-    "__pycache__", ".mypy_cache", ".ruff_cache", ".pytest_cache",
-    "node_modules", ".venv", "venv", ".tox",
-    ".next", ".turbo", "dist", "build", ".gradle",
-    ".idea", ".vscode",
-})
+_ALWAYS_SKIP_DIRS = frozenset(
+    {
+        ".git",
+        ".hg",
+        ".svn",
+        "__pycache__",
+        ".mypy_cache",
+        ".ruff_cache",
+        ".pytest_cache",
+        "node_modules",
+        ".venv",
+        "venv",
+        ".tox",
+        ".next",
+        ".turbo",
+        "dist",
+        "build",
+        ".gradle",
+        ".idea",
+        ".vscode",
+    }
+)
 
 
 class LocalFsConfig(BaseModel):
@@ -160,14 +180,16 @@ class LocalFsConnector:
         display_name="本地文件系统",
         description="把本机上的一个目录当作数据源, 按 glob 规则递归扫描其中的文件。",
         config_model=LocalFsConfig,
-        capabilities=frozenset({
-            ConnectorCapability.DISCOVER,
-            # 文件系统给了 mtime, 增量只需比对水位线
-            ConnectorCapability.INCREMENTAL,
-            ConnectorCapability.RANDOM_READ,
-            # 一次完整遍历就是权威的完整列表, 差集可以安全地推断删除
-            ConnectorCapability.DELETE_DETECT,
-        }),
+        capabilities=frozenset(
+            {
+                ConnectorCapability.DISCOVER,
+                # 枚举 stat 指纹, 由扫描器增量处理;文件时间戳不是可靠游标。
+                ConnectorCapability.INCREMENTAL,
+                ConnectorCapability.RANDOM_READ,
+                # 一次完整遍历就是权威的完整列表, 差集可以安全地推断删除
+                ConnectorCapability.DELETE_DETECT,
+            }
+        ),
         requires_identity=False,
         # 本地目录是用户自己放的东西, 可信度高于任何远端来源
         default_authority=0.8,
@@ -181,9 +203,7 @@ class LocalFsConnector:
         credential: SecretStr | None = None,
     ) -> None:
         if not isinstance(config, LocalFsConfig):
-            raise TypeError(
-                f"LocalFsConnector 需要 LocalFsConfig, 收到的是 {type(config).__name__}。"
-            )
+            raise TypeError(f"LocalFsConnector 需要 LocalFsConfig, 收到的是 {type(config).__name__}。")
 
         # local_fs 不需要凭据 —— 能不能读由操作系统的文件权限决定,
         # 这里显式忽略传进来的 credential, 而不是假装用得上它。
@@ -280,10 +300,8 @@ class LocalFsConnector:
 
             try:
                 stat = path.stat()
-            except OSError:
-                # 遍历期间文件被删/被移走是常态, 不是错误。
-                # 少一个条目由下一次全量扫描的差集去对账。
-                continue
+            except OSError as exc:
+                raise ConnectorDiscoveryError(str(path), str(exc)) from exc
 
             if scope.max_file_bytes is not None and stat.st_size > scope.max_file_bytes:
                 continue
@@ -291,9 +309,6 @@ class LocalFsConnector:
             modified_at = int(stat.st_mtime)
 
             if cutoff is not None and modified_at < cutoff:
-                continue
-
-            if scope.since is not None and modified_at <= scope.since:
                 continue
 
             doc_class = _classify(path)
@@ -353,35 +368,51 @@ class LocalFsConnector:
         """产出 (绝对路径, external_id) 二元组。
 
         ``external_id`` 用的是**相对 root 的 POSIX 路径**, 不是绝对路径。
-        这个选择很关键: 用户把 ``D:\\notes`` 改名成 ``D:\\my-notes`` 之后,
-        如果 external_id 是绝对路径, 整个资源的每一个文档都会被认成
-        "旧的全没了 + 新的全来了", 于是全量重新 embedding 一遍。
-        用相对路径则改名只影响 ``Resource.config``, 文档一个都不用动。
-
-        统一用 POSIX 分隔符, 是为了让同一个知识库在 Windows 和 Linux 上
-        算出来的 id 一致 —— 否则一次跨平台同步就等于一次全量重扫。
+        相对路径用于源内定位。当前文档身份仍包含绝对 URI, 因此修改根目录
+        配置会使旧作用域失效并重建, 不承诺跨根目录移动后保留索引身份。
         """
 
         root = self.root
         include_hidden = self._config.include_hidden
         follow = self._config.follow_symlinks
 
-        for dirpath, dirnames, filenames in os.walk(root, followlinks=follow):
+        def discovery_error(exc: OSError) -> NoReturn:
+            raise ConnectorDiscoveryError(str(exc.filename or root), str(exc)) from exc
+
+        try:
+            initial = root.stat()
+            if not stat_module.S_ISDIR(initial.st_mode):
+                raise NotADirectoryError(str(root))
+        except OSError as exc:
+            discovery_error(exc)
+
+        visited: set[Path] = set()
+        for dirpath, dirnames, filenames in os.walk(root, followlinks=follow, onerror=discovery_error):
+            current = Path(dirpath)
+            resolved = current.resolve()
+            if not resolved.is_relative_to(root):
+                raise ConnectorPathEscapeError(self.spec.kind, str(current), str(root))
+            if resolved in visited:
+                dirnames[:] = []
+                continue
+            visited.add(resolved)
             # 原地改 dirnames 才能真正阻止 os.walk 进去,
             # 换成新 list 赋值是没用的 —— walk 持有的是同一个对象。
             dirnames[:] = [
-                d for d in dirnames
-                if d not in _ALWAYS_SKIP_DIRS
-                and (include_hidden or not d.startswith("."))
+                d
+                for d in dirnames
+                if d not in _ALWAYS_SKIP_DIRS and (include_hidden or not d.startswith("."))
             ]
-
-            current = Path(dirpath)
 
             for name in filenames:
                 if not include_hidden and name.startswith("."):
                     continue
 
                 path = current / name
+                if not follow and path.is_symlink():
+                    continue
+                if not path.resolve().is_relative_to(root):
+                    raise ConnectorPathEscapeError(self.spec.kind, str(path), str(root))
 
                 try:
                     relative = path.relative_to(root)
@@ -390,6 +421,13 @@ class LocalFsConnector:
                     continue
 
                 yield path, relative.as_posix()
+
+        try:
+            final = root.stat()
+        except OSError as exc:
+            discovery_error(exc)
+        if (initial.st_dev, initial.st_ino) != (final.st_dev, final.st_ino):
+            raise ConnectorDiscoveryError(str(root), "扫描期间根目录身份发生变化,请重试。")
 
     @staticmethod
     def _time_cutoff(scope: DiscoveryScope) -> int | None:

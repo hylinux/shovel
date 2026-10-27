@@ -1,9 +1,9 @@
-#---------------------------------------------------------
+# ---------------------------------------------------------
 # 文本向量化
 #
 # 日期: 2026-09-29
 # 作者: HongWei Guo <hongweig@163.com>
-#---------------------------------------------------------
+# ---------------------------------------------------------
 """把文本批量变成向量。
 
 ## 为什么自己发 HTTP 而不用 openai SDK
@@ -96,7 +96,18 @@ class HttpEmbedder:
     # ----------------------------------------------------------------- #
     @property
     def model_version(self) -> str:
-        return f"{self._settings.provider}:{self._settings.model}"
+        import hashlib
+        import json
+
+        identity = {
+            "endpoint": self._settings.base_url.rstrip("/"),
+            "api_version": self._settings.api_version,
+            "revision": self._settings.revision,
+            "dimension": self._expected,
+            "max_input_chars": self._settings.max_input_chars,
+        }
+        fingerprint = hashlib.sha256(json.dumps(identity, sort_keys=True).encode()).hexdigest()[:16]
+        return f"{self._settings.provider}:{self._settings.model}@{fingerprint}"
 
     @property
     def dimension(self) -> int:
@@ -114,7 +125,7 @@ class HttpEmbedder:
         vectors: list[list[float]] = []
 
         for start in range(0, len(payload), self._settings.batch_size):
-            batch = payload[start:start + self._settings.batch_size]
+            batch = payload[start : start + self._settings.batch_size]
             vectors.extend(await self._embed_batch(batch))
 
         if vectors and self._dimension == 0:
@@ -145,9 +156,7 @@ class HttpEmbedder:
                 response = await client.post(url, headers=headers, json=body)
 
                 if response.status_code in _RETRYABLE_STATUS:
-                    raise _Retryable(
-                        f"HTTP {response.status_code}: {response.text[:200]}"
-                    )
+                    raise _Retryable(f"HTTP {response.status_code}: {response.text[:200]}")
 
                 if response.status_code >= 400:
                     raise EmbeddingError(
@@ -196,8 +205,7 @@ class HttpEmbedder:
         if provider == "azure_openai":
             # Azure 把模型名放进 URL 路径 (deployment), 而不是请求体
             return (
-                f"{base}/openai/deployments/{settings.model}/embeddings"
-                f"?api-version={settings.api_version}",
+                f"{base}/openai/deployments/{settings.model}/embeddings?api-version={settings.api_version}",
                 {"api-key": key},
                 {"input": batch},
             )
@@ -244,7 +252,7 @@ def _backoff(attempt: int) -> float:
     完全相同, 它们会在同一毫秒再次撞上去, 于是限流永远不会缓解。
     """
 
-    base = min(2.0 ** attempt, 30.0)
+    base = min(2.0**attempt, 30.0)
 
     return base * (0.5 + random.random() * 0.5)  # noqa: S311
 

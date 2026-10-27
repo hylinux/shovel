@@ -99,9 +99,7 @@ async def test_create_starts_in_draft(service: ResourceService, draft: ResourceD
     assert resource.id.startswith("res_")
 
 
-async def test_create_applies_connector_defaults(
-    service: ResourceService, draft: ResourceDraft
-) -> None:
+async def test_create_applies_connector_defaults(service: ResourceService, draft: ResourceDraft) -> None:
     """默认权威度/敏感度来自连接器 —— 只有它知道自己是哪种数据源。"""
 
     resource = await service.create(draft)
@@ -110,9 +108,7 @@ async def test_create_applies_connector_defaults(
     assert resource.sensitivity is Sensitivity.PERSONAL
 
 
-async def test_explicit_values_beat_connector_defaults(
-    service: ResourceService, tmp_path: Path
-) -> None:
+async def test_explicit_values_beat_connector_defaults(service: ResourceService, tmp_path: Path) -> None:
     resource = await service.create(
         ResourceDraft(
             name="public",
@@ -139,9 +135,7 @@ async def test_create_makes_a_default_scan_profile(
     resource = await service.create(draft)
 
     async with sessions() as session:
-        result = await session.execute(
-            select(ScanProfile).where(ScanProfile.resource_id == resource.id)
-        )
+        result = await session.execute(select(ScanProfile).where(ScanProfile.resource_id == resource.id))
         profiles = result.scalars().all()
 
     assert len(profiles) == 1
@@ -150,9 +144,7 @@ async def test_create_makes_a_default_scan_profile(
     assert profiles[0].scan_mode is ScanMode.INCREMENTAL
 
 
-async def test_duplicate_name_is_rejected(
-    service: ResourceService, draft: ResourceDraft
-) -> None:
+async def test_duplicate_name_is_rejected(service: ResourceService, draft: ResourceDraft) -> None:
     await service.create(draft)
 
     with pytest.raises(DuplicateResourceNameError):
@@ -161,16 +153,12 @@ async def test_duplicate_name_is_rejected(
 
 async def test_unknown_connector_is_rejected(service: ResourceService) -> None:
     with pytest.raises(UnknownConnectorError):
-        await service.create(
-            ResourceDraft(name="x", connector_kind="notion", config={})
-        )
+        await service.create(ResourceDraft(name="x", connector_kind="notion", config={}))
 
 
 async def test_invalid_config_is_rejected(service: ResourceService) -> None:
     with pytest.raises(InvalidConnectorConfigError) as excinfo:
-        await service.create(
-            ResourceDraft(name="x", connector_kind="local_fs", config={})
-        )
+        await service.create(ResourceDraft(name="x", connector_kind="local_fs", config={}))
 
     # 报错必须指出是哪个字段, 否则用户只知道"配置不对"
     assert "root_path" in (excinfo.value.details or "")
@@ -180,9 +168,7 @@ async def test_bad_config_leaves_no_row_behind(
     service: ResourceService, sessions: async_sessionmaker[AsyncSession]
 ) -> None:
     with pytest.raises(InvalidConnectorConfigError):
-        await service.create(
-            ResourceDraft(name="x", connector_kind="local_fs", config={})
-        )
+        await service.create(ResourceDraft(name="x", connector_kind="local_fs", config={}))
 
     async with sessions() as session:
         assert (await session.execute(select(Resource))).scalars().all() == []
@@ -220,9 +206,7 @@ async def test_secret_goes_to_the_store_not_the_database(
     assert stored.get_secret_value() == "top-secret-token"
 
 
-async def test_env_identity_ref_is_stored_verbatim(
-    service: ResourceService, tmp_path: Path
-) -> None:
+async def test_env_identity_ref_is_stored_verbatim(service: ResourceService, tmp_path: Path) -> None:
     resource = await service.create(
         ResourceDraft(
             name="env-source",
@@ -235,9 +219,7 @@ async def test_env_identity_ref_is_stored_verbatim(
     assert resource.identity_ref == "env:MY_TOKEN"
 
 
-async def test_secret_with_readonly_ref_is_rejected(
-    service: ResourceService, tmp_path: Path
-) -> None:
+async def test_secret_with_readonly_ref_is_rejected(service: ResourceService, tmp_path: Path) -> None:
     """环境变量由用户自己设置, Shovel 不会去写它 —— 别假装能写。"""
 
     with pytest.raises(InvalidConnectorConfigError):
@@ -255,9 +237,7 @@ async def test_secret_with_readonly_ref_is_rejected(
 # --------------------------------------------------------------------------- #
 # verify
 # --------------------------------------------------------------------------- #
-async def test_verify_promotes_to_active(
-    service: ResourceService, draft: ResourceDraft
-) -> None:
+async def test_verify_promotes_to_active(service: ResourceService, draft: ResourceDraft) -> None:
     resource = await service.create(draft)
 
     result = await service.verify(resource.id)
@@ -268,9 +248,7 @@ async def test_verify_promotes_to_active(
     assert refreshed.last_verified_at is not None
 
 
-async def test_verify_failure_degrades_without_raising(
-    service: ResourceService, tmp_path: Path
-) -> None:
+async def test_verify_failure_degrades_without_raising(service: ResourceService, tmp_path: Path) -> None:
     """连不上是常态, 不该让 CLI 命令以栈回溯收场。"""
 
     resource = await service.create(
@@ -287,9 +265,7 @@ async def test_verify_failure_degrades_without_raising(
     assert (await service.get(resource.id)).state is ResourceState.DEGRADED
 
 
-async def test_strict_verify_raises_on_failure(
-    service: ResourceService, tmp_path: Path
-) -> None:
+async def test_strict_verify_raises_on_failure(service: ResourceService, tmp_path: Path) -> None:
     resource = await service.create(
         ResourceDraft(
             name="missing",
@@ -305,9 +281,7 @@ async def test_strict_verify_raises_on_failure(
     assert (await service.get(resource.id)).state is ResourceState.DEGRADED
 
 
-async def test_failed_verify_keeps_the_previous_watermark(
-    service: ResourceService, tmp_path: Path
-) -> None:
+async def test_failed_verify_keeps_the_previous_watermark(service: ResourceService, tmp_path: Path) -> None:
     """保留上一次成功的时间, UI 才能说出'最后一次连通是三天前'。"""
 
     root = tmp_path / "data"
@@ -338,9 +312,7 @@ async def test_verify_is_repeatable(service: ResourceService, draft: ResourceDra
     assert (await service.get(resource.id)).state is ResourceState.ACTIVE
 
 
-async def test_verify_can_recover_a_degraded_resource(
-    service: ResourceService, tmp_path: Path
-) -> None:
+async def test_verify_can_recover_a_degraded_resource(service: ResourceService, tmp_path: Path) -> None:
     root = tmp_path / "later"
 
     resource = await service.create(
@@ -391,9 +363,7 @@ async def test_metadata_changes_do_not_require_reverification(
     assert updated.last_verified_at is not None
 
 
-async def test_out_of_range_authority_is_rejected(
-    service: ResourceService, draft: ResourceDraft
-) -> None:
+async def test_out_of_range_authority_is_rejected(service: ResourceService, draft: ResourceDraft) -> None:
     resource = await service.create(draft)
 
     with pytest.raises(InvalidConnectorConfigError):
@@ -491,9 +461,7 @@ async def test_config_cannot_be_changed_after_revoke(
 # --------------------------------------------------------------------------- #
 # 查询与删除
 # --------------------------------------------------------------------------- #
-async def test_resolve_accepts_both_id_and_name(
-    service: ResourceService, draft: ResourceDraft
-) -> None:
+async def test_resolve_accepts_both_id_and_name(service: ResourceService, draft: ResourceDraft) -> None:
     resource = await service.create(draft)
 
     assert (await service.resolve(resource.id)).id == resource.id
@@ -535,9 +503,7 @@ async def test_delete_cascades_to_profiles(
     await service.delete(resource.id)
 
     async with sessions() as session:
-        result = await session.execute(
-            select(ScanProfile).where(ScanProfile.resource_id == resource.id)
-        )
+        result = await session.execute(select(ScanProfile).where(ScanProfile.resource_id == resource.id))
         assert result.scalars().all() == []
 
     with pytest.raises(ResourceNotFoundError):

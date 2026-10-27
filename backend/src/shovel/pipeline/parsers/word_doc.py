@@ -1,9 +1,9 @@
-#---------------------------------------------------------
+# ---------------------------------------------------------
 # Word 解析器 (python-docx)
 #
 # 日期: 2026-09-29
 # 作者: HongWei Guo <hongweig@163.com>
-#---------------------------------------------------------
+# ---------------------------------------------------------
 """抽取 .docx 的正文、标题层级与表格。
 
 python-docx 的 ``document.paragraphs`` 和 ``document.tables`` 是两个互不
@@ -47,7 +47,6 @@ _WORD_NS = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
 
 
 class WordParser:
-
     spec: ClassVar[ParserSpec] = ParserSpec(
         name="word",
         version="1",
@@ -151,8 +150,7 @@ def _table_block(table: Any, stack: HeadingStack, index: int) -> Block | None:
     rows: list[list[str]] = []
 
     for row in table.rows:
-        cells = [clean_text(cell.text).replace("\n", " ").replace("|", "\\|")
-                 for cell in row.cells]
+        cells = [clean_text(cell.text).replace("\n", " ").replace("|", "\\|") for cell in row.cells]
 
         if any(cells):
             rows.append(cells)

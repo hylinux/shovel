@@ -1,14 +1,15 @@
-#---------------------------------------------------------
+# ---------------------------------------------------------
 # 应用配置
 #
 # 日期: 2026-09-15
 # 作者: HongWei Guo <hongweig@163.com>
-#---------------------------------------------------------
+# ---------------------------------------------------------
 from __future__ import annotations
 
 import os
 import shutil
 import tomllib
+from contextvars import ContextVar
 from datetime import datetime
 from enum import Enum
 from pathlib import Path
@@ -16,7 +17,7 @@ from typing import Any
 
 import tomli_w
 from pydantic import Field, SecretStr, ValidationError
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic_settings import BaseSettings, PydanticBaseSettingsSource, SettingsConfigDict
 
 from .database_config import DatabaseSettings
 from .document_settings import DocumentSettings
@@ -30,9 +31,12 @@ from .memory_config import MemorySettings
 from .model_settings import DefaultAgentModelSettings
 from .zvec_config import ZvecSettings
 
+_READ_ENVIRONMENT: ContextVar[bool] = ContextVar("shovel_read_environment", default=True)
+
 # ================================================================
 # TOML 值转换
 # ================================================================
+
 
 def _to_toml_safe(value: Any) -> Any:
     """把 model_dump() 的结果转换成 TOML 能表达的形式。
@@ -68,18 +72,10 @@ def _to_toml_safe(value: Any) -> Any:
         return value.as_posix()
 
     if isinstance(value, dict):
-        return {
-            k: cleaned
-            for k, v in value.items()
-            if (cleaned := _to_toml_safe(v)) is not None
-        }
+        return {k: cleaned for k, v in value.items() if (cleaned := _to_toml_safe(v)) is not None}
 
     if isinstance(value, (list, tuple)):
-        return [
-            cleaned
-            for v in value
-            if (cleaned := _to_toml_safe(v)) is not None
-        ]
+        return [cleaned for v in value if (cleaned := _to_toml_safe(v)) is not None]
 
     return value
 
@@ -127,12 +123,12 @@ def drop_removed_keys(data: dict[str, Any]) -> list[str]:
 # AppSettings
 # ================================================================
 
-class AppSettings(BaseSettings):
 
+class AppSettings(BaseSettings):
     model_config = SettingsConfigDict(
         env_prefix="SHOVEL_",
-        env_nested_delimiter="__",     # SHOVEL_DATABASE__URL
-        extra="forbid",                # 配置文件里的错别字会被报出来
+        env_nested_delimiter="__",  # SHOVEL_DATABASE__URL
+        extra="forbid",  # 配置文件里的错别字会被报出来
     )
 
     service_name: str = "shovel"
@@ -161,6 +157,19 @@ class AppSettings(BaseSettings):
     #: 记忆子系统(mem0 + 本地 Qdrant)。记忆不走 Zvec, 原因见 memory_config.py
     memory: MemorySettings = Field(default_factory=MemorySettings)
 
+    @classmethod
+    def settings_customise_sources(
+        cls,
+        settings_cls: type[BaseSettings],
+        init_settings: PydanticBaseSettingsSource,
+        env_settings: PydanticBaseSettingsSource,
+        dotenv_settings: PydanticBaseSettingsSource,
+        file_secret_settings: PydanticBaseSettingsSource,
+    ) -> tuple[PydanticBaseSettingsSource, ...]:
+        if not _READ_ENVIRONMENT.get():
+            return (init_settings,)
+        return env_settings, init_settings, dotenv_settings, file_secret_settings
+
     # ------------------------------------------------------------
     # 读
     # ------------------------------------------------------------
@@ -175,21 +184,24 @@ class AppSettings(BaseSettings):
         data = read_toml_file(path)
         drop_removed_keys(data)
 
+        token = _READ_ENVIRONMENT.set(False)
         try:
             return cls.model_validate(data)
         except ValidationError as e:
             raise ConfigError(format_validation_error(path, e)) from e
+        finally:
+            _READ_ENVIRONMENT.reset(token)
 
     # ------------------------------------------------------------
     # 写
     # ------------------------------------------------------------
 
     def save(
-            self,
-            path: Path,
-            *,
-            overwrite: bool = False,
-            backup: bool = True,
+        self,
+        path: Path,
+        *,
+        overwrite: bool = False,
+        backup: bool = True,
     ) -> Path | None:
         """写入 TOML 配置文件。
 
@@ -229,6 +241,7 @@ class AppSettings(BaseSettings):
 # 写入辅助
 # ================================================================
 
+
 def _atomic_write_toml(path: Path, data: dict[str, Any]) -> None:
     """原子写 + 写后回读自检。
 
@@ -250,8 +263,7 @@ def _atomic_write_toml(path: Path, data: dict[str, Any]) -> None:
 
         if parsed != data:
             raise ConfigError(
-                f"生成的 TOML 与预期不一致, 已中止写入: {path}\n"
-                f"  这是配置序列化的内部错误, 请反馈该问题。"
+                f"生成的 TOML 与预期不一致, 已中止写入: {path}\n  这是配置序列化的内部错误, 请反馈该问题。"
             )
 
         os.replace(tmp, path)
@@ -264,6 +276,7 @@ def _atomic_write_toml(path: Path, data: dict[str, Any]) -> None:
 # 模块级读取入口
 # ================================================================
 
+
 def read_toml_file(path: Path) -> dict[str, Any]:
     """读取并解析 TOML, 失败时抛出面向用户的 ConfigError。"""
 
@@ -271,19 +284,13 @@ def read_toml_file(path: Path) -> dict[str, Any]:
         text = path.read_text(encoding="utf-8")
 
     except FileNotFoundError:
-        raise ConfigError(
-            f"配置文件不存在: {path}\n"
-            f"  执行 'shovel config' 生成默认配置。"
-        ) from None
+        raise ConfigError(f"配置文件不存在: {path}\n  执行 'shovel config' 生成默认配置。") from None
 
     except PermissionError:
         raise ConfigError(f"没有权限读取配置文件: {path}") from None
 
     if not text.strip():
-        raise ConfigError(
-            f"配置文件为空: {path}\n"
-            f"  执行 'shovel config --force' 重新生成。"
-        )
+        raise ConfigError(f"配置文件为空: {path}\n  执行 'shovel config --force' 重新生成。")
 
     try:
         return tomllib.loads(text)

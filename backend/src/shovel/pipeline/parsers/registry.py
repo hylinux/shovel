@@ -1,9 +1,9 @@
-#---------------------------------------------------------
+# ---------------------------------------------------------
 # 解析器注册表
 #
 # 日期: 2026-09-29
 # 作者: HongWei Guo <hongweig@163.com>
-#---------------------------------------------------------
+# ---------------------------------------------------------
 """按文档类型挑解析器。
 
 和连接器注册表是同一套思路 (注册进去的是类, 不是数据行), 但路由规则
@@ -85,9 +85,7 @@ def _load(module_name: str) -> Parser:
         if cached is not None:
             return cached
 
-        module = importlib.import_module(
-            f"shovel.pipeline.parsers.{module_name}"
-        )
+        module = importlib.import_module(f"shovel.pipeline.parsers.{module_name}")
         parser: Parser = module.PARSER
         _CACHE[module_name] = parser
 
@@ -136,6 +134,13 @@ def supported_suffixes() -> tuple[str, ...]:
     """当前支持的扩展名, 供 CLI 展示。"""
 
     return tuple(sorted(_BY_SUFFIX))
+
+
+def parser_versions() -> dict[str, str]:
+    return {
+        name: _load(name).spec.version
+        for name in sorted(set(_BY_SUFFIX.values()) | set(_BY_DOC_CLASS.values()))
+    }
 
 
 def _reset_for_tests() -> None:

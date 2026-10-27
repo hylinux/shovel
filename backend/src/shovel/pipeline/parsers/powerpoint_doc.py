@@ -1,9 +1,9 @@
-#---------------------------------------------------------
+# ---------------------------------------------------------
 # PowerPoint 解析器 (python-pptx)
 #
 # 日期: 2026-09-29
 # 作者: HongWei Guo <hongweig@163.com>
-#---------------------------------------------------------
+# ---------------------------------------------------------
 """一张幻灯片 = 一个块。
 
 这是本解析器唯一的结构决定, 但它是对的: 幻灯片本身就是作者划好的
@@ -39,7 +39,6 @@ from shovel.pipeline.parsers.base import (
 
 
 class PowerPointParser:
-
     spec: ClassVar[ParserSpec] = ParserSpec(
         name="powerpoint",
         version="1",
@@ -72,33 +71,39 @@ class PowerPointParser:
             locator = f"slide {number}"
 
             if title:
-                blocks.append(Block(
-                    text=title,
-                    kind=BlockKind.HEADING,
-                    level=1,
-                    path=path,
-                    locator=locator,
-                ))
+                blocks.append(
+                    Block(
+                        text=title,
+                        kind=BlockKind.HEADING,
+                        level=1,
+                        path=path,
+                        locator=locator,
+                    )
+                )
 
             body = _slide_body(slide, skip=title)
 
             if body:
-                blocks.append(Block(
-                    text=body,
-                    kind=BlockKind.PARAGRAPH,
-                    path=path,
-                    locator=locator,
-                ))
+                blocks.append(
+                    Block(
+                        text=body,
+                        kind=BlockKind.PARAGRAPH,
+                        path=path,
+                        locator=locator,
+                    )
+                )
 
             notes = _slide_notes(slide)
 
             if notes:
-                blocks.append(Block(
-                    text=notes,
-                    kind=BlockKind.NOTE,
-                    path=path,
-                    locator=f"{locator} (备注)",
-                ))
+                blocks.append(
+                    Block(
+                        text=notes,
+                        kind=BlockKind.NOTE,
+                        path=path,
+                        locator=f"{locator} (备注)",
+                    )
+                )
 
         if not blocks:
             raise EmptyDocumentError(hint.uri)
@@ -165,10 +170,7 @@ def _table_text(table: Any) -> str:
     rows: list[str] = []
 
     for row in table.rows:
-        cells = [
-            clean_text(cell.text or "").replace("\n", " ").replace("|", "\\|")
-            for cell in row.cells
-        ]
+        cells = [clean_text(cell.text or "").replace("\n", " ").replace("|", "\\|") for cell in row.cells]
 
         if any(cells):
             rows.append("| " + " | ".join(cells) + " |")

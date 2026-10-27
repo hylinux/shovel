@@ -14,7 +14,7 @@ import pytest
 from pydantic import ValidationError
 
 from shovel.domain.enums import DocClass, Modality
-from shovel.exceptions.resource import ConnectorPathEscapeError
+from shovel.exceptions.resource import ConnectorDiscoveryError, ConnectorPathEscapeError
 from shovel.services.connector_base import DiscoveryScope
 from shovel.services.connector_local_fs import LocalFsConfig, LocalFsConnector
 
@@ -198,13 +198,19 @@ async def test_time_window_filters_old_files(tree: Path) -> None:
     assert "readme.md" in ids
 
 
-async def test_since_watermark_is_exclusive(tree: Path) -> None:
-    """增量扫描的水位线: 只要严格晚于它的, 否则每次都会重复处理边界那一批。"""
+async def test_local_discovery_ignores_non_monotonic_time_watermark(tree: Path) -> None:
+    expected = await _ids(_connector(tree), DiscoveryScope())
+    assert await _ids(_connector(tree), DiscoveryScope(since=int(time.time()) + 10)) == expected
 
-    now = int(time.time())
 
-    assert await _ids(_connector(tree), DiscoveryScope(since=now + 10)) == set()
-    assert await _ids(_connector(tree), DiscoveryScope(since=now - 3600)) != set()
+async def test_missing_source_is_not_a_complete_empty_enumeration(tmp_path: Path) -> None:
+    with pytest.raises(ConnectorDiscoveryError, match="无法完整列举"):
+        await _ids(_connector(tmp_path / "missing"), DiscoveryScope())
+
+
+async def test_file_root_is_not_a_complete_empty_enumeration(tree: Path) -> None:
+    with pytest.raises(ConnectorDiscoveryError):
+        await _ids(_connector(tree / "readme.md"), DiscoveryScope())
 
 
 async def test_target_ids_narrow_the_scan(tree: Path) -> None:

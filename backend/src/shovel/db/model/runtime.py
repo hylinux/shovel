@@ -15,6 +15,8 @@ class Operation(Base):
 
     id: Mapped[str] = mapped_column(sa.Text, primary_key=True, default=lambda: new_id("op"))
     kind: Mapped[str] = mapped_column(sa.Text, nullable=False)
+    request_key: Mapped[str | None] = mapped_column(sa.Text, unique=True)
+    request_fingerprint: Mapped[str | None] = mapped_column(sa.Text)
     state: Mapped[str] = mapped_column(sa.Text, default="queued", nullable=False, index=True)
     # Deliberately not cascading FKs: deletion must not erase its own receipt.
     resource_id: Mapped[str | None] = mapped_column(sa.Text)

@@ -38,6 +38,8 @@ class Runtime:
         self.resources = resources
         self.stopping = asyncio.Event()
         self.wake = asyncio.Event()
+        self.worker_state = "idle"
+        self.worker_error: str | None = None
         self._sink: ZvecChunkSink | None = None
         self._sink_lock = asyncio.Lock()
         self.operations: OperationService = OperationService(self)

@@ -1,7 +1,8 @@
 "use client";
 
 import { useState } from "react";
-import { active, date, segment, useAction, useQuery, type Items, type Job, type JobEvent, type Operation, type Resource } from "./api";
+import { active, api, date, errorText, segment, useAction, useQuery, type Items, type Job, type JobEvent, type Operation, type Resource, type Status } from "./api";
+import { forgetPendingRequest, pendingRequests, type PendingRequest } from "./request-recovery";
 import { Badge, Empty, Feedback } from "./ui";
 
 export function Tasks({ resources }: { resources: Resource[] }) {
@@ -15,6 +16,8 @@ export function Tasks({ resources }: { resources: Resource[] }) {
     if (result) { action.setNotice("Index cleanup queued."); setCleanup(false); operations.refresh(); }
   }
   return <section>
+    <RecoveryRequests refresh={operations.refresh} />
+    <HistoryMaintenance refresh={() => { operations.refresh(); jobs.refresh(); }} />
     <div className="section-toolbar"><div><h2>Scan jobs</h2><p>Progress updates every two seconds while this view is open.</p></div><button onClick={() => setCleanup(!cleanup)} aria-expanded={cleanup}>Clean up index…</button></div>
     {cleanup && <div className="inline-panel"><h3>Clean up index</h3><p>Run backend index maintenance for one resource or the whole index. Original files are not changed.</p><label>Scope<select value={resourceId} onChange={(event) => setResourceId(event.target.value)}><option value="">All resources</option>{resources.map((resource) => <option key={resource.id} value={resource.id}>{resource.name}</option>)}</select></label><div className="button-row"><button disabled={action.busy} onClick={clean}>{action.busy ? "Queuing…" : "Confirm cleanup"}</button><button onClick={() => setCleanup(false)} disabled={action.busy}>Cancel</button></div></div>}
     <Feedback error={action.error} notice={action.notice} />
@@ -24,6 +27,65 @@ export function Tasks({ resources }: { resources: Resource[] }) {
     <Feedback error={operations.error} retry={operations.refresh} />
     {operations.loading ? <p role="status">Loading operations…</p> : operations.data?.items.length === 0 ? <Empty title="No operations yet">Resource actions will be recorded here.</Empty> : <div className="operation-list">{operations.data?.items.map((operation) => <OperationRow key={operation.id} operation={operation} refresh={operations.refresh} />)}</div>}
   </section>;
+}
+
+function HistoryMaintenance({ refresh }: { refresh: () => void }) {
+  const action = useAction();
+  const [confirm, setConfirm] = useState(false);
+  const [days, setDays] = useState(30);
+  async function prune() {
+    const receipt = await action.run<Operation>("/history/prune", { keep_days: days, limit: 1000 });
+    if (receipt) { setConfirm(false); action.setNotice("History maintenance queued. Idempotency receipts and active work are retained."); refresh(); }
+  }
+  return <details className="inline-panel"><summary>Task history retention</summary>
+    <p>Delete old terminal jobs, their events, retrieval logs, completed cleanup records and unkeyed operations. Conversations, documents, pending cleanup and keyed request receipts are retained. Nothing is deleted automatically.</p>
+    <label>Keep latest days<input type="number" min={1} max={36500} required value={days} onChange={(event) => setDays(Number(event.target.value))} /></label>
+    <button disabled={action.busy || !Number.isInteger(days) || days < 1 || days > 36500} onClick={() => setConfirm(true)}>Prune old history…</button>
+    {confirm && <div role="alert" className="confirmation"><p>Delete up to 1000 records per category older than {days} days? This cannot be undone.</p>
+      <button disabled={action.busy} onClick={prune}>Confirm history deletion</button><button onClick={() => setConfirm(false)}>Cancel</button></div>}
+    <Feedback error={action.error} notice={action.notice} /></details>;
+}
+
+function RecoveryRequests({ refresh }: { refresh: () => void }) {
+  const [requests, setRequests] = useState<PendingRequest[]>([]);
+  const [error, setError] = useState("");
+  const [notice, setNotice] = useState("");
+  const [busy, setBusy] = useState(false);
+  async function load() {
+    try {
+      const status = await api<Status>("/status");
+      const rows = pendingRequests(status.workspace_id);
+      setRequests(rows); setError(""); setNotice(rows.length ? "" : "No interrupted browser requests found.");
+    } catch (error) { setError(errorText(error)); }
+  }
+  async function recover(request: PendingRequest, resend: boolean) {
+    setBusy(true); setError(""); setNotice("");
+    try {
+      const status = await api<Status>("/status");
+      if (status.workspace_id !== request.workspace) throw new Error("This receipt belongs to another workspace.");
+      const receipt = resend
+        ? await api<Operation>(request.path, {
+          method: request.method, body: request.body, headers: { "Idempotency-Key": request.key },
+        })
+        : await api<Operation>(`/operations/${segment(request.id)}`);
+      forgetPendingRequest(request.key);
+      setRequests((rows) => rows.filter((row) => row.key !== request.key));
+      setNotice(`Recovered ${receipt.id}: ${receipt.state}. Its receipt is listed below.`);
+      refresh();
+    } catch (error) { setError(errorText(error)); }
+    finally { setBusy(false); }
+  }
+  return <div className="inline-panel">
+    <h3>Interrupted requests</h3>
+    <p>A lost response does not mean an operation failed. Find its receipt first, or resend the original request with the same key.</p>
+    <button disabled={busy} onClick={load}>Find interrupted requests</button>
+    <Feedback error={error} notice={notice} />
+    {requests.map((request) => <article key={request.key}>
+      <p className="path">{request.id} · {request.method} {request.path}</p>
+      <div className="button-row"><button disabled={busy} onClick={() => recover(request, false)}>Find receipt</button>
+        <button disabled={busy} onClick={() => recover(request, true)}>Resend same request</button></div>
+    </article>)}
+  </div>;
 }
 
 function JobRow({ job, refresh }: { job: Job; refresh: () => void }) {

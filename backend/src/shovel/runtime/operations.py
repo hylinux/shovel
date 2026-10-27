@@ -20,7 +20,8 @@ from shovel.pipeline.embedder import build_embedder
 from shovel.pipeline.scan_service import ScanOutcome, ScanService
 from shovel.pipeline.sink import NullVectorSink
 from shovel.runtime.errors import NotFound, RuntimeFailure
-from shovel.runtime.schemas import ResourceInput, ResourceUpdate, ScanInput
+from shovel.runtime.requests import request_fingerprint, request_operation_id
+from shovel.runtime.schemas import HistoryPruneInput, ProfileInput, ResourceInput, ResourceUpdate, ScanInput
 from shovel.services import connector_registry
 from shovel.services.credentials import CredentialRef
 from shovel.services.resource_service import ResourceDraft
@@ -50,17 +51,54 @@ class OperationService:
         payload: dict[str, Any],
         *,
         resource_id: str | None = None,
+        request_key: str | None = None,
+        request_ref: str | None = None,
+        cancel_jobs: bool = False,
+        initial_result: dict[str, Any] | None = None,
     ) -> Operation:
-        if self.runtime.stopping.is_set():
-            raise RuntimeFailure("Host 正在停止,暂不接受新任务。", status=503)
-        operation = Operation(kind=kind, payload=payload, resource_id=resource_id)
-        async with self.runtime.sessions() as session:
-            session.add(operation)
-            await session.commit()
+        fingerprint = request_fingerprint(kind, payload, request_ref)
+        async with self._submit_lock:
+            previous = await self._replay(request_key, fingerprint)
+            if previous is not None:
+                return previous
+            if self.runtime.stopping.is_set():
+                raise RuntimeFailure("Host 正在停止,暂不接受新任务。", status=503)
+            operation = Operation(
+                kind=kind, payload=payload, resource_id=resource_id, result=initial_result or {}
+            )
+            self._identify(operation, request_key, fingerprint)
+            async with self.runtime.sessions() as session:
+                if cancel_jobs:
+                    await session.execute(
+                        update(Job)
+                        .where(
+                            Job.resource_id == resource_id,
+                            Job.state.in_((JobState.QUEUED, JobState.RUNNING)),
+                        )
+                        .values(is_cancel_requested=True)
+                    )
+                session.add(operation)
+                await session.commit()
         self.runtime.wake.set()
         return operation
 
-    async def create_resource(self, request: ResourceInput) -> Operation:
+    async def _replay(self, key: str | None, fingerprint: str) -> Operation | None:
+        if key is None:
+            return None
+        async with self.runtime.sessions() as session:
+            previous = await session.get(Operation, request_operation_id(key))
+        if previous is not None and previous.request_fingerprint != fingerprint:
+            raise RuntimeFailure("此请求键已用于不同的操作或参数;请为新意图使用新的请求键。", status=409)
+        return previous
+
+    @staticmethod
+    def _identify(operation: Operation, key: str | None, fingerprint: str) -> None:
+        if key is not None:
+            operation.id = request_operation_id(key)
+            operation.request_key = key
+            operation.request_fingerprint = fingerprint
+
+    async def create_resource(self, request: ResourceInput, *, request_key: str | None = None) -> Operation:
         spec = connector_registry.get_spec(request.connector_kind)
         spec.config_model.model_validate(request.config)
         if request.identity_ref:
@@ -69,7 +107,14 @@ class OperationService:
             raise RuntimeFailure("此连接器需要 identity_ref;请先安全保存凭据。")
         if request.scan and request.embed and not self.runtime.settings.embedding.is_configured:
             raise RuntimeFailure("首次扫描请求了 embedding,但 [embedding] 尚未配置。")
+        payload = request.model_dump(mode="json")
+        fingerprint = request_fingerprint("resource.create", payload)
         async with self._submit_lock, self.runtime.sessions() as session:
+            previous = await self._replay(request_key, fingerprint)
+            if previous is not None:
+                return previous
+            if self.runtime.stopping.is_set():
+                raise RuntimeFailure("Host 正在停止,暂不接受新任务。", status=503)
             duplicate = await session.scalar(select(Resource.id).where(Resource.name == request.name))
             pending = await session.scalars(
                 select(Operation).where(
@@ -81,8 +126,9 @@ class OperationService:
             operation = Operation(
                 kind="resource.create",
                 resource_id=new_id("res"),
-                payload=request.model_dump(mode="json"),
+                payload=payload,
             )
+            self._identify(operation, request_key, fingerprint)
             session.add(operation)
             await session.commit()
         self.runtime.wake.set()
@@ -94,6 +140,25 @@ class OperationService:
         request: ScanInput,
         *,
         operation_id: str | None = None,
+        request_key: str | None = None,
+    ) -> Operation:
+        async with self._submit_lock:
+            fingerprint = request_fingerprint("scan", request.model_dump(mode="json"), ref)
+            previous = await self._replay(request_key, fingerprint)
+            if previous is not None:
+                return previous
+            return await self._queue_scan(
+                ref, request, operation_id=operation_id, request_key=request_key, fingerprint=fingerprint
+            )
+
+    async def _queue_scan(
+        self,
+        ref: str,
+        request: ScanInput,
+        *,
+        operation_id: str | None,
+        request_key: str | None,
+        fingerprint: str,
     ) -> Operation:
         if operation_id is not None:
             async with self.runtime.sessions() as session:
@@ -121,33 +186,78 @@ class OperationService:
             )
             if operation_id is not None:
                 operation.id = operation_id
+            self._identify(operation, request_key, fingerprint)
             session.add(operation)
             await session.commit()
         self.runtime.wake.set()
         return operation
 
     async def resource_action(
-        self, ref: str, action: str, payload: dict[str, Any] | None = None
+        self,
+        ref: str,
+        action: str,
+        payload: dict[str, Any] | None = None,
+        *,
+        request_key: str | None = None,
     ) -> Operation:
         if action not in {"verify", "pause", "resume", "revoke", "delete", "update"}:
             raise RuntimeFailure(f"不支持的资源操作: {action}")
-        resource = await self.runtime.resources.resolve(ref)
         data = dict(payload or {})
+        previous = await self._replay(request_key, request_fingerprint(f"resource.{action}", data, ref))
+        if previous is not None:
+            return previous
+        resource = await self.runtime.resources.resolve(ref)
         if action == "update":
             request = ResourceUpdate.model_validate(data)
             if request.config is not None:
                 connector_registry.get_spec(resource.connector_kind).config_model.model_validate(
                     request.config
                 )
-        if action in {"pause", "revoke", "delete", "update"}:
-            async with self.runtime.sessions() as session:
-                await session.execute(
-                    update(Job)
-                    .where(Job.resource_id == resource.id, Job.state.in_((JobState.QUEUED, JobState.RUNNING)))
-                    .values(is_cancel_requested=True)
+        return await self.enqueue(
+            f"resource.{action}",
+            data,
+            resource_id=resource.id,
+            request_key=request_key,
+            request_ref=ref,
+            cancel_jobs=action in {"pause", "revoke", "delete", "update"},
+        )
+
+    async def profile_action(
+        self,
+        ref: str,
+        name: str,
+        payload: dict[str, Any] | None,
+        *,
+        request_key: str | None = None,
+    ) -> Operation:
+        kind = "profile.delete" if payload is None else "profile.save"
+        data = {
+            "name": name,
+            "profile": ProfileInput.model_validate(payload).model_dump(exclude_none=True)
+            if payload is not None
+            else None,
+        }
+        previous = await self._replay(request_key, request_fingerprint(kind, data, ref))
+        if previous is not None:
+            return previous
+        resource = await self.runtime.resources.resolve(ref)
+        from shovel.db.model.config import ScanProfile
+
+        async with self.runtime.sessions() as session:
+            profile_id = await session.scalar(
+                select(ScanProfile.id).where(
+                    ScanProfile.resource_id == resource.id,
+                    ScanProfile.name == name,
                 )
-                await session.commit()
-        return await self.enqueue(f"resource.{action}", data, resource_id=resource.id)
+            )
+        return await self.enqueue(
+            kind,
+            data,
+            resource_id=resource.id,
+            request_key=request_key,
+            request_ref=ref,
+            initial_result={"profile_id": profile_id},
+        )
 
     async def cancel_job(self, job_id: str) -> Job:
         async with self.runtime.sessions() as session:
@@ -341,6 +451,39 @@ class OperationService:
     async def _execute(self, operation: Operation) -> tuple[dict[str, Any], str]:
         resources = self.runtime.resources
         ref = operation.resource_id or ""
+        if operation.kind.startswith("profile."):
+            from shovel.runtime.profiles import change_profile
+
+            result = await change_profile(
+                self.runtime,
+                ref,
+                operation.payload["name"],
+                operation.payload["profile"],
+                expected_id=operation.result.get("profile_id"),
+            )
+            if operation.kind == "profile.delete":
+                async with self.runtime.sessions() as session:
+                    await session.execute(
+                        update(Operation)
+                        .where(
+                            Operation.id == operation.id,
+                        )
+                        .values(result={**result, "profile_deleted": True, "cleanup_complete": False})
+                    )
+                    await session.commit()
+                await IndexCleanupService(self.runtime.sessions, await self.runtime.sink()).drain(
+                    resource_id=ref,
+                )
+                result["cleanup_complete"] = True
+            return result, "succeeded"
+        if operation.kind == "history.prune":
+            from shovel.runtime.maintenance import prune_history
+
+            return await prune_history(
+                self.runtime,
+                HistoryPruneInput.model_validate(operation.payload),
+                operation.id,
+            ), "succeeded"
         if operation.kind == "scan":
             request = ScanInput.model_validate(operation.payload)
             embedder = build_embedder(

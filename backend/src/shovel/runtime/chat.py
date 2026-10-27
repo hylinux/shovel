@@ -133,16 +133,35 @@ class ChatService:
             raise NotFound("对话", identifier)
         return result
 
-    async def messages(self, identifier: str) -> list[ChatMessage]:
+    async def maintain(self, identifier: str, *, title: str | None = None) -> None:
+        lock = self._locks.setdefault(identifier, asyncio.Lock())
+        if lock.locked():
+            raise RuntimeFailure("此对话正在生成回答,完成后才能修改或删除。", status=409)
+        async with lock, self.runtime.sessions() as session:
+            conversation = await session.get(Conversation, identifier)
+            if conversation is None:
+                raise NotFound("对话", identifier)
+            if title is None:
+                await session.delete(conversation)
+            else:
+                conversation.title = title
+                conversation.updated_at = now_ts()
+            await session.commit()
+
+    async def messages(
+        self,
+        identifier: str,
+        *,
+        limit: int = 100,
+        before: int | None = None,
+    ) -> list[ChatMessage]:
         await self.conversation(identifier)
         async with self.runtime.sessions() as session:
-            return list(
-                await session.scalars(
-                    select(ChatMessage)
-                    .where(ChatMessage.conversation_id == identifier)
-                    .order_by(ChatMessage.sequence)
-                )
-            )
+            statement = select(ChatMessage).where(ChatMessage.conversation_id == identifier)
+            if before is not None:
+                statement = statement.where(ChatMessage.sequence < before)
+            rows = list(await session.scalars(statement.order_by(ChatMessage.sequence.desc()).limit(limit)))
+            return list(reversed(rows))
 
     async def send(self, identifier: str, request: MessageInput) -> ChatMessage:
         await self.conversation(identifier)
@@ -160,6 +179,8 @@ class ChatService:
 
     async def _send(self, identifier: str, request: MessageInput) -> ChatMessage:
         async with self.runtime.sessions() as session:
+            if await session.get(Conversation, identifier) is None:
+                raise NotFound("对话", identifier)
             history = list(
                 await session.scalars(
                     select(ChatMessage)

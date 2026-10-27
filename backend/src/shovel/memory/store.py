@@ -1,4 +1,4 @@
-#---------------------------------------------------------------------
+# ---------------------------------------------------------------------
 # 记忆存储的生命周期(mem0 + 本地 Qdrant)
 #
 # 这里刻意分成两个入口:
@@ -13,7 +13,7 @@
 #
 # 日期: 2026-09-29
 # 作者: HongWei Guo <hongweig@163.com>
-#---------------------------------------------------------------------
+# ---------------------------------------------------------------------
 from __future__ import annotations
 
 import os
@@ -86,10 +86,10 @@ class MemoryStoreInfo:
     """记忆存储的初始化结果。"""
 
     collection: str
-    location: str        # local 模式是目录, 否则是 host:port / url
-    mode: str            # local / server / cloud
+    location: str  # local 模式是目录, 否则是 host:port / url
+    mode: str  # local / server / cloud
     dim: int
-    created: bool        # True = 本次新建, False = 已存在
+    created: bool  # True = 本次新建, False = 已存在
     history_db: Path
 
 
@@ -177,8 +177,8 @@ def init_memory_store(settings: MemorySettings) -> MemoryStoreInfo:
 
 
 def open_memory(
-        settings: MemorySettings,
-        model: DefaultAgentModelSettings,
+    settings: MemorySettings,
+    model: DefaultAgentModelSettings,
 ) -> Memory:
     """构造可读写的 mem0 Memory。
 

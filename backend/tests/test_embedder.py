@@ -64,11 +64,16 @@ async def test_openai_response_is_reordered_by_index() -> None:
     """
 
     def handler(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(200, json={"data": [
-            {"index": 2, "embedding": _vector(2)},
-            {"index": 0, "embedding": _vector(0)},
-            {"index": 1, "embedding": _vector(1)},
-        ]})
+        return httpx.Response(
+            200,
+            json={
+                "data": [
+                    {"index": 2, "embedding": _vector(2)},
+                    {"index": 0, "embedding": _vector(0)},
+                    {"index": 1, "embedding": _vector(1)},
+                ]
+            },
+        )
 
     vectors = await _embedder(handler).embed(["a", "b", "c"])
 
@@ -168,9 +173,9 @@ async def test_requests_are_split_into_batches() -> None:
         batch = json.loads(request.content)["input"]
         sizes.append(len(batch))
 
-        return httpx.Response(200, json={"data": [
-            {"index": i, "embedding": _vector(i)} for i in range(len(batch))
-        ]})
+        return httpx.Response(
+            200, json={"data": [{"index": i, "embedding": _vector(i)} for i in range(len(batch))]}
+        )
 
     embedder = _embedder(handler, batch_size=2)
     vectors = await embedder.embed(["a", "b", "c", "d", "e"])

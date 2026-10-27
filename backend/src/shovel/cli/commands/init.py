@@ -15,11 +15,7 @@ from shovel.memory import init_memory_store
 from shovel.services.health import HealthResult, HealthStatus, check_model
 from shovel.vector import init_vector_store
 
-app = typer.Typer(
-    help="Initial shovel agent",
-    invoke_without_command=True,
-    no_args_is_help=False
-)
+app = typer.Typer(help="Initial shovel agent", invoke_without_command=True, no_args_is_help=False)
 
 #: 每个检查步骤前的停顿, 纯粹是为了让 spinner 能被看见。
 _STEP_PAUSE_SECONDS = 2
@@ -76,7 +72,7 @@ def init() -> None:
 
     console.info("Begin initial Shovel Agent.")
 
-    #check profile 文件目录
+    # check profile 文件目录
     console.info("Checking the default directories.")
 
     # 目录之间有父子关系, 所以 profile 必须排在最前面
@@ -119,7 +115,6 @@ def init() -> None:
         cli_context.create_default_config_file()
         console.success(f"The default configuration file {config_file} was created.")
 
-
     # 读取配置: 数据库 URL 与向量库参数都以配置文件为准,
     # 不再各处硬编码 ~/.shovel 下的路径
     settings = load_settings(config_file)
@@ -144,8 +139,7 @@ def init() -> None:
 
     if created_tables:
         console.success(
-            f"SQLite schema is ready, {len(created_tables)} table(s) created: "
-            f"{', '.join(created_tables)}"
+            f"SQLite schema is ready, {len(created_tables)} table(s) created: {', '.join(created_tables)}"
         )
     else:
         console.success("SQLite schema is already up to date. Nothing to create.")
@@ -166,9 +160,7 @@ def init() -> None:
                 f"(dim={settings.zvec.dim}, metric={settings.zvec.metric})."
             )
         else:
-            console.success(
-                f"Zvec collection '{info.name}' is exists at {info.path}."
-            )
+            console.success(f"Zvec collection '{info.name}' is exists at {info.path}.")
 
     # 初始化记忆: mem0 + 本地 Qdrant。
     # 记忆不走 Zvec, 因为记忆的写入/冲突/失效逻辑交给了 mem0, 而 mem0
@@ -189,10 +181,7 @@ def init() -> None:
             f"{memory_info.location} (mode={memory_info.mode}, dim={memory_info.dim})."
         )
     else:
-        console.success(
-            f"Qdrant collection '{memory_info.collection}' is exists at "
-            f"{memory_info.location}."
-        )
+        console.success(f"Qdrant collection '{memory_info.collection}' is exists at {memory_info.location}.")
 
     console.success(f"mem0 history database is ready at {memory_info.history_db}.")
 

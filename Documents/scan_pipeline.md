@@ -92,8 +92,8 @@ VectorRecord     文本 + 向量 + 标量字段, 准备进 Zvec
 
 ### 空文本层的 PDF
 
-扫描件 PDF 能正常解析, 只是每页都是空文本。这不报错, 也不产出块 —— 将来接上
-OCR 就是在这里补一层, 现在先老实地记录"这篇没内容"。
+扫描件 PDF 不做 OCR；没有可用正文时会明确记录解析/无内容失败，
+不会把一个没有块的文档当作已成功索引。
 
 ---
 
@@ -243,23 +243,33 @@ SQLite 事务: 替换 chunk + 文档标 CHUNKED + 写删除意图
 ### 判据是 hash, 不是 mtime
 
 内容指纹、流水线状态、切块版本、embedding 模型版本和待补向量共同决定是否
-重新处理, 不是只看 `indexed_hash != content_hash`。用 `modified_at` 会在两个方向都出错:
-`touch` 过的文件被白白重扫一遍, 而某些同步工具会保留原始 mtime, 于是改过的
-文件被漏掉。
+重新处理, 不是只看 `indexed_hash != content_hash`。秒级 `modified_at` 不是可靠游标：
+同秒修改会被抹平，复制的新文件也可能保留较旧时间。当前本地元数据指纹包含纳秒
+mtime，所以 `touch` 会保守地触发重处理；这不是密码学内容哈希。
 
 (`local_fs` 的 `content_hash` 本身是 `st:{size}-{mtime_ns}`, 见资源模块文档 ——
 但那是连接器内部的选择, 管线这一层只认"这个串变了没有"。)
 
-增量扫描发现已有恢复任务时, 会暂时撤掉修改时间水位过滤, 重新枚举资源元数据,
-再按上述条件挑选文档。否则旧的失败文档、`--limit` 留下的文档和
-`--no-embed` 留下的文档可能永远位于水位线之前。没有恢复任务时仍沿用增量水位线。
+本地文件系统不使用修改时间水位过滤，始终枚举元数据，再按上述条件挑选文档：
+同秒修改、复制时保留旧时间戳的新文件都不能被漏掉。其他连接器只有在可靠的
+增量游标契约下才能使用水位；发现待恢复或处理配置变化时仍撤掉游标限制。
+水位和恢复检查按 Profile 的成员范围计算，不能借用另一 Profile 的进度。
 
-文件未变但向量集合被外部清空时, 用 `--force` 强制重建; 改切块参数但未改版本时
-也可使用它。恢复不会绕过资源的 include/exclude、大小及时间窗口限制。
+文件未变但向量集合被外部清空时，用 `--force` 强制重建。parser 版本、解析上限、
+chunker 默认值和 Profile pipeline 已纳入持久指纹，变更会自动重建。
+Embedding 身份包含端点、API 版本、维度、输入上限、显式 revision，不含密钥。
+恢复不会绕过资源的 include/exclude、大小及时间窗口限制。
 
 ### 删除对账依赖完整的 discover
 
-`Job.is_discovery_complete` 为假时**不做**删除对账。
+`Job.is_discovery_complete` 为假，或连接器没有 `DELETE_DETECT` 时**不做**删除对账。
+根目录不存在/变为普通文件、walk/stat 权限失败、根目录身份变化会让发现明确失败，
+而不是被当成成功枚举到零个条目。原有索引不因这轮失败而被墓碑化。
+
+观察集存于 `profile_document`，重放 Job 时清除该 Profile 上次尝试的观察标记。
+全量对账只移除当前 Profile 未再发现的成员；只有没有其他 Profile 成员关系的
+文档才退役。Profile 共享同一资源/文档的正文及索引，重叠范围的 pipeline 必须相同，
+不支持以同一文档身份保留多套独立处理结果。
 
 理由是删除判据只能是"这一轮没见到它"。如果枚举中途挂了, 或者被 `--limit`
 截断了, "没见到"就不等于"不存在了" —— 一次失败的扫描会把整个资源集体立碑。
@@ -285,8 +295,10 @@ U 盘没插、目录被临时改名。立碑的语义是"这一轮没看见", �
 
 ```python
 # Document.needs_processing
-if lifecycle_state is not ACTIVE:      return False
-if pipe_state in (PENDING, FAILED):    return True
+if lifecycle_state is not ACTIVE:
+    return False
+if pipe_state in (PENDING, FAILED):
+    return True
 return indexed_hash != content_hash
 ```
 
@@ -373,7 +385,7 @@ Runtime 持有一个惰性打开的 Zvec sink, 不为每次请求重复打开 co
 
 ## 10. 本轮没做的事
 
-- **OCR。** 扫描件 PDF 现在解析出空文本层, 不报错也不产块。
+- **OCR。** 扫描件 PDF 目前明确报告无可用正文，不会生成成功索引。
 - **真实 embedding 端点从未接触过。** 没有 API Key, 目前只有 `MockTransport`
   层面的验证。协议层是对的, 但真实端点的错误码、限流行为都没试过。
 - **并发。** 目前一篇一篇处理。IO 等待是主要成本, 加并发有收益, 但会让

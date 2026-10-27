@@ -177,7 +177,9 @@ def test_draft_cannot_jump_straight_to_active() -> None:
 
     with pytest.raises(InvalidResourceStateTransitionError):
         assert_transition(
-            ResourceState.DRAFT, ResourceState.ACTIVE, resource_ref="r",
+            ResourceState.DRAFT,
+            ResourceState.ACTIVE,
+            resource_ref="r",
         )
 
 
@@ -199,7 +201,9 @@ def test_self_transition_is_rejected_by_assert() -> None:
 
     with pytest.raises(InvalidResourceStateTransitionError):
         assert_transition(
-            ResourceState.ACTIVE, ResourceState.ACTIVE, resource_ref="r",
+            ResourceState.ACTIVE,
+            ResourceState.ACTIVE,
+            resource_ref="r",
         )
 
 

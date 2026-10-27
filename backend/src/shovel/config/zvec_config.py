@@ -1,9 +1,9 @@
-#---------------------------------------------------------------------
+# ---------------------------------------------------------------------
 # 向量库(Zvec)配置
 #
 # 日期: 2026-09-29
 # 作者: HongWei Guo <hongweig@163.com>
-#---------------------------------------------------------------------
+# ---------------------------------------------------------------------
 from __future__ import annotations
 
 from pathlib import Path
@@ -49,7 +49,8 @@ class ZvecSettings(BaseModel):
 
         if not self.knowledge_path:
             object.__setattr__(
-                self, "knowledge_path",
+                self,
+                "knowledge_path",
                 (profile / "knowledge" / self.chunk_collection).as_posix(),
             )
 

@@ -1,5 +1,10 @@
 # Shovel 架构与设计说明文档
 
+> 本文描述长期目标架构，不是当前版本的完成清单。当前产品为单机、单所有者的
+> 知识 Runtime：持久摄取/恢复、Profile 管理、检索、带来源的单 Agent 对话和可选 Memory。
+> Agent 工具、自动调度、多 Agent 与 Workflow 尚未实现；已落地能力及运行契约以
+> 根 README 和 `Documents/scan_pipeline.md` 为准。
+
 ## 文档信息
 
 | 项目 | 内容 |
@@ -270,11 +275,11 @@ Database 自己初始化连接
 ```python
 host = (
     HostBuilder()
-        .configure_configuration()
-        .configure_logging()
-        .configure_services()
-        .configure_web_host()
-        .build()
+    .configure_configuration()
+    .configure_logging()
+    .configure_services()
+    .configure_web_host()
+    .build()
 )
 
 host.run()
@@ -968,14 +973,12 @@ Shovel 中的 Tool 可以包括：
 ```python
 class Tool(Protocol):
     @property
-    def name(self) -> str:
-        ...
+    def name(self) -> str: ...
 
     async def invoke(
         self,
         request: ToolRequest,
-    ) -> ToolResult:
-        ...
+    ) -> ToolResult: ...
 ```
 
 ### 13.3 ToolRequest

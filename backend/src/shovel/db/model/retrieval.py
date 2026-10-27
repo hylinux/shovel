@@ -28,21 +28,20 @@ class RetrievalLog(Base):
 
     __tablename__ = "retrieval_log"
 
-    id: Mapped[str] = mapped_column(
-        sa.Text, primary_key=True, default=lambda: new_id("ret"))
+    id: Mapped[str] = mapped_column(sa.Text, primary_key=True, default=lambda: new_id("ret"))
     query_text: Mapped[str] = mapped_column(sa.Text, nullable=False)
     agent_id: Mapped[str | None] = mapped_column(sa.Text)
     agent_run_id: Mapped[str | None] = mapped_column(sa.Text)
     route: Mapped[RetrievalRoute] = mapped_column(
-        Enum(RetrievalRoute), default=RetrievalRoute.SEMANTIC, nullable=False)
-    filters: Mapped[dict[str, Any]] = mapped_column(
-        "filters_json", JSONDict, default=dict, nullable=False)
+        Enum(RetrievalRoute), default=RetrievalRoute.SEMANTIC, nullable=False
+    )
+    filters: Mapped[dict[str, Any]] = mapped_column("filters_json", JSONDict, default=dict, nullable=False)
     returned: Mapped[list[dict[str, Any]]] = mapped_column(
-        "returned_hits_json", JSONList, default=list, nullable=False)
+        "returned_hits_json", JSONList, default=list, nullable=False
+    )
     #: memory ids recalled alongside the KB hits -- lets you measure how often
     #: memory actually contributed to an answer
-    memory_used: Mapped[list[str]] = mapped_column(
-        "memory_used_json", JSONList, default=list, nullable=False)
+    memory_used: Mapped[list[str]] = mapped_column("memory_used_json", JSONList, default=list, nullable=False)
     top_score: Mapped[float | None] = mapped_column(sa.Float)
     coverage_warning: Mapped[str | None] = mapped_column(sa.Text)
     latency_ms: Mapped[int | None] = mapped_column(sa.Integer)
@@ -62,7 +61,8 @@ class RetrievalFeedback(Base):
     __tablename__ = "retrieval_feedback"
 
     retrieval_id: Mapped[str] = mapped_column(
-        ForeignKey("retrieval_log.id", ondelete="CASCADE"), primary_key=True)
+        ForeignKey("retrieval_log.id", ondelete="CASCADE"), primary_key=True
+    )
     chunk_id: Mapped[str] = mapped_column(sa.Text, primary_key=True)
     signal: Mapped[FeedbackSignal] = mapped_column(Enum(FeedbackSignal), primary_key=True)
     signalled_at: Mapped[int] = mapped_column(sa.Integer, default=now_ts, nullable=False)
@@ -84,12 +84,13 @@ class AgentScope(Base):
     __tablename__ = "agent_scope"
 
     agent_id: Mapped[str] = mapped_column(sa.Text, primary_key=True)
-    resource_id: Mapped[str] = mapped_column(
-        ForeignKey("resource.id", ondelete="CASCADE"), primary_key=True)
+    resource_id: Mapped[str] = mapped_column(ForeignKey("resource.id", ondelete="CASCADE"), primary_key=True)
     mode: Mapped[AgentScopeMode] = mapped_column(
-        Enum(AgentScopeMode), default=AgentScopeMode.READ, nullable=False)
+        Enum(AgentScopeMode), default=AgentScopeMode.READ, nullable=False
+    )
     sensitivity_max: Mapped[Sensitivity] = mapped_column(
-        Enum(Sensitivity), default=Sensitivity.NORMAL, nullable=False)
+        Enum(Sensitivity), default=Sensitivity.NORMAL, nullable=False
+    )
     #: memory is scoped separately: an agent may be allowed to read documents
     #: without being allowed to recall what the user said in private
     can_access_memory: Mapped[bool] = mapped_column(sa.Boolean, default=True, nullable=False)
@@ -104,14 +105,11 @@ class EvalCase(Base):
 
     __tablename__ = "eval_case"
 
-    id: Mapped[str] = mapped_column(
-        sa.Text, primary_key=True, default=lambda: new_id("evc"))
+    id: Mapped[str] = mapped_column(sa.Text, primary_key=True, default=lambda: new_id("evc"))
     query: Mapped[str] = mapped_column(sa.Text, nullable=False)
-    expected: Mapped[dict[str, Any]] = mapped_column(
-        "expected_json", JSONDict, default=dict, nullable=False)
+    expected: Mapped[dict[str, Any]] = mapped_column("expected_json", JSONDict, default=dict, nullable=False)
     source: Mapped[str | None] = mapped_column(sa.Text)
-    tags: Mapped[list[str]] = mapped_column(
-        "tags_json", JSONList, default=list, nullable=False)
+    tags: Mapped[list[str]] = mapped_column("tags_json", JSONList, default=list, nullable=False)
     created_at: Mapped[int] = mapped_column(sa.Integer, default=now_ts, nullable=False)
 
 
@@ -127,20 +125,17 @@ class DeletionOutbox(Base):
 
     id: Mapped[int] = mapped_column(sa.Integer, primary_key=True, autoincrement=True)
     scope: Mapped[DeletionScope] = mapped_column(Enum(DeletionScope), nullable=False)
-    collection: Mapped[str | None] = mapped_column(sa.Text)   # NULL = all collections
+    collection: Mapped[str | None] = mapped_column(sa.Text)  # NULL = all collections
     resource_id: Mapped[str | None] = mapped_column(sa.Text)
     doc_uri: Mapped[str | None] = mapped_column(sa.Text)
     keep_rev: Mapped[int | None] = mapped_column(sa.Integer)
-    filter: Mapped[dict[str, Any]] = mapped_column(
-        "filter_json", JSONDict, default=dict, nullable=False)
+    filter: Mapped[dict[str, Any]] = mapped_column("filter_json", JSONDict, default=dict, nullable=False)
     requested_at: Mapped[int] = mapped_column(sa.Integer, default=now_ts, nullable=False)
     done_at: Mapped[int | None] = mapped_column(sa.Integer)
     attempts: Mapped[int] = mapped_column(sa.Integer, default=0, nullable=False)
     last_error: Mapped[str | None] = mapped_column(sa.Text)
 
-    __table_args__ = (
-        Index("idx_outbox_todo", "requested_at", sqlite_where=text("done_at IS NULL")),
-    )
+    __table_args__ = (Index("idx_outbox_todo", "requested_at", sqlite_where=text("done_at IS NULL")),)
 
 
 class SchemaMigration(Base):

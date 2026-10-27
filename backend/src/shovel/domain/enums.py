@@ -39,15 +39,14 @@ class Sensitivity(StrEnum):
         return {"normal": 0, "personal": 1, "secret": 2}[self.value]
 
 
-
 class ScanMode(StrEnum):
     """
     扫描模式定义
     """
 
-    FULL_SWEEP = "full_sweep"     # 全面扫描 也是唯一允许驱动(Driver)
-    INCREMENTAL = "incremental"   # 增量刷新
-    TARGETED = "targeted"         # 表示由用户传入实际需要扫描的资源, 而且扫描只在这几个传入的资源上
+    FULL_SWEEP = "full_sweep"  # 全面扫描 也是唯一允许驱动(Driver)
+    INCREMENTAL = "incremental"  # 增量刷新
+    TARGETED = "targeted"  # 表示由用户传入实际需要扫描的资源, 而且扫描只在这几个传入的资源上
 
 
 class ScheduleKind(StrEnum):
@@ -55,11 +54,11 @@ class ScheduleKind(StrEnum):
     Scedule 的分类
     """
 
-    CRON = "cron"     # 定时跑
-    INTERVAL = "interval"   #间隔多长时间跑
-    WATCH  = "watch"    # 监控根据变化跑
+    CRON = "cron"  # 定时跑
+    INTERVAL = "interval"  # 间隔多长时间跑
+    WATCH = "watch"  # 监控根据变化跑
     WEBHOOK = "webhook"
-    MANUAL = "manual"    # 手动跑
+    MANUAL = "manual"  # 手动跑
 
 
 class MisfirePolicy(StrEnum):
@@ -67,11 +66,9 @@ class MisfirePolicy(StrEnum):
     错过触发的处理规则
     """
 
-    COALESCE = "coalesce"   # 多次合并成一次处理 也就是因为各种原因错过触发了之后 不管之前多少次都合并成一次进行触发操作  # noqa: E501
-    SKIP = "skip"      # 不管错过了多少次 都跳过 等待下一次触发
+    COALESCE = "coalesce"  # 多次合并成一次处理 也就是因为各种原因错过触发了之后 不管之前多少次都合并成一次进行触发操作  # noqa: E501
+    SKIP = "skip"  # 不管错过了多少次 都跳过 等待下一次触发
     RUN_ALL = "run_all"  # 把所有错过的触发全部跑一遍
-
-
 
 
 class JobState(StrEnum):
@@ -91,10 +88,12 @@ class JobState(StrEnum):
     @property
     def is_terminal(self) -> bool:
         return self in {
-            JobState.SUCCEEDED, JobState.COMPLETED_WITH_ERRORS, JobState.FAILED,
-            JobState.CANCELLED, JobState.SKIPPED,
+            JobState.SUCCEEDED,
+            JobState.COMPLETED_WITH_ERRORS,
+            JobState.FAILED,
+            JobState.CANCELLED,
+            JobState.SKIPPED,
         }
-
 
 
 class Stage(StrEnum):
@@ -111,7 +110,6 @@ class Stage(StrEnum):
     RECONCILE = "reconcile"
 
 
-
 class ErrorKind(StrEnum):
     """
     错误类型
@@ -126,7 +124,6 @@ class ErrorKind(StrEnum):
     PERMISSION = "permission"
 
 
-
 class DocumentLifecycleState(StrEnum):
     """
     保存在Document 表里每条文档的生命周期状态
@@ -139,11 +136,11 @@ class DocumentLifecycleState(StrEnum):
     SKIPPED = "skipped"
 
 
-
 class DocumentPipeState(StrEnum):
     """
     Document 处理pipeline的状态
     """
+
     PENDING = "pending"
     FETCHED = "fetched"
     PARSED = "parsed"
@@ -152,7 +149,6 @@ class DocumentPipeState(StrEnum):
     INDEXED = "indexed"
     FAILED = "failed"
     SKIPPED = "skipped"
-
 
 
 class Modality(StrEnum):
@@ -167,7 +163,6 @@ class Modality(StrEnum):
     AUDIO = "audio"
     VIDEO = "video"
     TABLE = "table"
-
 
 
 class DocClass(StrEnum):
@@ -188,9 +183,6 @@ class DocClass(StrEnum):
     TRANSCRIPT = "transcript"
     CALENDAR = "calendar"
     UNKNOWN = "unknown"
-
-
-
 
 
 class BlockKind(StrEnum):
@@ -232,6 +224,7 @@ class LayerSpec:
     """
     用于控制内容的处理方式
     """
+
     should_embed: bool
     returnable: bool
     requires_stage: str | None
@@ -242,8 +235,8 @@ class Granularity(StrEnum):
     搜索和读取的不同粒度
     """
 
-    CHUNK = "chunk"    # 用于向量搜索
-    PARENT = "parent"   # 用于读取 供大模型和人类阅读 也是expand_chunk 的目标 不需要向量化
+    CHUNK = "chunk"  # 用于向量搜索
+    PARENT = "parent"  # 用于读取 供大模型和人类阅读 也是expand_chunk 的目标 不需要向量化
     SECTION = "section"
     DOC_SUMMARY = "doc_summary"
     HYPOTHETICAL_QUESTION = "hypothetical_question"
@@ -266,33 +259,25 @@ class Granularity(StrEnum):
         return self.spec.requires_stage
 
 
-
-
 _LAYERS: dict[Granularity, LayerSpec] = {
-    Granularity.CHUNK: LayerSpec(
-        should_embed=True, returnable=True, requires_stage=None
+    Granularity.CHUNK: LayerSpec(should_embed=True, returnable=True, requires_stage=None),
+    Granularity.PARENT: LayerSpec(should_embed=False, returnable=True, requires_stage=None),
+    Granularity.SECTION: LayerSpec(
+        should_embed=True,
+        returnable=True,
+        requires_stage="summarize",
     ),
-
-    Granularity.PARENT: LayerSpec(
-        should_embed=False, returnable=True, requires_stage=None
-    ),
-
-    Granularity.SECTION : LayerSpec(
-        should_embed=True, returnable=True, requires_stage="summarize",
-    ),
-
     Granularity.DOC_SUMMARY: LayerSpec(
-        should_embed=True, returnable=True, requires_stage="summarize",
+        should_embed=True,
+        returnable=True,
+        requires_stage="summarize",
     ),
-
     Granularity.HYPOTHETICAL_QUESTION: LayerSpec(
-        should_embed=True, returnable=False, requires_stage="summarize",
+        should_embed=True,
+        returnable=False,
+        requires_stage="summarize",
     ),
-
-    Granularity.PROPOSITION: LayerSpec(
-        should_embed=True, returnable=False, requires_stage="parse"
-    ),
-
+    Granularity.PROPOSITION: LayerSpec(should_embed=True, returnable=False, requires_stage="parse"),
 }
 
 
@@ -300,16 +285,11 @@ def _assert_layers_complete() -> None:
     missing = set(Granularity) - set(_LAYERS)
 
     if missing:
-        raise RuntimeError(
-            "Granularity memebers missing a LayerSpec:"
-            f"{sorted(m.value for m in missing)}"
-        )
-
+        raise RuntimeError(f"Granularity memebers missing a LayerSpec:{sorted(m.value for m in missing)}")
 
 
 # 先在导入的时候就检查一下
 _assert_layers_complete()
-
 
 
 class VectorState(StrEnum):
@@ -323,6 +303,7 @@ class DerivedKind(StrEnum):
     """
     表示原始文档生成内容类型
     """
+
     SUMMARY = "summary"
     KEYWORDS = "keywords"
     OUTLINE = "outline"
@@ -334,12 +315,11 @@ class BlobKind(StrEnum):
     """
     Block的类型
     """
+
     RAW = "raw"
     EXTRACTED_TEXT = "extracted_text"
     TRANSCRIPT = "transcript"
     THUMBNAIL = "thumbnail"
-
-
 
 
 class EntityKind(StrEnum):
@@ -356,7 +336,6 @@ class MentionRole(StrEnum):
     MENTIONED = "mentioned"
     OWNER = "owner"
     SPEAKER = "speaker"
-
 
 
 class RelationKind(StrEnum):
@@ -391,11 +370,10 @@ class DecisionState(StrEnum):
     REVERTED = "reverted"
 
 
-
 ## 召回
 
-class RetrievalRoute(StrEnum):
 
+class RetrievalRoute(StrEnum):
     SEMANTIC = "semantic"
     STRUCTURED = "structured"
     GRAPH = "graph"
@@ -423,7 +401,6 @@ class AgentScopeMode(StrEnum):
     DENIED = "denied"
 
 
-
 class DeletionScope(StrEnum):
     DOC = "doc"
     DOC_OLD_REV = "doc_old_rev"
@@ -433,14 +410,12 @@ class DeletionScope(StrEnum):
     MEMORY = "memory"
 
 
-
 class RecencyBucket(StrEnum):
     D1 = "1d"
     D7 = "7d"
     D30 = "30d"
     D90 = "90d"
     OLDER = "older"
-
 
     @classmethod
     def of(
@@ -465,8 +440,8 @@ class RecencyBucket(StrEnum):
         return cls.OLDER
 
 
-
 # 关于记忆的定义
+
 
 class MemoryKind(StrEnum):
     WORKING = "working"
@@ -476,7 +451,6 @@ class MemoryKind(StrEnum):
 
 
 class MemoryValidityState(StrEnum):
-
     ACTIVE = "active"
     SUPERSEDED = "superseded"
     EXPIRED = "expired"
@@ -485,13 +459,11 @@ class MemoryValidityState(StrEnum):
 
 
 class MemorySource(StrEnum):
-
     STATED = "stated"
     CONFIRMED = "confirmed"
     INFERRED = "inferred"
     CORRECTED = "corrected"
     IMPORTED = "imported"
-
 
 
 class MemoryPredicate(StrEnum):
@@ -511,13 +483,13 @@ class MemoryPredicate(StrEnum):
     "who works on Shovel?" across two stores that cannot be joined.
     """
 
-    PREFERS = "prefers"                # single-valued per object_domain
+    PREFERS = "prefers"  # single-valued per object_domain
     DISLIKES = "dislikes"
     USES = "uses"
-    WORKS_AT = "works_at"              # single-valued
-    HAS_ROLE = "has_role"              # single-valued
-    HAS_TIMEZONE = "has_timezone"      # single-valued
-    HAS_LANGUAGE = "has_language"      # single-valued
+    WORKS_AT = "works_at"  # single-valued
+    HAS_ROLE = "has_role"  # single-valued
+    HAS_TIMEZONE = "has_timezone"  # single-valued
+    HAS_LANGUAGE = "has_language"  # single-valued
     HAS_GOAL = "has_goal"
     HAS_CONSTRAINT = "has_constraint"
     DECIDES = "decides"
@@ -531,8 +503,10 @@ class MemoryPredicate(StrEnum):
         "uses" can have many -- Python AND SQLite AND Qdrant all coexist.
         """
         return self in {
-            MemoryPredicate.HAS_ROLE, MemoryPredicate.HAS_TIMEZONE,
-            MemoryPredicate.HAS_LANGUAGE, MemoryPredicate.WORKS_AT,
+            MemoryPredicate.HAS_ROLE,
+            MemoryPredicate.HAS_TIMEZONE,
+            MemoryPredicate.HAS_LANGUAGE,
+            MemoryPredicate.WORKS_AT,
         }
 
 
@@ -551,13 +525,12 @@ class MemoryLinkKind(StrEnum):
 class WorkingSlot(StrEnum):
     """Working-memory slot types, so compaction can prioritise by kind."""
 
-    GOAL = "goal"                # never compact: the task's objective
-    PLAN = "plan"                # rarely compact
-    EVIDENCE = "evidence"        # compact to ids + summary
+    GOAL = "goal"  # never compact: the task's objective
+    PLAN = "plan"  # rarely compact
+    EVIDENCE = "evidence"  # compact to ids + summary
     OBSERVATION = "observation"  # compact aggressively
-    SCRATCH = "scratch"          # drop first
-    ERROR = "error"              # keep: repeated failures must stay visible
-
+    SCRATCH = "scratch"  # drop first
+    ERROR = "error"  # keep: repeated failures must stay visible
 
 
 # 定义的日志级别
@@ -565,4 +538,3 @@ class LogLevel(StrEnum):
     INFO = "info"
     WARN = "warn"
     ERROR = "error"
-

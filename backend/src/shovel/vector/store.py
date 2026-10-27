@@ -1,9 +1,9 @@
-#---------------------------------------------------------------------
+# ---------------------------------------------------------------------
 # Zvec 运行时与 collection 的生命周期
 #
 # 日期: 2026-09-29
 # 作者: HongWei Guo <hongweig@163.com>
-#---------------------------------------------------------------------
+# ---------------------------------------------------------------------
 from __future__ import annotations
 
 import contextlib
@@ -29,14 +29,14 @@ class CollectionInfo:
 
     name: str
     path: Path
-    created: bool          # True = 本次新建, False = 已存在直接打开
+    created: bool  # True = 本次新建, False = 已存在直接打开
     collection: Collection
 
 
 def init_zvec_runtime(
-        *,
-        log_dir: Path | str | None = None,
-        log_level: zvec.LogLevel | None = None,
+    *,
+    log_dir: Path | str | None = None,
+    log_level: zvec.LogLevel | None = None,
 ) -> None:
     """初始化 Zvec 运行时。幂等: 重复调用是空操作。
 
@@ -101,10 +101,7 @@ def open_collection(path: Path | str, *, read_only: bool = False) -> Collection:
     target = Path(path).expanduser()
 
     if not _exists(target):
-        raise FileNotFoundError(
-            f"向量集合不存在: {target}\n"
-            f"  执行 'shovel init' 完成初始化。"
-        )
+        raise FileNotFoundError(f"向量集合不存在: {target}\n  执行 'shovel init' 完成初始化。")
 
     return zvec.open(str(target), zvec.CollectionOption(read_only=read_only))
 

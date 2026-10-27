@@ -1,4 +1,4 @@
-#---------------------------------------------------------------------
+# ---------------------------------------------------------------------
 # 'shovel config' —— 配置文件的生成/校验/查看
 #
 # 存在的理由: config/settings.py 里的多条报错都写着 "执行 'shovel config'
@@ -7,7 +7,7 @@
 #
 # 日期: 2026-09-29
 # 作者: HongWei Guo <hongweig@163.com>
-#---------------------------------------------------------------------
+# ---------------------------------------------------------------------
 from __future__ import annotations
 
 from pathlib import Path
@@ -34,20 +34,14 @@ def config(
         bool,
         typer.Option(
             "--force",
-            help=(
-                "Regenerate the configuration file from defaults. "
-                "The existing file is backed up first."
-            ),
+            help=("Regenerate the configuration file from defaults. The existing file is backed up first."),
         ),
     ] = False,
     check: Annotated[
         bool,
         typer.Option(
             "--check",
-            help=(
-                "Validate the existing configuration file without "
-                "creating or modifying anything."
-            ),
+            help=("Validate the existing configuration file without creating or modifying anything."),
         ),
     ] = False,
     show: Annotated[
@@ -90,8 +84,7 @@ def config(
 def _show(config_file: Path) -> None:
     if not config_file.exists():
         console.warning(
-            f"Configuration file {config_file} does not exist. "
-            f"Run 'shovel config' to generate it."
+            f"Configuration file {config_file} does not exist. Run 'shovel config' to generate it."
         )
         return
 

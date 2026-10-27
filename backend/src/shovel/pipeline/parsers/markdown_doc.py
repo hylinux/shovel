@@ -1,9 +1,9 @@
-#---------------------------------------------------------
+# ---------------------------------------------------------
 # Markdown 解析器
 #
 # 日期: 2026-09-29
 # 作者: HongWei Guo <hongweig@163.com>
-#---------------------------------------------------------
+# ---------------------------------------------------------
 """Markdown 的价值全在它的结构里, 所以这里**不**把它渲染成 HTML 再抽文本。
 
 渲染再抽取会丢掉两样东西: 标题层级 (变成一串平铺的段落) 和围栏代码块
@@ -50,7 +50,6 @@ _FRONT_MATTER = "---"
 
 
 class MarkdownParser:
-
     spec: ClassVar[ParserSpec] = ParserSpec(
         name="markdown",
         version="1",
@@ -144,12 +143,14 @@ def _walk(lines: list[str], stack: HeadingStack, *, offset: int) -> tuple[Block,
             buffer_kind = BlockKind.PARAGRAPH
             return
 
-        blocks.append(Block(
-            text=body,
-            kind=buffer_kind,
-            path=stack.current(),
-            locator=f"line {buffer_start + offset}",
-        ))
+        blocks.append(
+            Block(
+                text=body,
+                kind=buffer_kind,
+                path=stack.current(),
+                locator=f"line {buffer_start + offset}",
+            )
+        )
         buffer_kind = BlockKind.PARAGRAPH
 
     for index, raw in enumerate(lines, start=1):
@@ -181,15 +182,17 @@ def _walk(lines: list[str], stack: HeadingStack, *, offset: int) -> tuple[Block,
             title = heading.group(2).strip()
             stack.push(level, title)
 
-            blocks.append(Block(
-                text=title,
-                kind=BlockKind.HEADING,
-                level=level,
-                # 标题自己的 path 含它本身, 这样 chunk 的前缀里
-                # "章节名"不会因为正文块恰好为空而丢失
-                path=stack.current(),
-                locator=f"line {index + offset}",
-            ))
+            blocks.append(
+                Block(
+                    text=title,
+                    kind=BlockKind.HEADING,
+                    level=level,
+                    # 标题自己的 path 含它本身, 这样 chunk 的前缀里
+                    # "章节名"不会因为正文块恰好为空而丢失
+                    path=stack.current(),
+                    locator=f"line {index + offset}",
+                )
+            )
             continue
 
         if not raw.strip():
@@ -208,9 +211,7 @@ def _walk(lines: list[str], stack: HeadingStack, *, offset: int) -> tuple[Block,
 
         if not buffer:
             buffer_start = index
-            buffer_kind = (
-                BlockKind.LIST_ITEM if _LIST_ITEM.match(raw) else BlockKind.PARAGRAPH
-            )
+            buffer_kind = BlockKind.LIST_ITEM if _LIST_ITEM.match(raw) else BlockKind.PARAGRAPH
 
         buffer.append(raw)
 

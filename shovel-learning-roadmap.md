@@ -1,5 +1,9 @@
 # Shovel 学习路线规划
 
+> 这是面向长期 Agent Platform 的学习路线，不代表这些模块均已实现。
+> 当前交付边界、开发命令和验收入口见根 README；调度、Agent 工具及 Workflow
+> 仍属后续阶段。
+
 ## 文档信息
 
 | 项目 | 内容 |
@@ -213,8 +217,7 @@ app = typer.Typer()
 
 ```python
 @app.command()
-def init():
-    ...
+def init(): ...
 ```
 
 ---

@@ -42,11 +42,15 @@ chat with numbered local citations, and opt-in Memory. The light Web workbench h
 Resources, Background tasks, and Knowledge chat views. This is a single-owner
 runtime, not yet a multi-Agent orchestration or scheduling platform.
 
-Development requires Python 3.14+ and Node.js 22+. The repository's `uv` source
-configuration expects `py-generic-host` checked out beside `shovel`.
+Development requires Python 3.14+, Git, and Node.js 22.18+ (22 LTS in CI).
+`py-generic-host` is pinned to a Git commit in both source and wheel dependencies;
+no sibling checkout is required. Native Zvec requires a supported platform;
+on Windows, run Python in WSL/Linux rather than mixing Windows and Linux venvs.
+Inside WSL, use Linux-visible paths (for example `/mnt/c/Notes`) for source folders
+and configuration; adapt the PowerShell path examples below accordingly.
 
 ```powershell
-uv sync --dev
+uv sync --locked --all-extras --dev
 uv run shovel init
 Set-Location frontend
 npm ci
@@ -198,10 +202,13 @@ completed resource. Poll `/operations/{id}` for the result.
 | Runtime | `GET /status`, `GET /connectors` |
 | Resources | `GET/POST /resources`, `GET/PATCH/DELETE /resources/{id}` |
 | Resource actions | `POST /resources/{id}/verify`, `/pause`, `/resume`, `/revoke`, `/scans` |
+| Profiles | `GET /resources/{id}/profiles`, `PUT/DELETE /resources/{id}/profiles/{name}` |
+| Named commands | `POST /commands` carries `kind`, `ref`, `payload` without putting resource names in URL paths |
 | Work | `GET /operations`, `GET /operations/{id}`, `POST /operations/{id}/retry` |
 | Scans | `GET /jobs`, `GET /jobs/{id}`, `GET /jobs/{id}/events`, `POST /jobs/{id}/cancel` |
 | Index | `GET /index/cleanup`, `POST /index/cleanup`, `POST /search` |
-| Chat | `GET/POST /conversations`, `GET/POST /conversations/{id}/messages` |
+| Chat | `GET/POST /conversations`, `PATCH/DELETE /conversations/{id}`, `GET/POST /conversations/{id}/messages` |
+| History | `POST /history/prune` explicitly prunes bounded, old terminal history |
 | Memory | `GET /memories`, `DELETE /memories/{id}` |
 | Credentials | `POST /credentials` writes the OS keyring and returns an `identity_ref` |
 
@@ -209,3 +216,98 @@ Source text and paths are shown as citation data; there is no API for opening an
 arbitrary filesystem path. Raw resource credentials must not appear in queued
 config/payloads; use `identity_ref`. Model credentials remain in local
 configuration/environment variables and should not be committed.
+
+## Reliable submissions and profile management
+
+All durable writes accept `Idempotency-Key` (1–128 ASCII letters/digits or
+`._:-`). Reusing a key for the same normalized request returns its original
+receipt, even after resource/profile deletion; different arguments return 409.
+Do not use a new key just because a response was lost. Chat generation and
+Memory writes do not promise exactly-once execution.
+
+The CLI records a local receipt before submission and accepts a global key:
+
+```powershell
+uv run shovel --request-key notes-scan-001 scan run notes --no-embed
+uv run shovel operation requests
+uv run shovel operation list
+uv run shovel operation show <operation-id>
+uv run shovel operation wait <operation-id>
+uv run shovel operation retry <operation-id>
+```
+
+`wait` reconnects to the existing operation, starting a non-Web Host if needed.
+Interrupted browser writes stay in workspace-scoped browser storage; Background
+tasks can find their receipt or resend the exact request with its original key.
+Resource/profile request bodies may contain local paths; clearing browser site
+data removes these local recovery records, not server-side operations.
+
+`shovel profile list notes` lists persisted profiles. Use
+`shovel profile save notes text --file profile.json` to replace/upsert one:
+
+```json
+{"include":["*.txt"],"exclude":[],"scan_mode":"full_sweep","pipeline":{}}
+```
+
+Choose it with `shovel scan run notes --profile text --no-embed`, or the scan
+form in Resources. The Web profile editor exposes the same validated JSON.
+Supported processing settings are `pipeline.chunker` budgets and
+`pipeline.parser.max_chars`. Unknown keys and invalid budgets are rejected.
+Queued/running scans block profile mutation. Overlapping profiles must use the
+same pipeline: each resource/document has one shared representation, not an
+independent index per profile.
+
+Full sweeps reconcile membership only within their profile. A document is
+tombstoned only when no other profile owns it. Removing a non-default profile
+also removes its scan history and its exclusively owned index entries, never
+the source files. Vector cleanup failures retain deletion intents and a
+retryable receipt. The default profile can be changed/disabled, not deleted.
+
+Local filesystem discovery always enumerates metadata; timestamps are not
+reliable cursors. Same-second edits and newly copied files with old timestamps
+are therefore discovered. Root/walk/stat failures fail the job without deletion
+reconciliation. Complete discovery plus `DELETE_DETECT` is required for deletion.
+Fingerprints are size + nanosecond mtime, not cryptographic content hashes;
+deliberately restoring both after editing requires `--force`.
+
+Parser versions, parser/chunker settings and chunker defaults invalidate old
+processing automatically. Embedding identity also includes endpoint, API version,
+dimension, input limit and optional `embedding.revision`; rotating credentials
+does not rebuild the index. Use `revision` when replacing weights behind an
+unchanged model/deployment name. Runtime configuration reads environment over
+TOML over defaults; `AppSettings.load()` intentionally reads the file only.
+
+## Explicit history maintenance and quality baselines
+
+Conversation messages use `limit` (default 100, max 1000) and `before` sequence
+pagination; the response includes `next_before`. The workbench exposes older
+messages, conversation paging, renaming and confirmed deletion. Deletion removes
+messages, not independently saved Memory, and is refused during generation.
+
+`shovel history prune --keep-days 30 --limit 1000` asks for confirmation before
+pruning old terminal Jobs/events, unkeyed Operations, retrieval logs and completed
+cleanup records, bounded per category. Active work, pending cleanup, documents,
+conversations and keyed receipts are retained. Background tasks exposes the same
+confirmed action. Keyed receipts are deliberately retained to prevent a formerly
+used request key from executing again. No automatic retention policy is enabled.
+
+Quality gates run Ruff, mypy, pytest (including actual process termination against
+SQLite/Zvec), frontend lint/types/tests/build, and clean installed-wheel startup,
+REST/CLI/search and shutdown. Dependency installation uses the committed locks.
+
+`backend/tests/fixtures/knowledge` contains fixed synthetic Chinese evidence.
+The offline baseline checks keyword recall@3 and revoked-resource visibility.
+The opt-in live baseline checks real hybrid recall, required answer facts,
+citations and insufficient-evidence behavior using isolated temporary stores:
+
+```bash
+export SHOVEL_RUN_LIVE_TESTS=1
+export SHOVEL_LIVE_CONFIG=/path/to/settings.toml
+export SHOVEL_BASELINE_REPORT=/path/to/baseline.json
+uv run pytest backend/tests/test_knowledge_baseline.py -m live --no-cov
+```
+
+Select both chat and embedding providers explicitly before running; external
+providers receive the synthetic evidence and may charge for calls. The JSON
+report records measured baseline results, not a general model-quality guarantee.
+Agent tools, cron/watch scheduling and multi-Agent workflows remain future work.

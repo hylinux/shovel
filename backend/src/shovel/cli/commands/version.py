@@ -90,15 +90,15 @@ def collect_version_info() -> VersionInfo:
     return VersionInfo(
         shovel_version=cli_context.get_shovel_version(),
         python_version=platform.python_version(),
-        os_name= cli_context.get_os_name(),
-        workspace= str(cli_context.get_default_workspace()),
+        os_name=cli_context.get_os_name(),
+        workspace=str(cli_context.get_default_workspace()),
         config_file=str(config_file),
         database_file=str(database_file),
         configuration_loaded=config_file.exists(),
         database_ready=database_file.exists(),
         model_provider="OpenAI",
         generic_host_version=cli_context.get_generic_host_version(),
-        frontend_version="0.1.0",
+        frontend_version=cli_context.get_shovel_version(),
         backend_version=cli_context.get_shovel_version(),
     )
 
@@ -111,10 +111,7 @@ def print_basic_version(info: VersionInfo) -> None:
 
     console.print()
 
-    console.about_panel(
-        message=PRODUCT.description
-    )
-
+    console.about_panel(message=PRODUCT.description)
 
     console.print()
 
@@ -137,7 +134,6 @@ def print_verbose_version(info: VersionInfo) -> None:
     console.print()
 
     console.about_panel(PRODUCT.description)
-
 
     console.print()
 
@@ -187,7 +183,6 @@ def print_json(info: VersionInfo) -> None:
             indent=2,
         )
     )
-
 
 
 def format_configuration_status(loaded: bool) -> str:

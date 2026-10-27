@@ -1,9 +1,9 @@
-#---------------------------------------------------------
+# ---------------------------------------------------------
 # 资源服务层
 #
 # 日期: 2026-09-29
 # 作者: HongWei Guo <hongweig@163.com>
-#---------------------------------------------------------
+# ---------------------------------------------------------
 """资源的增删改查、校验与状态流转。
 
 这一层是**唯一**同时认识数据库、注册表和凭据库的地方。
@@ -191,11 +191,7 @@ class ResourceService:
             state=ResourceState.DRAFT,
             state_reason="资源刚创建, 尚未校验。",
             sensitivity=draft.sensitivity or spec.default_sensitivity,
-            authority=(
-                draft.authority
-                if draft.authority is not None
-                else spec.default_authority
-            ),
+            authority=(draft.authority if draft.authority is not None else spec.default_authority),
             description=draft.description or spec.description,
         )
         if resource_id is not None:
@@ -224,9 +220,7 @@ class ResourceService:
             elif identity_ref:
                 resource.identity_ref = identity_ref
 
-            session.add(
-                self._build_default_profile(resource_id=resource.id, spec=spec)
-            )
+            session.add(self._build_default_profile(resource_id=resource.id, spec=spec))
 
             await session.commit()
             await session.refresh(resource)
@@ -254,7 +248,9 @@ class ResourceService:
 
             if is_terminal(row.state):
                 raise InvalidResourceStateTransitionError(
-                    row.name, row.state.value, ResourceState.DRAFT.value,
+                    row.name,
+                    row.state.value,
+                    ResourceState.DRAFT.value,
                     _values(allowed_targets(row.state)),
                 )
 
@@ -266,7 +262,9 @@ class ResourceService:
                 )
                 if previous is not None:
                     await session.execute(
-                        update(Document).where(Document.resource_id == row.id).values(
+                        update(Document)
+                        .where(Document.resource_id == row.id)
+                        .values(
                             lifecycle_state=DocumentLifecycleState.TOMBSTONED,
                             tombstoned_at=now_ts(),
                             pipe_state=DocumentPipeState.PENDING,
@@ -274,7 +272,9 @@ class ResourceService:
                         )
                     )
                     await session.execute(
-                        update(Chunk).where(Chunk.resource_id == row.id).values(
+                        update(Chunk)
+                        .where(Chunk.resource_id == row.id)
+                        .values(
                             vector_state=VectorState.PENDING,
                         )
                     )
@@ -283,7 +283,9 @@ class ResourceService:
 
             if row.state is not ResourceState.DRAFT:
                 assert_transition(
-                    row.state, ResourceState.DRAFT, resource_ref=row.name,
+                    row.state,
+                    ResourceState.DRAFT,
+                    resource_ref=row.name,
                 )
                 row.state = ResourceState.DRAFT
 
@@ -441,10 +443,12 @@ class ResourceService:
         async with self._sessions() as session:
             row = await self._load(session, resource.id)
             identity_ref = row.identity_ref
-            session.add(DeletionOutbox(
-                scope=DeletionScope.RESOURCE,
-                resource_id=row.id,
-            ))
+            session.add(
+                DeletionOutbox(
+                    scope=DeletionScope.RESOURCE,
+                    resource_id=row.id,
+                )
+            )
 
             # 用 Core DELETE 而不是 session.delete(row)。
             #
@@ -452,9 +456,7 @@ class ResourceService:
             # profiles 集合加载出来才能级联, 而在 async session 里那次隐式的
             # 惰性加载会直接抛 MissingGreenlet。这里要的本来就是数据库自己的
             # ON DELETE CASCADE, 绕开 ORM 反而是更直接的表达。
-            await session.execute(
-                sa_delete(Resource).where(Resource.id == row.id)
-            )
+            await session.execute(sa_delete(Resource).where(Resource.id == row.id))
             await session.commit()
 
         self._forget_secret(identity_ref)
@@ -518,7 +520,9 @@ class ResourceService:
                 return
 
             assert_transition(
-                row.state, ResourceState.VERIFYING, resource_ref=row.name,
+                row.state,
+                ResourceState.VERIFYING,
+                resource_ref=row.name,
             )
 
             row.state = ResourceState.VERIFYING
@@ -535,9 +539,7 @@ class ResourceService:
 
     @staticmethod
     async def _find_by_name(session: AsyncSession, name: str) -> Resource | None:
-        result = await session.execute(
-            select(Resource).where(Resource.name == name)
-        )
+        result = await session.execute(select(Resource).where(Resource.name == name))
         return result.scalar_one_or_none()
 
     @staticmethod

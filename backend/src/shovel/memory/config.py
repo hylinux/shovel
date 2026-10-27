@@ -1,4 +1,4 @@
-#---------------------------------------------------------------------
+# ---------------------------------------------------------------------
 # 把 Shovel 的配置翻译成 mem0 的配置
 #
 # mem0 只吃一个嵌套 dict(MemoryConfig), 而 Shovel 的配置是给人看的 TOML。
@@ -6,7 +6,7 @@
 #
 # 日期: 2026-09-29
 # 作者: HongWei Guo <hongweig@163.com>
-#---------------------------------------------------------------------
+# ---------------------------------------------------------------------
 from __future__ import annotations
 
 from pathlib import Path
@@ -59,13 +59,13 @@ def _provider_of(model: DefaultAgentModelSettings) -> str:
 
 
 def _apply_endpoint(
-        config: dict[str, Any],
-        provider: str,
-        *,
-        base_url: str | None,
-        api_key: str | None,
-        api_version: str | None,
-        deployment: str | None,
+    config: dict[str, Any],
+    provider: str,
+    *,
+    base_url: str | None,
+    api_key: str | None,
+    api_version: str | None,
+    deployment: str | None,
 ) -> None:
     """按 provider 的规矩把端点信息写进 config。
 
@@ -98,8 +98,8 @@ def _apply_endpoint(
 
 
 def _llm_section(
-        llm: MemoryLlmSettings,
-        model: DefaultAgentModelSettings,
+    llm: MemoryLlmSettings,
+    model: DefaultAgentModelSettings,
 ) -> dict[str, Any]:
     """[memory.llm] 未显式配置的项, 回落到 [model] 的默认大模型。
 
@@ -131,9 +131,9 @@ def _llm_section(
 
 
 def _embedder_section(
-        embedder: MemoryEmbedderSettings,
-        model: DefaultAgentModelSettings,
-        dim: int,
+    embedder: MemoryEmbedderSettings,
+    model: DefaultAgentModelSettings,
+    dim: int,
 ) -> dict[str, Any]:
     """embedding 维度必须与 Qdrant collection 一致, 所以由 dim 单点给出。
 
@@ -161,8 +161,8 @@ def _embedder_section(
 
 
 def build_memory_config(
-        settings: MemorySettings,
-        model: DefaultAgentModelSettings,
+    settings: MemorySettings,
+    model: DefaultAgentModelSettings,
 ) -> dict[str, Any]:
     """生成可直接喂给 ``Memory.from_config()`` 的 dict。"""
 

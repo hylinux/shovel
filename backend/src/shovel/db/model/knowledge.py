@@ -37,31 +37,26 @@ class Entity(Base):
 
     __tablename__ = "entity"
 
-    id: Mapped[str] = mapped_column(
-        sa.Text, primary_key=True, default=lambda: new_id("ent"))
+    id: Mapped[str] = mapped_column(sa.Text, primary_key=True, default=lambda: new_id("ent"))
     kind: Mapped[EntityKind] = mapped_column(Enum(EntityKind), nullable=False)
     canonical: Mapped[str] = mapped_column(sa.Text, nullable=False)
-    aliases: Mapped[list[str]] = mapped_column(
-        "aliases_json", JSONList, default=list, nullable=False)
+    aliases: Mapped[list[str]] = mapped_column("aliases_json", JSONList, default=list, nullable=False)
     #: disambiguation key for people -- addresses are far more reliable than names
-    emails: Mapped[list[str]] = mapped_column(
-        "emails_json", JSONList, default=list, nullable=False)
+    emails: Mapped[list[str]] = mapped_column("emails_json", JSONList, default=list, nullable=False)
     #: marks the user themselves; drives authority = 1.0 on their own content
     is_self: Mapped[bool] = mapped_column(sa.Boolean, default=False, nullable=False)
 
     first_seen_at: Mapped[int | None] = mapped_column(sa.Integer)
     last_seen_at: Mapped[int | None] = mapped_column(sa.Integer)
     mention_count: Mapped[int] = mapped_column(sa.Integer, default=0, nullable=False)
-    is_user_confirmed: Mapped[bool] = mapped_column(
-        sa.Boolean, default=False, nullable=False)
+    is_user_confirmed: Mapped[bool] = mapped_column(sa.Boolean, default=False, nullable=False)
 
     #: graph-algorithm results written back by an offline job (rustworkx in
     #: memory is enough at this scale -- no graph database required)
     centrality: Mapped[float | None] = mapped_column(sa.Float)
     community_id: Mapped[str | None] = mapped_column(sa.Text)
 
-    mentions: Mapped[list[Mention]] = relationship(
-        back_populates="entity", cascade="all, delete-orphan")
+    mentions: Mapped[list[Mention]] = relationship(back_populates="entity", cascade="all, delete-orphan")
 
     __table_args__ = (
         UniqueConstraint("kind", "canonical", name="uq_entity_canonical"),
@@ -75,8 +70,7 @@ class Mention(Base):
 
     __tablename__ = "mention"
 
-    entity_id: Mapped[str] = mapped_column(
-        ForeignKey("entity.id", ondelete="CASCADE"), primary_key=True)
+    entity_id: Mapped[str] = mapped_column(ForeignKey("entity.id", ondelete="CASCADE"), primary_key=True)
     doc_uri: Mapped[str] = mapped_column(sa.Text, primary_key=True)
     #: '' rather than NULL: NULL columns cannot participate in a primary key
     chunk_id: Mapped[str] = mapped_column(sa.Text, primary_key=True, default="")
@@ -106,24 +100,23 @@ class EntityEdge(Base):
 
     __tablename__ = "entity_edge"
 
-    src_id: Mapped[str] = mapped_column(
-        ForeignKey("entity.id", ondelete="CASCADE"), primary_key=True)
-    dst_id: Mapped[str] = mapped_column(
-        ForeignKey("entity.id", ondelete="CASCADE"), primary_key=True)
+    src_id: Mapped[str] = mapped_column(ForeignKey("entity.id", ondelete="CASCADE"), primary_key=True)
+    dst_id: Mapped[str] = mapped_column(ForeignKey("entity.id", ondelete="CASCADE"), primary_key=True)
     rel: Mapped[RelationKind] = mapped_column(Enum(RelationKind), primary_key=True)
 
     weight: Mapped[float] = mapped_column(sa.Float, default=1.0, nullable=False)
     source: Mapped[EdgeSource] = mapped_column(
-        Enum(EdgeSource), default=EdgeSource.COOCCURRENCE, nullable=False)
+        Enum(EdgeSource), default=EdgeSource.COOCCURRENCE, nullable=False
+    )
     first_seen_at: Mapped[int | None] = mapped_column(sa.Integer)
     last_seen_at: Mapped[int | None] = mapped_column(sa.Integer)
     evidence_count: Mapped[int] = mapped_column(sa.Integer, default=1, nullable=False)
     #: [{"doc_uri": ..., "chunk_id": ..., "quote": ...}]
     evidence: Mapped[list[dict[str, Any]]] = mapped_column(
-        "evidence_json", JSONList, default=list, nullable=False)
-    extracted_by: Mapped[str | None] = mapped_column(sa.Text)   # model version
-    is_user_confirmed: Mapped[bool] = mapped_column(
-        sa.Boolean, default=False, nullable=False)
+        "evidence_json", JSONList, default=list, nullable=False
+    )
+    extracted_by: Mapped[str | None] = mapped_column(sa.Text)  # model version
+    is_user_confirmed: Mapped[bool] = mapped_column(sa.Boolean, default=False, nullable=False)
 
     __table_args__ = (
         CheckConstraint("src_id <> dst_id", name="no_self_loop"),
@@ -142,19 +135,18 @@ class FactDecision(Base):
 
     __tablename__ = "fact_decision"
 
-    id: Mapped[str] = mapped_column(
-        sa.Text, primary_key=True, default=lambda: new_id("dec"))
+    id: Mapped[str] = mapped_column(sa.Text, primary_key=True, default=lambda: new_id("dec"))
     doc_uri: Mapped[str] = mapped_column(sa.Text, nullable=False)
     resource_id: Mapped[str] = mapped_column(sa.Text, nullable=False)
     chunk_id: Mapped[str | None] = mapped_column(sa.Text)
     statement: Mapped[str] = mapped_column(sa.Text, nullable=False)
     rationale: Mapped[str | None] = mapped_column(sa.Text)
     decided_at: Mapped[int | None] = mapped_column(sa.Integer)
-    project_id: Mapped[str | None] = mapped_column(
-        ForeignKey("entity.id", ondelete="SET NULL"))
+    project_id: Mapped[str | None] = mapped_column(ForeignKey("entity.id", ondelete="SET NULL"))
     supersedes: Mapped[str | None] = mapped_column(sa.Text)
     decision_state: Mapped[DecisionState] = mapped_column(
-        Enum(DecisionState), default=DecisionState.ACTIVE, nullable=False)
+        Enum(DecisionState), default=DecisionState.ACTIVE, nullable=False
+    )
 
     __table_args__ = (
         Index("idx_decision_project", "project_id", "decided_at"),
@@ -173,13 +165,11 @@ class FactMessage(Base):
 
     __tablename__ = "fact_message"
 
-    id: Mapped[str] = mapped_column(
-        sa.Text, primary_key=True, default=lambda: new_id("msg"))
+    id: Mapped[str] = mapped_column(sa.Text, primary_key=True, default=lambda: new_id("msg"))
     doc_uri: Mapped[str] = mapped_column(sa.Text, nullable=False)
     resource_id: Mapped[str] = mapped_column(sa.Text, nullable=False)
     thread_id: Mapped[str | None] = mapped_column(sa.Text)
-    from_entity: Mapped[str | None] = mapped_column(
-        ForeignKey("entity.id", ondelete="SET NULL"))
+    from_entity: Mapped[str | None] = mapped_column(ForeignKey("entity.id", ondelete="SET NULL"))
     to: Mapped[list[str]] = mapped_column("to_addresses_json", JSONList, default=list, nullable=False)
     cc: Mapped[list[str]] = mapped_column("cc_addresses_json", JSONList, default=list, nullable=False)
     subject: Mapped[str | None] = mapped_column(sa.Text)
@@ -188,7 +178,8 @@ class FactMessage(Base):
     is_sent: Mapped[bool] = mapped_column(sa.Boolean, default=False, nullable=False)
     has_attachment: Mapped[bool] = mapped_column(sa.Boolean, default=False, nullable=False)
     attachment_uris: Mapped[list[str]] = mapped_column(
-        "attachment_uris_json", JSONList, default=list, nullable=False)
+        "attachment_uris_json", JSONList, default=list, nullable=False
+    )
 
     __table_args__ = (
         Index("idx_msg_from", "from_entity", "sent_at"),
@@ -202,18 +193,15 @@ class FactEvent(Base):
 
     __tablename__ = "fact_event"
 
-    id: Mapped[str] = mapped_column(
-        sa.Text, primary_key=True, default=lambda: new_id("evt"))
+    id: Mapped[str] = mapped_column(sa.Text, primary_key=True, default=lambda: new_id("evt"))
     doc_uri: Mapped[str] = mapped_column(sa.Text, nullable=False)
     resource_id: Mapped[str] = mapped_column(sa.Text, nullable=False)
     title: Mapped[str | None] = mapped_column(sa.Text)
     starts_at: Mapped[int | None] = mapped_column(sa.Integer)
     ends_at: Mapped[int | None] = mapped_column(sa.Integer)
     location: Mapped[str | None] = mapped_column(sa.Text)
-    organizer: Mapped[str | None] = mapped_column(
-        ForeignKey("entity.id", ondelete="SET NULL"))
-    attendees: Mapped[list[str]] = mapped_column(
-        "attendees_json", JSONList, default=list, nullable=False)
+    organizer: Mapped[str | None] = mapped_column(ForeignKey("entity.id", ondelete="SET NULL"))
+    attendees: Mapped[list[str]] = mapped_column("attendees_json", JSONList, default=list, nullable=False)
     is_recurring: Mapped[bool] = mapped_column(sa.Boolean, default=False, nullable=False)
     transcript_uri: Mapped[str | None] = mapped_column(sa.Text)
 
@@ -229,17 +217,14 @@ class FactTask(Base):
 
     __tablename__ = "fact_task"
 
-    id: Mapped[str] = mapped_column(
-        sa.Text, primary_key=True, default=lambda: new_id("tsk"))
+    id: Mapped[str] = mapped_column(sa.Text, primary_key=True, default=lambda: new_id("tsk"))
     doc_uri: Mapped[str] = mapped_column(sa.Text, nullable=False)
     resource_id: Mapped[str] = mapped_column(sa.Text, nullable=False)
     chunk_id: Mapped[str | None] = mapped_column(sa.Text)
     text_: Mapped[str] = mapped_column("text", sa.Text, nullable=False)
-    owner_entity: Mapped[str | None] = mapped_column(
-        ForeignKey("entity.id", ondelete="SET NULL"))
+    owner_entity: Mapped[str | None] = mapped_column(ForeignKey("entity.id", ondelete="SET NULL"))
     due_at: Mapped[int | None] = mapped_column(sa.Integer)
-    task_state: Mapped[TaskState] = mapped_column(
-        Enum(TaskState), default=TaskState.OPEN, nullable=False)
+    task_state: Mapped[TaskState] = mapped_column(Enum(TaskState), default=TaskState.OPEN, nullable=False)
     extracted_by: Mapped[str | None] = mapped_column(sa.Text)
     created_at: Mapped[int] = mapped_column(sa.Integer, default=now_ts, nullable=False)
 

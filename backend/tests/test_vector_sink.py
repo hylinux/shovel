@@ -105,9 +105,7 @@ async def test_upsert_of_nothing_touches_nothing(sink: ZvecChunkSink, collection
     assert _count(collection) == 0
 
 
-async def test_fields_are_queryable_not_just_stored(
-    sink: ZvecChunkSink, collection: Any
-) -> None:
+async def test_fields_are_queryable_not_just_stored(sink: ZvecChunkSink, collection: Any) -> None:
     """标量必须走 ``Doc.fields``。混进 ``vectors`` 不会报错,
 
     但字段不会进索引, 于是所有过滤条件都匹配不到 —— 删除传播会静默失效。
@@ -127,12 +125,9 @@ async def test_fields_are_queryable_not_just_stored(
 # --------------------------------------------------------------------------- #
 # 删除传播
 # --------------------------------------------------------------------------- #
-async def test_delete_document_removes_only_that_document(
-    sink: ZvecChunkSink, collection: Any
-) -> None:
+async def test_delete_document_removes_only_that_document(sink: ZvecChunkSink, collection: Any) -> None:
     await sink.upsert(
-        [_record(_TRICKY, "res_1", i) for i in range(5)]
-        + [_record(_PLAIN, "res_1", i) for i in range(3)]
+        [_record(_TRICKY, "res_1", i) for i in range(5)] + [_record(_PLAIN, "res_1", i) for i in range(3)]
     )
     assert _count(collection) == 8
 
@@ -141,9 +136,7 @@ async def test_delete_document_removes_only_that_document(
     assert _count(collection) == 3
 
 
-async def test_delete_document_survives_quotes_and_spaces(
-    sink: ZvecChunkSink, collection: Any
-) -> None:
+async def test_delete_document_survives_quotes_and_spaces(sink: ZvecChunkSink, collection: Any) -> None:
     """文件名里的引号不转义会把过滤表达式拆坏。
 
     最好的情况是报错, 最坏的情况是表达式仍然合法但语义变了 —— 那会
@@ -157,12 +150,9 @@ async def test_delete_document_survives_quotes_and_spaces(
     assert _count(collection) == 0
 
 
-async def test_delete_resource_spares_other_resources(
-    sink: ZvecChunkSink, collection: Any
-) -> None:
+async def test_delete_resource_spares_other_resources(sink: ZvecChunkSink, collection: Any) -> None:
     await sink.upsert(
-        [_record(_PLAIN, "res_1", i) for i in range(3)]
-        + [_record(_PLAIN, "res_2", i) for i in range(2)]
+        [_record(_PLAIN, "res_1", i) for i in range(3)] + [_record(_PLAIN, "res_2", i) for i in range(2)]
     )
 
     await sink.delete_resource("res_1")

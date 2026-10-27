@@ -26,6 +26,25 @@ from ...domain.enums import (
 from ..base import Base, Enum, JSONDict, JSONList, now_ts
 
 
+class ProfileDocument(Base):
+    """Source membership is per profile; the document representation remains shared."""
+
+    __tablename__ = "profile_document"
+    profile_id: Mapped[str] = mapped_column(
+        ForeignKey("scan_profile.id", ondelete="CASCADE"), primary_key=True
+    )
+    doc_uri: Mapped[str] = mapped_column(sa.Text, primary_key=True)
+    resource_id: Mapped[str] = mapped_column(sa.Text, primary_key=True)
+    last_seen_run: Mapped[str | None] = mapped_column(sa.Text)
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["doc_uri", "resource_id"], ["document.uri", "document.resource_id"], ondelete="CASCADE"
+        ),
+        Index("idx_profile_document_seen", "profile_id", "last_seen_run"),
+        Index("idx_profile_document_source", "resource_id", "doc_uri"),
+    )
+
+
 class Document(Base):
     """A single addressable item at the source. Identity is ``(uri, resource_id)``.
 
@@ -39,24 +58,22 @@ class Document(Base):
     __tablename__ = "document"
 
     uri: Mapped[str] = mapped_column(sa.Text, primary_key=True)
-    resource_id: Mapped[str] = mapped_column(
-        ForeignKey("resource.id", ondelete="CASCADE"), primary_key=True)
+    resource_id: Mapped[str] = mapped_column(ForeignKey("resource.id", ondelete="CASCADE"), primary_key=True)
 
     # classification -- drives parser / chunker / embedder routing
     mime: Mapped[str | None] = mapped_column(sa.Text)
-    doc_class: Mapped[DocClass] = mapped_column(
-        Enum(DocClass), default=DocClass.UNKNOWN, nullable=False)
-    modality: Mapped[Modality] = mapped_column(
-        Enum(Modality), default=Modality.TEXT, nullable=False)
+    doc_class: Mapped[DocClass] = mapped_column(Enum(DocClass), default=DocClass.UNKNOWN, nullable=False)
+    modality: Mapped[Modality] = mapped_column(Enum(Modality), default=Modality.TEXT, nullable=False)
 
     # change detection
-    content_hash: Mapped[str | None] = mapped_column(sa.Text)   # cheap fingerprint
-    blob_hash: Mapped[str | None] = mapped_column(sa.Text)      # CAS key (true sha256)
+    content_hash: Mapped[str | None] = mapped_column(sa.Text)  # cheap fingerprint
+    blob_hash: Mapped[str | None] = mapped_column(sa.Text)  # CAS key (true sha256)
     size_bytes: Mapped[int | None] = mapped_column(sa.Integer)
 
     # lifecycle / deletion propagation
     lifecycle_state: Mapped[DocumentLifecycleState] = mapped_column(
-        Enum(DocumentLifecycleState), default=DocumentLifecycleState.ACTIVE, nullable=False)
+        Enum(DocumentLifecycleState), default=DocumentLifecycleState.ACTIVE, nullable=False
+    )
     #: job id of the last sweep that saw this document. "Not seen this run" ==
     #: ``last_seen_run != current_job_id`` -- the observed-set diff, as one UPDATE.
     last_seen_run: Mapped[str | None] = mapped_column(sa.Text)
@@ -66,7 +83,8 @@ class Document(Base):
 
     # pipeline state (resumable)
     pipe_state: Mapped[DocumentPipeState] = mapped_column(
-        Enum(DocumentPipeState), default=DocumentPipeState.PENDING, nullable=False)
+        Enum(DocumentPipeState), default=DocumentPipeState.PENDING, nullable=False
+    )
     pipe_error_kind: Mapped[ErrorKind | None] = mapped_column(Enum(ErrorKind))
     pipe_attempts: Mapped[int] = mapped_column(sa.Integer, default=0, nullable=False)
     #: hash that is currently indexed; != content_hash means "re-run me"
@@ -89,25 +107,33 @@ class Document(Base):
     is_canonical: Mapped[bool] = mapped_column(sa.Boolean, default=True, nullable=False)
     dup_cluster_id: Mapped[str | None] = mapped_column(sa.Text)
 
-    source_meta: Mapped[dict[str, Any]] = mapped_column(
-        JSONDict, default=dict, nullable=False)
+    source_meta: Mapped[dict[str, Any]] = mapped_column(JSONDict, default=dict, nullable=False)
 
-    chunks: Mapped[list[Chunk]] = relationship(
-        back_populates="document", cascade="all, delete-orphan")
+    chunks: Mapped[list[Chunk]] = relationship(back_populates="document", cascade="all, delete-orphan")
 
     __table_args__ = (
         Index("idx_doc_sweep", "resource_id", "lifecycle_state", "last_seen_run"),
-        Index("idx_doc_pending", "resource_id", "pipe_state",
-              sqlite_where=text("pipe_state IN ('pending','failed')")),
-        Index("idx_doc_tomb", "tombstoned_at",
-              sqlite_where=text("lifecycle_state = 'tombstoned'")),
+        Index(
+            "idx_doc_pending",
+            "resource_id",
+            "pipe_state",
+            sqlite_where=text("pipe_state IN ('pending','failed')"),
+        ),
+        Index("idx_doc_tomb", "tombstoned_at", sqlite_where=text("lifecycle_state = 'tombstoned'")),
         Index("idx_doc_blob", "blob_hash"),
-        Index("idx_doc_recent", "resource_id", "modified_at_src",
-              sqlite_where=text("lifecycle_state = 'active'")),
+        Index(
+            "idx_doc_recent",
+            "resource_id",
+            "modified_at_src",
+            sqlite_where=text("lifecycle_state = 'active'"),
+        ),
         Index("idx_doc_author", "author_entity_id"),
         # expression index: email threading without promoting thread_id to a column
-        Index("idx_doc_thread", text("json_extract(source_meta, '$.thread_id')"),
-              sqlite_where=text("doc_class = 'email'")),
+        Index(
+            "idx_doc_thread",
+            text("json_extract(source_meta, '$.thread_id')"),
+            sqlite_where=text("doc_class = 'email'"),
+        ),
     )
 
     @property
@@ -141,12 +167,14 @@ class Chunk(Base):
     resource_id: Mapped[str] = mapped_column(sa.Text, nullable=False)
 
     granularity: Mapped[Granularity] = mapped_column(
-        Enum(Granularity), default=Granularity.CHUNK, nullable=False)
+        Enum(Granularity), default=Granularity.CHUNK, nullable=False
+    )
     chunk_index: Mapped[int] = mapped_column(sa.Integer, nullable=False)
-    parent_chunk_id: Mapped[str | None] = mapped_column(sa.Text)   # small-to-big
+    parent_chunk_id: Mapped[str | None] = mapped_column(sa.Text)  # small-to-big
     answers_chunk_id: Mapped[str | None] = mapped_column(sa.Text)
     covers: Mapped[list[str]] = mapped_column(
-        "covered_chunk_ids_json", JSONList, default=list, nullable=False)
+        "covered_chunk_ids_json", JSONList, default=list, nullable=False
+    )
 
     #: AUTHORITATIVE copy of the text. Zvec also holds a copy in its own `text`
     #: field to power native full-text search, but this one is the source of
@@ -159,29 +187,30 @@ class Chunk(Base):
     rev: Mapped[int] = mapped_column(sa.Integer, default=1, nullable=False)
 
     vector_state: Mapped[VectorState] = mapped_column(
-        Enum(VectorState), default=VectorState.PENDING, nullable=False)
+        Enum(VectorState), default=VectorState.PENDING, nullable=False
+    )
     vector_collection: Mapped[str | None] = mapped_column(sa.Text)
     model_version: Mapped[str | None] = mapped_column(sa.Text)
 
     simhash: Mapped[int | None] = mapped_column(sa.BigInteger)
     is_canonical: Mapped[bool] = mapped_column(sa.Boolean, default=True, nullable=False)
 
-    chunk_meta: Mapped[dict[str, Any]] = mapped_column(
-        JSONDict, default=dict, nullable=False)
+    chunk_meta: Mapped[dict[str, Any]] = mapped_column(JSONDict, default=dict, nullable=False)
     created_at: Mapped[int] = mapped_column(sa.Integer, default=now_ts, nullable=False)
 
     document: Mapped[Document] = relationship(back_populates="chunks")
 
     __table_args__ = (
         ForeignKeyConstraint(
-            ["doc_uri", "resource_id"], ["document.uri", "document.resource_id"],
-            ondelete="CASCADE", name="fk_chunk_document"),
+            ["doc_uri", "resource_id"],
+            ["document.uri", "document.resource_id"],
+            ondelete="CASCADE",
+            name="fk_chunk_document",
+        ),
         # expand_chunk hot path -- asserted with EXPLAIN QUERY PLAN in the tests
         Index("idx_chunk_expand", "doc_uri", "resource_id", "chunk_index"),
-        Index("idx_chunk_parent", "parent_chunk_id",
-              sqlite_where=text("parent_chunk_id IS NOT NULL")),
-        Index("idx_chunk_pending", "vector_state",
-              sqlite_where=text("vector_state = 'pending'")),
+        Index("idx_chunk_parent", "parent_chunk_id", sqlite_where=text("parent_chunk_id IS NOT NULL")),
+        Index("idx_chunk_pending", "vector_state", sqlite_where=text("vector_state = 'pending'")),
         Index("idx_chunk_simhash", "simhash", sqlite_where=text("simhash IS NOT NULL")),
         Index("idx_chunk_gran", "resource_id", "granularity"),
     )
@@ -211,8 +240,11 @@ class DocumentDerived(Base):
 
     __table_args__ = (
         ForeignKeyConstraint(
-            ["doc_uri", "resource_id"], ["document.uri", "document.resource_id"],
-            ondelete="CASCADE", name="fk_document_derived_document"),
+            ["doc_uri", "resource_id"],
+            ["document.uri", "document.resource_id"],
+            ondelete="CASCADE",
+            name="fk_document_derived_document",
+        ),
     )
 
 
@@ -226,16 +258,13 @@ class BlobRef(Base):
 
     __tablename__ = "blob_ref"
 
-    hash: Mapped[str] = mapped_column(sa.Text, primary_key=True)   # sha256
-    path: Mapped[str] = mapped_column(sa.Text, nullable=False)     # blobs/ab/cd/abcd...
+    hash: Mapped[str] = mapped_column(sa.Text, primary_key=True)  # sha256
+    path: Mapped[str] = mapped_column(sa.Text, nullable=False)  # blobs/ab/cd/abcd...
     size_bytes: Mapped[int | None] = mapped_column(sa.Integer)
     mime: Mapped[str | None] = mapped_column(sa.Text)
-    kind: Mapped[BlobKind] = mapped_column(
-        Enum(BlobKind), default=BlobKind.RAW, nullable=False)
+    kind: Mapped[BlobKind] = mapped_column(Enum(BlobKind), default=BlobKind.RAW, nullable=False)
     ref_count: Mapped[int] = mapped_column(sa.Integer, default=0, nullable=False)
     created_at: Mapped[int] = mapped_column(sa.Integer, default=now_ts, nullable=False)
     last_used_at: Mapped[int | None] = mapped_column(sa.Integer)
 
-    __table_args__ = (
-        Index("idx_blob_gc", "last_used_at", sqlite_where=text("ref_count = 0")),
-    )
+    __table_args__ = (Index("idx_blob_gc", "last_used_at", sqlite_where=text("ref_count = 0")),)

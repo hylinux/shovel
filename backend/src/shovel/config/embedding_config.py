@@ -1,9 +1,9 @@
-#---------------------------------------------------------
+# ---------------------------------------------------------
 # 知识库 embedding 配置
 #
 # 日期: 2026-09-29
 # 作者: HongWei Guo <hongweig@163.com>
-#---------------------------------------------------------
+# ---------------------------------------------------------
 """``[embedding]`` 段: 知识库用哪个模型做向量化。
 
 为什么它不复用 ``[memory.embedder]``: 那是记忆子系统的 embedding, 由
@@ -33,6 +33,7 @@ class EmbeddingSettings(BaseModel):
     provider: str = ""
 
     model: str = ""
+    revision: str = ""
 
     #: OpenAI 兼容端点的根地址, 例如 ``http://127.0.0.1:11434/v1``。
     #: Azure 则填 resource endpoint。
@@ -76,8 +77,7 @@ class EmbeddingSettings(BaseModel):
     def _check_azure(self) -> EmbeddingSettings:
         if self.provider == "azure_openai" and self.provider and not self.api_version:
             raise ValueError(
-                "provider=azure_openai 时必须设置 embedding.api_version, "
-                "否则请求会被 Azure 直接拒绝。"
+                "provider=azure_openai 时必须设置 embedding.api_version, 否则请求会被 Azure 直接拒绝。"
             )
 
         return self

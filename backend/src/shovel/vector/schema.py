@@ -1,4 +1,4 @@
-#---------------------------------------------------------------------
+# ---------------------------------------------------------------------
 # Zvec collection 的 schema 定义
 #
 # 本模块只覆盖知识库(chunk)。记忆的向量由 mem0 写入本地 Qdrant,
@@ -14,7 +14,7 @@
 #
 # 日期: 2026-09-29
 # 作者: HongWei Guo <hongweig@163.com>
-#---------------------------------------------------------------------
+# ---------------------------------------------------------------------
 from __future__ import annotations
 
 from zvec import (
@@ -46,16 +46,12 @@ def metric_of(name: str) -> MetricType:
     try:
         return _METRICS[name.lower()]
     except KeyError:
-        raise ValueError(
-            f"不支持的向量距离度量: {name!r}, 可选: {', '.join(_METRICS)}"
-        ) from None
+        raise ValueError(f"不支持的向量距离度量: {name!r}, 可选: {', '.join(_METRICS)}") from None
 
 
 def _dense(dim: int, metric: str, m: int, ef_construction: int) -> VectorSchema:
     if dim <= 0:
-        raise ValueError(
-            f"向量维度必须大于 0, 当前为 {dim}。请检查 settings.toml 的 zvec.dim。"
-        )
+        raise ValueError(f"向量维度必须大于 0, 当前为 {dim}。请检查 settings.toml 的 zvec.dim。")
 
     return VectorSchema(
         name=DENSE_VECTOR,
@@ -70,12 +66,12 @@ def _dense(dim: int, metric: str, m: int, ef_construction: int) -> VectorSchema:
 
 
 def chunk_collection_schema(
-        name: str = "shovel_chunk",
-        *,
-        dim: int = 1024,
-        metric: str = "cosine",
-        hnsw_m: int = 16,
-        hnsw_ef_construction: int = 200,
+    name: str = "shovel_chunk",
+    *,
+    dim: int = 1024,
+    metric: str = "cosine",
+    hnsw_m: int = 16,
+    hnsw_ef_construction: int = 200,
 ) -> CollectionSchema:
     """知识库 collection。
 
@@ -89,34 +85,32 @@ def chunk_collection_schema(
             # 授权与删除传播: 两者都是按 resource_id / doc_uri 成批做的
             FieldSchema("resource_id", DataType.STRING, index_param=InvertIndexParam()),
             FieldSchema("doc_uri", DataType.STRING, index_param=InvertIndexParam()),
-
             # 分层检索: chunk / parent / section / doc_summary ...
             FieldSchema("granularity", DataType.STRING, index_param=InvertIndexParam()),
             FieldSchema("chunk_index", DataType.INT64, nullable=True),
-
             # 路由与语言过滤
-            FieldSchema("doc_class", DataType.STRING, nullable=True,
-                        index_param=InvertIndexParam()),
-            FieldSchema("modality", DataType.STRING, nullable=True,
-                        index_param=InvertIndexParam()),
-            FieldSchema("lang", DataType.STRING, nullable=True,
-                        index_param=InvertIndexParam()),
-
+            FieldSchema("doc_class", DataType.STRING, nullable=True, index_param=InvertIndexParam()),
+            FieldSchema("modality", DataType.STRING, nullable=True, index_param=InvertIndexParam()),
+            FieldSchema("lang", DataType.STRING, nullable=True, index_param=InvertIndexParam()),
             # 失效判定: rev / model_version 变了, 旧向量就该被清掉
-            FieldSchema("rev", DataType.INT64, nullable=True,
-                        index_param=InvertIndexParam(enable_range_optimization=True)),
-            FieldSchema("model_version", DataType.STRING, nullable=True,
-                        index_param=InvertIndexParam()),
-
+            FieldSchema(
+                "rev",
+                DataType.INT64,
+                nullable=True,
+                index_param=InvertIndexParam(enable_range_optimization=True),
+            ),
+            FieldSchema("model_version", DataType.STRING, nullable=True, index_param=InvertIndexParam()),
             # 排序信号(写入时算好, 从 SQLite 镜像过来)
             FieldSchema("authority", DataType.FLOAT, nullable=True),
             FieldSchema("is_canonical", DataType.BOOL, nullable=True),
-            FieldSchema("created_at", DataType.INT64, nullable=True,
-                        index_param=InvertIndexParam(enable_range_optimization=True)),
-
+            FieldSchema(
+                "created_at",
+                DataType.INT64,
+                nullable=True,
+                index_param=InvertIndexParam(enable_range_optimization=True),
+            ),
             # 混合检索的 BM25 一侧
-            FieldSchema(TEXT_FIELD, DataType.STRING, nullable=True,
-                        index_param=FtsIndexParam()),
+            FieldSchema(TEXT_FIELD, DataType.STRING, nullable=True, index_param=FtsIndexParam()),
         ],
         vectors=_dense(dim, metric, hnsw_m, hnsw_ef_construction),
     )

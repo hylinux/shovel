@@ -1,4 +1,4 @@
-#---------------------------------------------------------
+# ---------------------------------------------------------
 # 资源模块的异常定义
 #
 # 日期: 2026-09-29
@@ -7,7 +7,7 @@
 # 每个异常都带 hint: CliExceptionHandler 会把它单独渲染出来。
 # 一条只说"出了什么事", 却不说"我下一步该做什么"的错误信息,
 # 对用户来说等于没说。
-#---------------------------------------------------------
+# ---------------------------------------------------------
 from __future__ import annotations
 
 from collections.abc import Iterable
@@ -41,7 +41,6 @@ class ResourceError(ShovelError):
 
 
 class ResourceNotFoundError(ResourceError):
-
     def __init__(self, ref: str) -> None:
         super().__init__(
             f"资源 '{ref}' 不存在。",
@@ -50,7 +49,6 @@ class ResourceNotFoundError(ResourceError):
 
 
 class DuplicateResourceNameError(ResourceError):
-
     def __init__(self, name: str) -> None:
         super().__init__(
             f"资源名 '{name}' 已被占用。",
@@ -100,7 +98,6 @@ class InvalidConnectorConfigError(ResourceError):
 
 
 class InvalidResourceStateTransitionError(ResourceError):
-
     def __init__(
         self,
         resource_ref: str,
@@ -136,7 +133,6 @@ class CredentialBackendUnavailableError(ResourceError):
 
 
 class CredentialNotFoundError(ResourceError):
-
     def __init__(self, ref: str) -> None:
         super().__init__(
             f"凭据引用 '{ref}' 没有对应的值。",
@@ -149,7 +145,6 @@ class CredentialNotFoundError(ResourceError):
 
 
 class InvalidCredentialRefError(ResourceError):
-
     def __init__(self, ref: str) -> None:
         super().__init__(
             f"无法解析凭据引用 '{ref}'。",
@@ -198,4 +193,15 @@ class ConnectorCapabilityError(ResourceError):
         super().__init__(
             f"连接器 '{kind}' 不具备 '{capability}' 能力。",
             hint="这是连接器的能力边界, 不是配置问题。换一个连接器, 或者换一种扫描模式。",
+        )
+
+
+class ConnectorDiscoveryError(ResourceError):
+    """Source enumeration failed; its observed set must not authorize deletions."""
+
+    def __init__(self, path: str, reason: str) -> None:
+        super().__init__(
+            f"无法完整列举数据源 {path}: {reason}",
+            hint="恢复目录连接或读取权限后重试扫描;本轮不会按缺失条目删除索引。",
+            details=reason,
         )

@@ -1,4 +1,4 @@
-#---------------------------------------------------------
+# ---------------------------------------------------------
 # 扫描流水线的异常定义
 #
 # 日期: 2026-09-29
@@ -14,7 +14,7 @@
 #     错误刷 9999 遍, 所以它们会中止整个 Job。
 #
 # 这条界线直接体现在 scan_service 的 except 子句里。
-#---------------------------------------------------------
+# ---------------------------------------------------------
 from __future__ import annotations
 
 from shovel.exceptions.base import ShovelError
@@ -177,7 +177,6 @@ class VectorSinkError(PipelineError):
 
 
 class JobNotFoundError(PipelineError):
-
     def __init__(self, job_id: str) -> None:
         super().__init__(
             f"作业 '{job_id}' 不存在。",

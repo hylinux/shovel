@@ -1,4 +1,4 @@
-#---------------------------------------------------------------------
+# ---------------------------------------------------------------------
 # 记忆子系统(mem0 + 本地 Qdrant)配置
 #
 # 为什么记忆不走 Zvec:
@@ -16,7 +16,7 @@
 #
 # 日期: 2026-09-29
 # 作者: HongWei Guo <hongweig@163.com>
-#---------------------------------------------------------------------
+# ---------------------------------------------------------------------
 from __future__ import annotations
 
 from pathlib import Path
@@ -61,20 +61,17 @@ class QdrantSettings(BaseModel):
         if self.mode == "local":
             if not self.path:
                 object.__setattr__(
-                    self, "path",
+                    self,
+                    "path",
                     (Path.home() / ".shovel" / "memory" / "qdrant").as_posix(),
                 )
             return self
 
         if self.mode == "server" and not (self.host and self.port):
-            raise ValueError(
-                "memory.qdrant.mode = 'server' 时必须同时提供 host 与 port。"
-            )
+            raise ValueError("memory.qdrant.mode = 'server' 时必须同时提供 host 与 port。")
 
         if self.mode == "cloud" and not (self.url and self.api_key):
-            raise ValueError(
-                "memory.qdrant.mode = 'cloud' 时必须同时提供 url 与 api_key。"
-            )
+            raise ValueError("memory.qdrant.mode = 'cloud' 时必须同时提供 url 与 api_key。")
 
         return self
 
@@ -169,7 +166,8 @@ class MemorySettings(BaseModel):
     def _resolve_default_paths(self) -> MemorySettings:
         if not self.history_db_path:
             object.__setattr__(
-                self, "history_db_path",
+                self,
+                "history_db_path",
                 (Path.home() / ".shovel" / "memory" / "history.db").as_posix(),
             )
 

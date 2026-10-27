@@ -7,7 +7,7 @@ from pydantic import BaseModel
 
 class DocumentType(Enum):
     TEXT = 1
-    CSV  = 2
+    CSV = 2
     MARKDOWN = 3
     PDF = 4
     WORD = 5

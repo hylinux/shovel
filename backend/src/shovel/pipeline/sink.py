@@ -1,9 +1,9 @@
-#---------------------------------------------------------
+# ---------------------------------------------------------
 # 向量写入端
 #
 # 日期: 2026-09-29
 # 作者: HongWei Guo <hongweig@163.com>
-#---------------------------------------------------------
+# ---------------------------------------------------------
 """把 chunk 的向量写进 Zvec, 以及按文档/资源删除它们。
 
 ## 为什么是一个协议而不是直接调 zvec
@@ -177,8 +177,7 @@ class ZvecChunkSink:
         # 比较符是单个 ``=`` (SQL 风格), 不是 ``==``。写成 ``==`` 会被
         # 过滤表达式的语法分析直接拒掉, 于是每一次删除传播都会失败。
         return await self._delete(
-            f'resource_id = "{_escape(resource_id)}" '
-            f'and doc_uri = "{_escape(doc_uri)}"'
+            f'resource_id = "{_escape(resource_id)}" and doc_uri = "{_escape(doc_uri)}"'
         )
 
     async def delete_resource(self, resource_id: str) -> int:

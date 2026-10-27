@@ -31,7 +31,6 @@ class Base(DeclarativeBase):
         return f"<{type(self).__name__} {pk}>"
 
 
-
 ## 帮助函数
 def now_ts() -> int:
     """
@@ -45,36 +44,42 @@ def new_id(prefix: str) -> str:
     return f"{prefix}_{uuid.uuid4().hex}"
 
 
-
-def chunk_vector_id(doc_uri: str, content_hash: str, chunker_version: str,
-                    granularity: str, index: int, *, resource_id: str = "") -> str:
+def chunk_vector_id(
+    doc_uri: str,
+    content_hash: str,
+    chunker_version: str,
+    granularity: str,
+    index: int,
+    *,
+    resource_id: str = "",
+) -> str:
     """根据Chunk的内容生成唯一的ID
 
-    根据该规则生成的向量id, 无论是在SQLite里, 还是在Zvec里，他们的ID都是相同的。
+     根据该规则生成的向量id, 无论是在SQLite里, 还是在Zvec里，他们的ID都是相同的。
 
-    一个key 两个存储。
+     一个key 两个存储。
 
-                     chunk_vector_id(...)
-                         │
-          ┌──────────────┴──────────────┐
-          ↓                             ↓
-   SQLite: chunk.id              Zvec: Doc.id
-   ├─ text（权威全文）            ├─ dense 向量
-   ├─ chunk_index                 ├─ 过滤用的标量字段
-   └─ parent_chunk_id             └─ FTS 文本
+                      chunk_vector_id(...)
+                          │
+           ┌──────────────┴──────────────┐
+           ↓                             ↓
+    SQLite: chunk.id              Zvec: Doc.id
+    ├─ text（权威全文）            ├─ dense 向量
+    ├─ chunk_index                 ├─ 过滤用的标量字段
+    └─ parent_chunk_id             └─ FTS 文本
 
-   这两个 id 是同一个值。 由此带来三件事：
+    这两个 id 是同一个值。 由此带来三件事：
 
-    | 操作	| 怎么做 |
-    | --- | --- |
-    | join |	Zvec 返回一批 id → 直接 WHERE chunk.id IN (...) 取全文 |
-    | 对账	| 两边各拉一份 id 集合，做差集就知道谁多了谁少了 |
-    | 同删	| 一个 id 列表，SQLite 删一次、Zvec 删一次 |
+     | 操作	| 怎么做 |
+     | --- | --- |
+     | join |	Zvec 返回一批 id → 直接 WHERE chunk.id IN (...) 取全文 |
+     | 对账	| 两边各拉一份 id 集合，做差集就知道谁多了谁少了 |
+     | 同删	| 一个 id 列表，SQLite 删一次、Zvec 删一次 |
 
-    如果两边 id 不同，你就需要第三张映射表 chunk_id ↔ vector_id。而那张表会立刻成为新的故障点：它自己可能
-    不一致、可能落后、可能在崩溃时半写。
-    这正是"SQLite 是真相之源，Zvec 可丢弃重建"能成立的技术前提——删掉 Zvec 重建时，id 能被重新算出来，
-    不需要从映射表里恢复。
+     如果两边 id 不同，你就需要第三张映射表 chunk_id ↔ vector_id。而那张表会立刻成为新的故障点：它自己可能
+     不一致、可能落后、可能在崩溃时半写。
+     这正是"SQLite 是真相之源，Zvec 可丢弃重建"能成立的技术前提——删掉 Zvec 重建时，id 能被重新算出来，
+     不需要从映射表里恢复。
     """
     key = f"{doc_uri}|{content_hash}|{chunker_version}|{granularity}|{index}"
     if resource_id:
@@ -142,6 +147,7 @@ class JSONEncoded(TypeDecorator[Any]):
             return self.empty_value()
         return json.loads(value)
 
+
 class JSONList(JSONEncoded):
     """JSON array column; a NULL column decodes to a fresh ``[]``."""
 
@@ -179,9 +185,7 @@ class TimestampMixin:
     """``created_at`` / ``updated_at`` as epoch seconds."""
 
     created_at: Mapped[int] = mapped_column(sa.Integer, default=now_ts, nullable=False)
-    updated_at: Mapped[int] = mapped_column(
-        sa.Integer, default=now_ts, onupdate=now_ts, nullable=False
-    )
+    updated_at: Mapped[int] = mapped_column(sa.Integer, default=now_ts, onupdate=now_ts, nullable=False)
 
 
 class ValidityMixin:
@@ -200,7 +204,7 @@ class ValidityMixin:
     """
 
     valid_from: Mapped[int] = mapped_column(sa.Integer, default=now_ts, nullable=False)
-    valid_until: Mapped[int | None] = mapped_column(sa.Integer)      # NULL = open-ended
+    valid_until: Mapped[int | None] = mapped_column(sa.Integer)  # NULL = open-ended
     recorded_at: Mapped[int] = mapped_column(sa.Integer, default=now_ts, nullable=False)
     invalidated_at: Mapped[int | None] = mapped_column(sa.Integer)
     superseded_by: Mapped[str | None] = mapped_column(sa.Text)

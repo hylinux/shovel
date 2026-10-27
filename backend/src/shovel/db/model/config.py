@@ -22,33 +22,33 @@ class Resource(Base, TimestampMixin):
 
     __tablename__ = "resource"
 
-    id: Mapped[str] = mapped_column(
-        sa.Text, primary_key=True, default=lambda: new_id("res"))
+    id: Mapped[str] = mapped_column(sa.Text, primary_key=True, default=lambda: new_id("res"))
     name: Mapped[str] = mapped_column(sa.Text, nullable=False, unique=True)
     connector_kind: Mapped[str] = mapped_column(sa.Text, nullable=False)
     #: key into the OS keyring -- never a plaintext secret
     identity_ref: Mapped[str | None] = mapped_column(sa.Text)
-    config: Mapped[dict[str, Any]] = mapped_column(
-        "config_json", JSONDict, default=dict, nullable=False)
+    config: Mapped[dict[str, Any]] = mapped_column("config_json", JSONDict, default=dict, nullable=False)
 
     state: Mapped[ResourceState] = mapped_column(
-        Enum(ResourceState), default=ResourceState.DRAFT, nullable=False)
+        Enum(ResourceState), default=ResourceState.DRAFT, nullable=False
+    )
     state_reason: Mapped[str | None] = mapped_column(sa.Text)
     last_verified_at: Mapped[int | None] = mapped_column(sa.Integer)
 
     sensitivity: Mapped[Sensitivity] = mapped_column(
-        Enum(Sensitivity), default=Sensitivity.NORMAL, nullable=False)
+        Enum(Sensitivity), default=Sensitivity.NORMAL, nullable=False
+    )
     #: default ranking weight for documents from this source
     authority: Mapped[float] = mapped_column(sa.Float, default=0.6, nullable=False)
     #: one-liner shown to the agent in the catalog prompt
     description: Mapped[str | None] = mapped_column(sa.Text)
 
     profiles: Mapped[list[ScanProfile]] = relationship(
-        back_populates="resource", cascade="all, delete-orphan")
+        back_populates="resource", cascade="all, delete-orphan"
+    )
 
     __table_args__ = (
-        CheckConstraint("authority >= 0.0 AND authority <= 1.0",
-                        name="authority_range"),
+        CheckConstraint("authority >= 0.0 AND authority <= 1.0", name="authority_range"),
         Index("idx_resource_state", "state"),
     )
 
@@ -68,25 +68,19 @@ class ScanProfile(Base, TimestampMixin):
 
     __tablename__ = "scan_profile"
 
-    id: Mapped[str] = mapped_column(
-        sa.Text, primary_key=True, default=lambda: new_id("prof"))
-    resource_id: Mapped[str] = mapped_column(
-        ForeignKey("resource.id", ondelete="CASCADE"), nullable=False)
+    id: Mapped[str] = mapped_column(sa.Text, primary_key=True, default=lambda: new_id("prof"))
+    resource_id: Mapped[str] = mapped_column(ForeignKey("resource.id", ondelete="CASCADE"), nullable=False)
     name: Mapped[str] = mapped_column(sa.Text, nullable=False)
     scan_mode: Mapped[ScanMode] = mapped_column(Enum(ScanMode), nullable=False)
     is_enabled: Mapped[bool] = mapped_column(sa.Boolean, default=True, nullable=False)
 
-    include: Mapped[list[str]] = mapped_column(
-        "include_globs_json", JSONList, default=list, nullable=False)
-    exclude: Mapped[list[str]] = mapped_column(
-        "exclude_globs_json", JSONList, default=list, nullable=False)
-    max_file_bytes: Mapped[int] = mapped_column(
-        sa.Integer, default=200 * 1024 * 1024, nullable=False)
+    include: Mapped[list[str]] = mapped_column("include_globs_json", JSONList, default=list, nullable=False)
+    exclude: Mapped[list[str]] = mapped_column("exclude_globs_json", JSONList, default=list, nullable=False)
+    max_file_bytes: Mapped[int] = mapped_column(sa.Integer, default=200 * 1024 * 1024, nullable=False)
     time_window_days: Mapped[int | None] = mapped_column(sa.Integer)
 
     #: {"chunker": {...}, "enable_stages": [...], "embedder": "..."}
-    pipeline: Mapped[dict[str, Any]] = mapped_column(
-        "pipeline_json", JSONDict, default=dict, nullable=False)
+    pipeline: Mapped[dict[str, Any]] = mapped_column("pipeline_json", JSONDict, default=dict, nullable=False)
 
     # politeness budget -- this runs on the user's working machine
     max_concurrency: Mapped[int] = mapped_column(sa.Integer, default=2, nullable=False)
@@ -95,8 +89,7 @@ class ScanProfile(Base, TimestampMixin):
     requires_idle: Mapped[bool] = mapped_column(sa.Boolean, default=False, nullable=False)
 
     resource: Mapped[Resource] = relationship(back_populates="profiles")
-    schedules: Mapped[list[Schedule]] = relationship(
-        back_populates="profile", cascade="all, delete-orphan")
+    schedules: Mapped[list[Schedule]] = relationship(back_populates="profile", cascade="all, delete-orphan")
 
     __table_args__ = (
         UniqueConstraint("resource_id", "name", name="uq_profile_name"),
@@ -122,15 +115,14 @@ class Schedule(Base):
 
     __tablename__ = "schedule"
 
-    id: Mapped[str] = mapped_column(
-        sa.Text, primary_key=True, default=lambda: new_id("trg"))
+    id: Mapped[str] = mapped_column(sa.Text, primary_key=True, default=lambda: new_id("trg"))
     scan_profile_id: Mapped[str] = mapped_column(
-        ForeignKey("scan_profile.id", ondelete="CASCADE"), nullable=False)
+        ForeignKey("scan_profile.id", ondelete="CASCADE"), nullable=False
+    )
     kind: Mapped[ScheduleKind] = mapped_column(Enum(ScheduleKind), nullable=False)
     cron_expr: Mapped[str | None] = mapped_column(sa.Text)
     interval_seconds: Mapped[int | None] = mapped_column(sa.Integer)
-    timezone: Mapped[str] = mapped_column(
-        sa.Text, default="Asia/Shanghai", nullable=False)
+    timezone: Mapped[str] = mapped_column(sa.Text, default="Asia/Shanghai", nullable=False)
 
     is_enabled: Mapped[bool] = mapped_column(sa.Boolean, default=True, nullable=False)
     paused_reason: Mapped[str | None] = mapped_column(sa.Text)
@@ -138,11 +130,11 @@ class Schedule(Base):
     next_run_at: Mapped[int | None] = mapped_column(sa.Integer)
     last_run_at: Mapped[int | None] = mapped_column(sa.Integer)
     last_job_id: Mapped[str | None] = mapped_column(sa.Text)
-    consecutive_failures: Mapped[int] = mapped_column(
-        sa.Integer, default=0, nullable=False)
+    consecutive_failures: Mapped[int] = mapped_column(sa.Integer, default=0, nullable=False)
 
     misfire_policy: Mapped[MisfirePolicy] = mapped_column(
-        Enum(MisfirePolicy), default=MisfirePolicy.COALESCE, nullable=False)
+        Enum(MisfirePolicy), default=MisfirePolicy.COALESCE, nullable=False
+    )
     jitter_seconds: Mapped[int] = mapped_column(sa.Integer, default=60, nullable=False)
     debounce_seconds: Mapped[int] = mapped_column(sa.Integer, default=30, nullable=False)
 
@@ -156,14 +148,13 @@ class Schedule(Base):
 
     __table_args__ = (
         CheckConstraint("kind <> 'cron' OR cron_expr IS NOT NULL", name="cron_expr_req"),
-        CheckConstraint("kind <> 'interval' OR interval_seconds IS NOT NULL",
-                        name="interval_req"),
+        CheckConstraint("kind <> 'interval' OR interval_seconds IS NOT NULL", name="interval_req"),
         # guardrail: a user typing "10" must not mean a scan every 10 seconds
-        CheckConstraint("interval_seconds IS NULL OR interval_seconds >= 300",
-                        name="min_interval"),
+        CheckConstraint("interval_seconds IS NULL OR interval_seconds >= 300", name="min_interval"),
         # the scheduler's hot path
-        Index("idx_schedule_due", "next_run_at",
-              sqlite_where=text("is_enabled = 1 AND next_run_at IS NOT NULL")),
+        Index(
+            "idx_schedule_due", "next_run_at", sqlite_where=text("is_enabled = 1 AND next_run_at IS NOT NULL")
+        ),
         Index("idx_schedule_profile", "scan_profile_id"),
     )
 

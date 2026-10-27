@@ -1,9 +1,9 @@
-#---------------------------------------------------------
+# ---------------------------------------------------------
 # 扫描编排
 #
 # 日期: 2026-09-29
 # 作者: HongWei Guo <hongweig@163.com>
-#---------------------------------------------------------
+# ---------------------------------------------------------
 """把连接器、解析器、切块器、embedder、向量库缝成一次完整的扫描。
 
 这是 ``Connector.discover()`` 的消费者, 也是整个模块存在的理由。
@@ -38,8 +38,9 @@
 **3. 内容没变且索引完整、版本匹配时才跳过。**
 
 不是 ``modified_at``。很多同步工具 (OneDrive、git checkout) 会在内容
-完全没变的情况下刷新 mtime, 只看时间会让一次日常同步触发全库重新
-embedding。除内容指纹外, 还要检查流水线状态、待补向量和切块/模型版本。
+完全没变的情况下刷新 mtime。本地使用 size + mtime_ns 的廉价指纹,
+因此会保守地重处理 touch 过的文件, 但不使用秒级 mtime 作为发现过滤条件。
+除内容指纹外, 还要检查流水线状态、待补向量和处理配置/模型版本。
 完成标记只在本篇向量落盘之后提交。
 """
 
@@ -47,8 +48,10 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import hashlib
+import json
 from collections.abc import Sequence
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 
 from sqlalchemy import delete, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -56,11 +59,12 @@ from sqlalchemy.sql.elements import ColumnElement
 
 from shovel.db.base import now_ts
 from shovel.db.model.config import Resource, ScanProfile
-from shovel.db.model.content import Chunk, Document
+from shovel.db.model.content import Chunk, Document, ProfileDocument
 from shovel.db.model.execution import Job, JobEvent
 from shovel.db.model.retrieval import DeletionOutbox
 from shovel.domain.enums import (
     DeletionScope,
+    DocClass,
     DocumentLifecycleState,
     DocumentPipeState,
     ErrorKind,
@@ -80,6 +84,7 @@ from shovel.exceptions.pipeline import (
     UnsupportedDocumentError,
     VectorSinkError,
 )
+from shovel.exceptions.resource import ConnectorDiscoveryError
 from shovel.pipeline.chunker import (
     CHUNKER_VERSION,
     ChunkDraft,
@@ -90,6 +95,8 @@ from shovel.pipeline.chunker import (
 from shovel.pipeline.cleanup import IndexCleanupService
 from shovel.pipeline.embedder import Embedder, NullEmbedder
 from shovel.pipeline.parsers import ParsedDocument, ParseHint, can_parse, parse_bytes
+from shovel.pipeline.parsers.base import DEFAULT_MAX_CHARS
+from shovel.pipeline.parsers.registry import parser_versions
 from shovel.pipeline.sink import ChunkVectorSink, NullVectorSink, VectorRecord
 from shovel.services.connector_base import (
     Connector,
@@ -162,29 +169,44 @@ class ScanService:
         self._sink = sink or NullVectorSink()
         self._cleanup = IndexCleanupService(session_factory, self._sink)
         self._stopping = stopping
+        self._processing_version: str | None = None
 
     @property
     def _embedding_enabled(self) -> bool:
         return not isinstance(self._embedder, NullEmbedder)
 
     def _recovery_condition(self) -> ColumnElement[bool]:
+        processed_hash = func.coalesce(
+            Document.indexed_hash, func.json_extract(Document.source_meta, "$.chunked_hash")
+        )
         conditions = [
-            Document.pipe_state != DocumentPipeState.INDEXED,
-            Document.indexed_hash.is_(None),
-            Document.indexed_hash != Document.content_hash,
+            Document.pipe_state.not_in(
+                (DocumentPipeState.INDEXED,)
+                if self._embedding_enabled
+                else (DocumentPipeState.CHUNKED, DocumentPipeState.INDEXED)
+            ),
+            processed_hash.is_(None),
+            processed_hash != Document.content_hash,
             Document.chunker_version.is_(None),
             Document.chunker_version != CHUNKER_VERSION,
         ]
+        if self._processing_version is not None:
+            fingerprint = func.json_extract(Document.source_meta, "$.processing_fingerprint")
+            conditions.extend([fingerprint.is_(None), fingerprint != self._processing_version])
         if self._embedding_enabled:
-            conditions.extend([
-                Document.model_version.is_(None),
-                Document.model_version != self._embedder.model_version,
-                select(Chunk.id).where(
-                    Chunk.doc_uri == Document.uri,
-                    Chunk.resource_id == Document.resource_id,
-                    Chunk.vector_state == VectorState.PENDING,
-                ).exists(),
-            ])
+            conditions.extend(
+                [
+                    Document.model_version.is_(None),
+                    Document.model_version != self._embedder.model_version,
+                    select(Chunk.id)
+                    .where(
+                        Chunk.doc_uri == Document.uri,
+                        Chunk.resource_id == Document.resource_id,
+                        Chunk.vector_state == VectorState.PENDING,
+                    )
+                    .exists(),
+                ]
+            )
         return or_(*conditions)
 
     # ----------------------------------------------------------------- #
@@ -209,7 +231,10 @@ class ScanService:
         """
 
         resource, profile, connector, scan_mode = await self._preflight(
-            ref, mode=mode, profile_name=profile_name, target_ids=target_ids,
+            ref,
+            mode=mode,
+            profile_name=profile_name,
+            target_ids=target_ids,
         )
 
         job_id = await self._open_job(resource, profile, scan_mode, job_id=job_id)
@@ -238,7 +263,7 @@ class ScanService:
                 outcome=outcome,
             )
 
-        except PipelineError as exc:
+        except (PipelineError, ConnectorDiscoveryError) as exc:
             # 作业级失败: embedding 端点挂了、向量库写不进去。
             # 已经处理完的文档保持原样 —— 它们是有效成果, 下次扫描
             # 会因为 indexed_hash 已对上而直接跳过。
@@ -279,7 +304,10 @@ class ScanService:
     ) -> Job:
         """Validate submission and return a queued row for the caller's transaction."""
         resource, profile, _connector, scan_mode = await self._preflight(
-            ref, mode=mode, profile_name=profile_name, target_ids=target_ids,
+            ref,
+            mode=mode,
+            profile_name=profile_name,
+            target_ids=target_ids,
         )
         return Job(
             resource_id=resource.id,
@@ -340,6 +368,8 @@ class ScanService:
                 hint="用 `shovel resource show` 查看该资源有哪些 profile。",
             )
 
+        if not profile.is_enabled:
+            raise PipelineError(f"扫描配置 '{profile.name}' 已停用。")
         return profile
 
     # ----------------------------------------------------------------- #
@@ -358,6 +388,14 @@ class ScanService:
         force: bool,
         outcome: ScanOutcome,
     ) -> None:
+        identity = {
+            "parsers": parser_versions(),
+            "parser_default_max_chars": DEFAULT_MAX_CHARS,
+            "chunker_version": CHUNKER_VERSION,
+            "defaults": {kind.value: asdict(default_config_for(kind)) for kind in DocClass},
+            "pipeline": profile.pipeline,
+        }
+        self._processing_version = hashlib.sha256(json.dumps(identity, sort_keys=True).encode()).hexdigest()
         if self._embedding_enabled:
             await self._cleanup.drain()
 
@@ -365,7 +403,7 @@ class ScanService:
         await self._set_stage(job_id, Stage.DISCOVER)
 
         since = (
-            await self._watermark(resource.id)
+            await self._watermark(resource.id, profile.id)
             if scan_mode is ScanMode.INCREMENTAL and not force
             else None
         )
@@ -381,6 +419,7 @@ class ScanService:
 
         pending = await self._discover(
             job_id=job_id,
+            profile_id=profile.id,
             resource=resource,
             connector=connector,
             scope=scope,
@@ -390,7 +429,8 @@ class ScanService:
 
         # 这一行是删除对账的门闸。放在 discover 完整跑完之后, 一行都
         # 不能提前 —— 详见模块顶部的说明。
-        await self._mark_discovery_complete(job_id, outcome.discovered)
+        delete_detect = connector.spec.supports(ConnectorCapability.DELETE_DETECT)
+        await self._mark_discovery_complete(job_id, outcome.discovered, delete_detect=delete_detect)
 
         # ---------- per-document ----------
         await self._set_stage(job_id, Stage.FETCH)
@@ -416,7 +456,11 @@ class ScanService:
             except ParseError as exc:
                 # 单篇级: 记下来, 继续。
                 await self._fail_document(
-                    job_id, resource.id, item, exc, outcome,
+                    job_id,
+                    resource.id,
+                    item,
+                    exc,
+                    outcome,
                 )
                 written = False
 
@@ -427,15 +471,17 @@ class ScanService:
         # ---------- reconcile ----------
         if await self._cancel_requested(job_id):
             raise asyncio.CancelledError
-        if scan_mode is ScanMode.FULL_SWEEP:
+        if scan_mode is ScanMode.FULL_SWEEP and delete_detect:
             await self._set_stage(job_id, Stage.RECONCILE)
             outcome.tombstoned = await self._reconcile(job_id, resource.id)
             if self._embedding_enabled:
                 await self._cleanup.drain(resource_id=resource.id)
+        elif scan_mode is ScanMode.FULL_SWEEP:
+            warning = "连接器未声明完整删除检测能力,本轮不会按缺失条目删除索引。"
+            outcome.warnings.append(warning)
+            await self._log(job_id, LogLevel.WARN, None, "RECONCILE_UNSUPPORTED", warning)
 
-        outcome.state = (
-            JobState.COMPLETED_WITH_ERRORS if outcome.failed_docs else JobState.SUCCEEDED
-        )
+        outcome.state = JobState.COMPLETED_WITH_ERRORS if outcome.failed_docs else JobState.SUCCEEDED
 
     # ----------------------------------------------------------------- #
     # discover
@@ -444,6 +490,7 @@ class ScanService:
         self,
         *,
         job_id: str,
+        profile_id: str,
         resource: Resource,
         connector: Connector,
         scope: DiscoveryScope,
@@ -461,6 +508,9 @@ class ScanService:
         seen: list[DiscoveredItem] = []
 
         async with self._sessions() as session:
+            profile = await session.get(ScanProfile, profile_id)
+            if profile is None:
+                raise PipelineError("扫描 Profile 已不存在。")
             async for item in connector.discover(scope):
                 if outcome.discovered % 100 == 0:
                     await session.commit()
@@ -469,18 +519,52 @@ class ScanService:
                         raise asyncio.CancelledError
                 outcome.discovered += 1
 
+                other_pipelines = await session.scalars(
+                    select(ScanProfile.pipeline)
+                    .join(
+                        ProfileDocument,
+                        ProfileDocument.profile_id == ScanProfile.id,
+                    )
+                    .where(
+                        ProfileDocument.resource_id == resource.id,
+                        ProfileDocument.doc_uri == item.uri,
+                        ProfileDocument.profile_id != profile_id,
+                    )
+                )
+                if any(pipeline != profile.pipeline for pipeline in other_pipelines):
+                    raise PipelineError(
+                        "重叠 Profile 使用了不同的流水线配置;一个资源内同一文档仅共享一份索引。",
+                        hint="请统一这些 Profile 的 pipeline,或使用不重叠的 include/exclude。",
+                    )
                 hint = _hint_of(resource, item)
                 document = await self._upsert_document(
-                    session, job_id, resource, item,
+                    session,
+                    job_id,
+                    resource,
+                    item,
                 )
+                membership = await session.get(ProfileDocument, (profile_id, item.uri, resource.id))
+                if membership is None:
+                    session.add(
+                        ProfileDocument(
+                            profile_id=profile_id,
+                            doc_uri=item.uri,
+                            resource_id=resource.id,
+                            last_seen_run=job_id,
+                        )
+                    )
+                else:
+                    membership.last_seen_run = job_id
 
                 if not can_parse(hint):
                     if document.pipe_state is not DocumentPipeState.SKIPPED:
-                        session.add(DeletionOutbox(
-                            scope=DeletionScope.DOC,
-                            resource_id=resource.id,
-                            doc_uri=item.uri,
-                        ))
+                        session.add(
+                            DeletionOutbox(
+                                scope=DeletionScope.DOC,
+                                resource_id=resource.id,
+                                doc_uri=item.uri,
+                            )
+                        )
                     document.lifecycle_state = DocumentLifecycleState.SKIPPED
                     document.pipe_state = DocumentPipeState.SKIPPED
                     document.skip_reason = f"不支持的类型: {hint.suffix or '(无扩展名)'}"
@@ -570,6 +654,14 @@ class ScanService:
         outcome.bytes_read += len(payload)
 
         hint = _hint_of(resource, item)
+        if "parser" in profile.pipeline:
+            hint = ParseHint(
+                uri=hint.uri,
+                filename=hint.filename,
+                doc_class=hint.doc_class,
+                size_bytes=hint.size_bytes,
+                max_chars=profile.pipeline["parser"]["max_chars"],
+            )
 
         # 解析是 CPU 密集的 (pypdf 解压、lxml 建树)。丢进线程池,
         # 让事件循环还能响应取消信号和心跳。
@@ -579,7 +671,10 @@ class ScanService:
         if parsed.truncated:
             outcome.warnings.append(f"{item.external_id}: 内容过长, 已截断。")
             await self._log(
-                job_id, LogLevel.WARN, item.uri, "PARSE_TRUNCATED",
+                job_id,
+                LogLevel.WARN,
+                item.uri,
+                "PARSE_TRUNCATED",
                 "文档内容超过上限, 只索引了前一部分。",
             )
 
@@ -615,10 +710,7 @@ class ScanService:
 
             outcome.embedded += 1
 
-        by_id = {
-            draft.id: vector
-            for draft, vector in zip(embeddable, vectors, strict=False)
-        }
+        by_id = {draft.id: vector for draft, vector in zip(embeddable, vectors, strict=False)}
 
         # ---------- persist ----------
         await self._set_stage(job_id, Stage.PERSIST)
@@ -639,7 +731,10 @@ class ScanService:
                 for draft in embeddable
             ]
             outcome.vectors_written += await self._flush(
-                records, resource.id, item.uri, content_hash,
+                records,
+                resource.id,
+                item.uri,
+                content_hash,
             )
 
         return True
@@ -676,31 +771,34 @@ class ScanService:
             )
 
             for draft in drafts:
-                session.add(Chunk(
-                    id=draft.id,
-                    doc_uri=item.uri,
-                    resource_id=resource.id,
-                    granularity=draft.granularity,
-                    chunk_index=draft.chunk_index,
-                    parent_chunk_id=draft.parent_id,
-                    text_=draft.text,
-                    context_prefix=draft.context_prefix,
-                    token_count=draft.token_estimate,
-                    vector_state=(
-                        VectorState.PENDING
-                        if draft.granularity.should_embedded
-                        else VectorState.SKIPPED
-                    ),
-                    model_version=self._embedder.model_version if embedded else None,
-                    chunk_meta=draft.meta,
-                ))
+                session.add(
+                    Chunk(
+                        id=draft.id,
+                        doc_uri=item.uri,
+                        resource_id=resource.id,
+                        granularity=draft.granularity,
+                        chunk_index=draft.chunk_index,
+                        parent_chunk_id=draft.parent_id,
+                        text_=draft.text,
+                        context_prefix=draft.context_prefix,
+                        token_count=draft.token_estimate,
+                        vector_state=(
+                            VectorState.PENDING if draft.granularity.should_embedded else VectorState.SKIPPED
+                        ),
+                        model_version=self._embedder.model_version if embedded else None,
+                        chunk_meta=draft.meta,
+                    )
+                )
 
-            session.add(DeletionOutbox(
-                scope=DeletionScope.DOC,
-                resource_id=resource.id,
-                doc_uri=item.uri,
-            ))
+            session.add(
+                DeletionOutbox(
+                    scope=DeletionScope.DOC,
+                    resource_id=resource.id,
+                    doc_uri=item.uri,
+                )
+            )
             document.pipe_state = DocumentPipeState.CHUNKED
+            document.indexed_hash = None
             document.pipe_error_kind = None
             document.chunker_version = CHUNKER_VERSION
             document.model_version = self._embedder.model_version if embedded else None
@@ -711,13 +809,13 @@ class ScanService:
             document.doc_class = parsed.doc_class or document.doc_class
 
             source_meta = dict(document.source_meta or {})
+            source_meta.update(parsed.meta)
             source_meta["parser"] = parsed.parser
             source_meta["parser_version"] = parsed.parser_version
+            source_meta["processing_fingerprint"] = self._processing_version
+            source_meta["chunked_hash"] = item.content_hash
 
-            if parsed.truncated:
-                source_meta["truncated"] = True
-
-            source_meta.update(parsed.meta)
+            source_meta["truncated"] = parsed.truncated
             document.source_meta = source_meta
 
             await session.commit()
@@ -776,9 +874,7 @@ class ScanService:
             document = await session.get(Document, (item.uri, resource_id))
 
             if document is not None:
-                document.pipe_state = (
-                    DocumentPipeState.SKIPPED if skipped else DocumentPipeState.FAILED
-                )
+                document.pipe_state = DocumentPipeState.SKIPPED if skipped else DocumentPipeState.FAILED
                 document.pipe_error_kind = None if skipped else ErrorKind.PARSE
                 document.pipe_attempts += 1
                 document.skip_reason = exc.reason
@@ -831,21 +927,30 @@ class ScanService:
             if job is None or not job.may_reconcile_deletions:
                 return 0
 
+            await session.execute(
+                delete(ProfileDocument).where(
+                    ProfileDocument.profile_id == job.scan_profile_id,
+                    or_(ProfileDocument.last_seen_run.is_(None), ProfileDocument.last_seen_run != job_id),
+                )
+            )
             condition = (
                 (Document.resource_id == resource_id)
                 & (Document.lifecycle_state == DocumentLifecycleState.ACTIVE)
                 & or_(Document.last_seen_run.is_(None), Document.last_seen_run != job_id)
+                & ~select(ProfileDocument.doc_uri)
+                .where(
+                    ProfileDocument.resource_id == Document.resource_id,
+                    ProfileDocument.doc_uri == Document.uri,
+                )
+                .exists()
             )
 
             # 先把 uri 取出来: UPDATE 之后这些行就不再满足条件了,
             # 而撤向量需要逐个 doc_uri 调用 sink。
-            doomed = list(
-                (await session.execute(select(Document.uri).where(condition)))
-                .scalars()
-                .all()
-            )
+            doomed = list((await session.execute(select(Document.uri).where(condition))).scalars().all())
 
             if not doomed:
+                await session.commit()
                 return 0
 
             await session.execute(
@@ -871,17 +976,22 @@ class ScanService:
             )
 
             for uri in doomed:
-                session.add(DeletionOutbox(
-                    scope=DeletionScope.DOC,
-                    resource_id=resource_id,
-                    doc_uri=uri,
-                ))
+                session.add(
+                    DeletionOutbox(
+                        scope=DeletionScope.DOC,
+                        resource_id=resource_id,
+                        doc_uri=uri,
+                    )
+                )
             await session.commit()
 
         count = len(doomed)
 
         await self._log(
-            job_id, LogLevel.INFO, None, "RECONCILE_TOMBSTONED",
+            job_id,
+            LogLevel.INFO,
+            None,
+            "RECONCILE_TOMBSTONED",
             f"{count} 个条目在源端已不存在, 已标记为墓碑并持久化向量清理意图。",
         )
 
@@ -915,10 +1025,20 @@ class ScanService:
                 existing.finished_at = None
                 # A replay keeps its Job ID, but must rebuild this attempt's observed set.
                 await session.execute(
-                    update(Document).where(
+                    update(Document)
+                    .where(
                         Document.resource_id == resource.id,
                         Document.last_seen_run == job_id,
-                    ).values(last_seen_run=None)
+                    )
+                    .values(last_seen_run=None)
+                )
+                await session.execute(
+                    update(ProfileDocument)
+                    .where(
+                        ProfileDocument.profile_id == profile.id,
+                        ProfileDocument.last_seen_run == job_id,
+                    )
+                    .values(last_seen_run=None)
                 )
                 existing.current_stage = Stage.DISCOVER
                 existing.stats = {"embedding_enabled": self._embedding_enabled}
@@ -926,8 +1046,15 @@ class ScanService:
                 existing.error_kind = None
                 existing.error_detail = None
                 for counter in (
-                    "discovered", "skipped_unchanged", "fetched", "parsed",
-                    "chunked", "embedded", "failed_docs", "chunks_written", "bytes_read",
+                    "discovered",
+                    "skipped_unchanged",
+                    "fetched",
+                    "parsed",
+                    "chunked",
+                    "embedded",
+                    "failed_docs",
+                    "chunks_written",
+                    "bytes_read",
                 ):
                     setattr(existing, counter, 0)
                 await session.commit()
@@ -950,17 +1077,21 @@ class ScanService:
 
     async def _save_progress(self, job_id: str, outcome: ScanOutcome) -> None:
         async with self._sessions() as session:
-            await session.execute(update(Job).where(Job.id == job_id).values(
-                discovered=outcome.discovered,
-                skipped_unchanged=outcome.skipped_unchanged,
-                fetched=outcome.fetched,
-                parsed=outcome.parsed,
-                chunked=outcome.chunked,
-                embedded=outcome.embedded,
-                failed_docs=outcome.failed_docs,
-                chunks_written=outcome.chunks_written,
-                bytes_read=outcome.bytes_read,
-            ))
+            await session.execute(
+                update(Job)
+                .where(Job.id == job_id)
+                .values(
+                    discovered=outcome.discovered,
+                    skipped_unchanged=outcome.skipped_unchanged,
+                    fetched=outcome.fetched,
+                    parsed=outcome.parsed,
+                    chunked=outcome.chunked,
+                    embedded=outcome.embedded,
+                    failed_docs=outcome.failed_docs,
+                    chunks_written=outcome.chunks_written,
+                    bytes_read=outcome.bytes_read,
+                )
+            )
             await session.commit()
 
     async def _close_job(self, job_id: str, outcome: ScanOutcome) -> None:
@@ -984,6 +1115,7 @@ class ScanService:
             job.finished_at = now_ts()
             job.current_stage = None
             job.stats = {
+                **job.stats,
                 "embedding_enabled": self._embedding_enabled,
                 "vectors_written": outcome.vectors_written,
                 "tombstoned": outcome.tombstoned,
@@ -1001,13 +1133,14 @@ class ScanService:
 
             await session.commit()
 
-    async def _mark_discovery_complete(self, job_id: str, discovered: int) -> None:
+    async def _mark_discovery_complete(self, job_id: str, discovered: int, *, delete_detect: bool) -> None:
         async with self._sessions() as session:
             job = await session.get(Job, job_id)
 
             if job is not None:
                 job.is_discovery_complete = True
                 job.discovered = discovered
+                job.stats = {**job.stats, "delete_detect": delete_detect}
                 await session.commit()
 
     async def _set_stage(self, job_id: str, stage: Stage) -> None:
@@ -1037,9 +1170,7 @@ class ScanService:
             await asyncio.sleep(_HEARTBEAT_SECONDS)
 
             async with self._sessions() as session:
-                await session.execute(
-                    update(Job).where(Job.id == job_id).values(heartbeat_at=now_ts())
-                )
+                await session.execute(update(Job).where(Job.id == job_id).values(heartbeat_at=now_ts()))
                 await session.commit()
 
     async def _log(
@@ -1051,16 +1182,18 @@ class ScanService:
         message: str,
     ) -> None:
         async with self._sessions() as session:
-            session.add(JobEvent(
-                job_id=job_id,
-                level=level,
-                doc_uri=doc_uri,
-                code=code,
-                message=message,
-            ))
+            session.add(
+                JobEvent(
+                    job_id=job_id,
+                    level=level,
+                    doc_uri=doc_uri,
+                    code=code,
+                    message=message,
+                )
+            )
             await session.commit()
 
-    async def _watermark(self, resource_id: str) -> int | None:
+    async def _watermark(self, resource_id: str, profile_id: str | None = None) -> int | None:
         """增量扫描的水位线: 上次见过的最大源端修改时间。
 
         有待恢复文档时不应用水位线, 否则旧失败或待补向量的文件永远列举不到。
@@ -1076,13 +1209,30 @@ class ScanService:
             & (Document.lifecycle_state == DocumentLifecycleState.ACTIVE)
             & (Document.indexed_hash.is_not(None))
         )
+        membership = (
+            select(ProfileDocument.doc_uri)
+            .where(
+                ProfileDocument.resource_id == Document.resource_id,
+                ProfileDocument.doc_uri == Document.uri,
+                ProfileDocument.profile_id == profile_id,
+            )
+            .exists()
+        )
+        if profile_id is not None:
+            stmt = stmt.where(membership)
 
         async with self._sessions() as session:
-            recovery = select(Document.uri).where(
-                Document.resource_id == resource_id,
-                Document.lifecycle_state == DocumentLifecycleState.ACTIVE,
-                self._recovery_condition(),
-            ).limit(1)
+            recovery = (
+                select(Document.uri)
+                .where(
+                    Document.resource_id == resource_id,
+                    Document.lifecycle_state == DocumentLifecycleState.ACTIVE,
+                    self._recovery_condition(),
+                )
+                .limit(1)
+            )
+            if profile_id is not None:
+                recovery = recovery.where(membership)
             if (await session.execute(recovery)).scalar_one_or_none() is not None:
                 return None
             return (await session.execute(stmt)).scalar_one_or_none()
@@ -1169,8 +1319,8 @@ def _record_of(
     )
 
 
-def _error_kind_of(exc: PipelineError) -> ErrorKind:
-    if isinstance(exc, EmbeddingError):
+def _error_kind_of(exc: PipelineError | ConnectorDiscoveryError) -> ErrorKind:
+    if isinstance(exc, (EmbeddingError, ConnectorDiscoveryError)):
         return ErrorKind.NETWORK
 
     if isinstance(exc, VectorSinkError):

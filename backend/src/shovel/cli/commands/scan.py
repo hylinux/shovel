@@ -1,9 +1,9 @@
-#---------------------------------------------------------
+# ---------------------------------------------------------
 # shovel scan 子命令
 #
 # 日期: 2026-09-29
 # 作者: HongWei Guo <hongweig@163.com>
-#---------------------------------------------------------
+# ---------------------------------------------------------
 """扫描的命令行入口。
 
 ## 关于 --no-embed
@@ -127,12 +127,23 @@ def run(
 
     settings = load_settings(cli_context.get_default_config_file())
     request = ScanInput(
-        mode=mode, profile_name=profile, target_ids=target or [], limit=limit, embed=embed, force=force,
+        mode=mode,
+        profile_name=profile,
+        target_ids=target or [],
+        limit=limit,
+        embed=embed,
+        force=force,
     )
     with console.status(f"[cyan]正在扫描 {ref} ……"):
-        receipt = asyncio.run(execute_command(
-            settings, "scan", request.model_dump(mode="json"), ref=ref,
-        ))
+        receipt = asyncio.run(
+            execute_command(
+                settings,
+                "scan",
+                request.model_dump(mode="json"),
+                ref=ref,
+                request_key=cli_context.request_key,
+            )
+        )
     result = receipt["result"]
     if not result:
         console.warning(f"扫描已取消 (job={receipt['job_id']})。")
@@ -160,7 +171,11 @@ def cleanup(
 ) -> None:
     """重试待处理的知识库向量删除, 无需配置 embedding。"""
     settings = load_settings(cli_context.get_default_config_file())
-    receipt = asyncio.run(execute_command(settings, "cleanup", {"resource_id": resource_id}))
+    receipt = asyncio.run(
+        execute_command(
+            settings, "cleanup", {"resource_id": resource_id}, request_key=cli_context.request_key
+        )
+    )
     completed = receipt["result"]["completed"]
     console.success(f"已完成 {completed} 条向量清理任务。")
 

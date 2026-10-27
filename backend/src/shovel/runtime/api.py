@@ -5,7 +5,7 @@ from typing import Annotated, Any
 from urllib.parse import urlsplit
 
 import structlog
-from fastapi import APIRouter, Depends, FastAPI, Query, Request
+from fastapi import APIRouter, Depends, FastAPI, Header, Query, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from pydantic import SecretStr, ValidationError
@@ -30,9 +30,12 @@ from shovel.runtime.errors import NotFound, RuntimeFailure
 from shovel.runtime.hosting import resolve_runtime
 from shovel.runtime.schemas import (
     CleanupInput,
+    CommandInput,
     ConversationInput,
     CredentialInput,
+    HistoryPruneInput,
     MessageInput,
+    ProfileInput,
     ReasonInput,
     ResourceInput,
     ResourceUpdate,
@@ -71,6 +74,7 @@ def operation_view(operation: Operation) -> dict[str, Any]:
         for name in (
             "id",
             "kind",
+            "request_key",
             "state",
             "resource_id",
             "job_id",
@@ -155,6 +159,10 @@ async def current_runtime(request: Request) -> Runtime:
 
 
 RuntimeDependency = Annotated[Runtime, Depends(current_runtime)]
+RequestKey = Annotated[
+    str | None,
+    Header(alias="Idempotency-Key", min_length=1, max_length=128, pattern=r"^[A-Za-z0-9._:-]+$"),
+]
 
 
 class LocalAccessMiddleware:
@@ -235,8 +243,11 @@ def configure_api(app: FastAPI, provider: Callable[[], object], settings: AppSet
     async def status(rt: RuntimeDependency) -> dict[str, Any]:
         from shovel.runtime.client import workspace_id
 
+        if rt.worker_state == "failed":
+            raise RuntimeFailure("后台 worker 已失败,Host 正在停止;持久任务将在重启后恢复。", status=503)
         return {
             "service": "shovel",
+            "worker_state": rt.worker_state,
             "embedding_configured": rt.settings.embedding.is_configured,
             "model_configured": rt.settings.model.is_configured,
             "model_name": rt.settings.model.model_name,
@@ -298,57 +309,144 @@ def configure_api(app: FastAPI, provider: Callable[[], object], settings: AppSet
         reference = await save_credential(SecretStr(body.secret), body.identity_ref)
         return {"identity_ref": reference}
 
+    @router.post("/commands", status_code=202)
+    async def command(
+        body: CommandInput,
+        rt: RuntimeDependency,
+        request_key: RequestKey = None,
+    ) -> dict[str, Any]:
+        from shovel.db.base import new_id
+        from shovel.runtime.client import _submit_local
+
+        identifier = await _submit_local(
+            rt, body.kind, body.payload, body.ref, request_key or new_id("request")
+        )
+        return operation_view(await rt.operations.get(identifier))
+
+    @router.get("/resources/{ref}/profiles")
+    async def profiles(ref: str, rt: RuntimeDependency) -> dict[str, Any]:
+        from shovel.runtime.profiles import profile_view
+
+        resource = await rt.resources.resolve(ref)
+        async with rt.sessions() as session:
+            rows = await session.scalars(
+                select(ScanProfile)
+                .where(
+                    ScanProfile.resource_id == resource.id,
+                )
+                .order_by(ScanProfile.name)
+            )
+            return {"items": [profile_view(row) for row in rows]}
+
+    @router.put("/resources/{ref}/profiles/{name}", status_code=202)
+    async def save_profile(
+        ref: str,
+        name: str,
+        body: ProfileInput,
+        rt: RuntimeDependency,
+        request_key: RequestKey = None,
+    ) -> dict[str, Any]:
+        return operation_view(
+            await rt.operations.profile_action(
+                ref,
+                name,
+                body.model_dump(exclude_none=True),
+                request_key=request_key,
+            )
+        )
+
+    @router.delete("/resources/{ref}/profiles/{name}", status_code=202)
+    async def delete_profile(
+        ref: str,
+        name: str,
+        rt: RuntimeDependency,
+        request_key: RequestKey = None,
+    ) -> dict[str, Any]:
+        return operation_view(await rt.operations.profile_action(ref, name, None, request_key=request_key))
+
+    @router.post("/history/prune", status_code=202)
+    async def prune(
+        body: HistoryPruneInput,
+        rt: RuntimeDependency,
+        request_key: RequestKey = None,
+    ) -> dict[str, Any]:
+        return operation_view(
+            await rt.operations.enqueue(
+                "history.prune",
+                body.model_dump(),
+                request_key=request_key,
+            )
+        )
+
     @router.post("/resources", status_code=202)
-    async def add_resource(body: ResourceInput, rt: RuntimeDependency) -> dict[str, Any]:
-        return operation_view(await rt.operations.create_resource(body))
+    async def add_resource(
+        body: ResourceInput, rt: RuntimeDependency, request_key: RequestKey = None
+    ) -> dict[str, Any]:
+        return operation_view(await rt.operations.create_resource(body, request_key=request_key))
 
     @router.patch("/resources/{ref}", status_code=202)
-    async def update_resource(ref: str, body: ResourceUpdate, rt: RuntimeDependency) -> dict[str, Any]:
+    async def update_resource(
+        ref: str, body: ResourceUpdate, rt: RuntimeDependency, request_key: RequestKey = None
+    ) -> dict[str, Any]:
         return operation_view(
-            await rt.operations.resource_action(ref, "update", body.model_dump(mode="json"))
+            await rt.operations.resource_action(
+                ref, "update", body.model_dump(mode="json"), request_key=request_key
+            )
         )
 
     @router.post("/resources/{ref}/verify", status_code=202)
-    async def verify(ref: str, rt: RuntimeDependency) -> dict[str, Any]:
-        return operation_view(await rt.operations.resource_action(ref, "verify"))
+    async def verify(ref: str, rt: RuntimeDependency, request_key: RequestKey = None) -> dict[str, Any]:
+        return operation_view(await rt.operations.resource_action(ref, "verify", request_key=request_key))
 
     @router.post("/resources/{ref}/pause", status_code=202)
-    async def pause(ref: str, rt: RuntimeDependency, body: ReasonInput | None = None) -> dict[str, Any]:
+    async def pause(
+        ref: str, rt: RuntimeDependency, body: ReasonInput | None = None, request_key: RequestKey = None
+    ) -> dict[str, Any]:
         return operation_view(
-            await rt.operations.resource_action(ref, "pause", (body or ReasonInput()).model_dump())
+            await rt.operations.resource_action(
+                ref, "pause", (body or ReasonInput()).model_dump(), request_key=request_key
+            )
         )
 
     @router.post("/resources/{ref}/resume", status_code=202)
-    async def resume(ref: str, rt: RuntimeDependency) -> dict[str, Any]:
-        return operation_view(await rt.operations.resource_action(ref, "resume"))
+    async def resume(ref: str, rt: RuntimeDependency, request_key: RequestKey = None) -> dict[str, Any]:
+        return operation_view(await rt.operations.resource_action(ref, "resume", request_key=request_key))
 
     @router.post("/resources/{ref}/revoke", status_code=202)
-    async def revoke(ref: str, rt: RuntimeDependency, body: ReasonInput | None = None) -> dict[str, Any]:
+    async def revoke(
+        ref: str, rt: RuntimeDependency, body: ReasonInput | None = None, request_key: RequestKey = None
+    ) -> dict[str, Any]:
         return operation_view(
-            await rt.operations.resource_action(ref, "revoke", (body or ReasonInput()).model_dump())
+            await rt.operations.resource_action(
+                ref, "revoke", (body or ReasonInput()).model_dump(), request_key=request_key
+            )
         )
 
     @router.delete("/resources/{ref}", status_code=202)
-    async def remove(ref: str, rt: RuntimeDependency) -> dict[str, Any]:
-        return operation_view(await rt.operations.resource_action(ref, "delete"))
+    async def remove(ref: str, rt: RuntimeDependency, request_key: RequestKey = None) -> dict[str, Any]:
+        return operation_view(await rt.operations.resource_action(ref, "delete", request_key=request_key))
 
     @router.post("/resources/{ref}/scans", status_code=202)
-    async def scan(ref: str, rt: RuntimeDependency, body: ScanInput | None = None) -> dict[str, Any]:
-        return operation_view(await rt.operations.scan(ref, body or ScanInput()))
+    async def scan(
+        ref: str, rt: RuntimeDependency, body: ScanInput | None = None, request_key: RequestKey = None
+    ) -> dict[str, Any]:
+        return operation_view(await rt.operations.scan(ref, body or ScanInput(), request_key=request_key))
 
     @router.get("/operations")
     async def operations(
         rt: RuntimeDependency,
         limit: int = Query(100, ge=1, le=1000),
         offset: int = Query(0, ge=0),
+        state: str | None = None,
+        resource_id: str | None = None,
     ) -> dict[str, Any]:
+        statement = select(Operation).order_by(Operation.queued_at.desc(), Operation.id)
+        if state is not None:
+            statement = statement.where(Operation.state == state)
+        if resource_id is not None:
+            statement = statement.where(Operation.resource_id == resource_id)
         async with rt.sessions() as session:
-            rows = await session.scalars(
-                select(Operation)
-                .order_by(Operation.queued_at.desc(), Operation.id)
-                .limit(limit)
-                .offset(offset)
-            )
+            rows = await session.scalars(statement.limit(limit).offset(offset))
             return {"items": [operation_view(row) for row in rows]}
 
     @router.get("/operations/{identifier}")
@@ -422,8 +520,14 @@ def configure_api(app: FastAPI, provider: Callable[[], object], settings: AppSet
         return job_view(await rt.operations.cancel_job(identifier))
 
     @router.post("/index/cleanup", status_code=202)
-    async def cleanup(rt: RuntimeDependency, body: CleanupInput | None = None) -> dict[str, Any]:
-        return operation_view(await rt.operations.enqueue("cleanup", (body or CleanupInput()).model_dump()))
+    async def cleanup(
+        rt: RuntimeDependency, body: CleanupInput | None = None, request_key: RequestKey = None
+    ) -> dict[str, Any]:
+        return operation_view(
+            await rt.operations.enqueue(
+                "cleanup", (body or CleanupInput()).model_dump(), request_key=request_key
+            )
+        )
 
     @router.get("/index/cleanup")
     async def cleanup_status(rt: RuntimeDependency) -> dict[str, Any]:
@@ -479,8 +583,31 @@ def configure_api(app: FastAPI, provider: Callable[[], object], settings: AppSet
             return {name: getattr(row, name) for name in ("id", "title", "created_at", "updated_at")}
 
     @router.get("/conversations/{identifier}/messages")
-    async def messages(identifier: str, rt: RuntimeDependency) -> dict[str, Any]:
-        return {"items": [message_view(row) for row in await rt.chat.messages(identifier)]}
+    async def messages(
+        identifier: str,
+        rt: RuntimeDependency,
+        limit: int = Query(100, ge=1, le=1000),
+        before: int | None = Query(None, ge=1),
+    ) -> dict[str, Any]:
+        rows = await rt.chat.messages(identifier, limit=limit, before=before)
+        return {
+            "items": [message_view(row) for row in rows],
+            "next_before": rows[0].sequence if len(rows) == limit else None,
+        }
+
+    @router.patch("/conversations/{identifier}")
+    async def rename_conversation(
+        identifier: str,
+        body: ConversationInput,
+        rt: RuntimeDependency,
+    ) -> dict[str, Any]:
+        await rt.chat.maintain(identifier, title=body.title)
+        return {"id": identifier, "title": body.title}
+
+    @router.delete("/conversations/{identifier}")
+    async def delete_conversation(identifier: str, rt: RuntimeDependency) -> dict[str, bool]:
+        await rt.chat.maintain(identifier)
+        return {"deleted": True}
 
     @router.post("/conversations/{identifier}/messages")
     async def message(identifier: str, body: MessageInput, rt: RuntimeDependency) -> dict[str, Any]:

@@ -51,9 +51,7 @@ _IS_WINDOWS = sys.platform == "win32"
 _getpgid: Callable[[int], int] | None = getattr(os, "getpgid", None)
 _killpg: Callable[[int, int], None] | None = getattr(os, "killpg", None)
 _SIGKILL: int = int(getattr(signal, "SIGKILL", signal.SIGTERM))
-_CREATE_NEW_PROCESS_GROUP: int = int(
-    getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
-)
+_CREATE_NEW_PROCESS_GROUP: int = int(getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0))
 
 _PROJECT_MARKER = "pyproject.toml"
 _FRONTEND_DIR_NAME = "frontend"
@@ -66,19 +64,19 @@ app = typer.Typer(
 )
 
 
-#----------------------------------------------------------------------
+# ----------------------------------------------------------------------
 # 日志输出层
-#---------------------------------------------------------------------
+# ---------------------------------------------------------------------
 
 _WEB_PREFIX = "web"
 _WEB_STYLE = "bold magenta"
 _PUMP_DRAIN_TIMEOUT = 2.0
 
 
-
 # -----------------------------------------------------------------------------
 # 命令入口
 # -----------------------------------------------------------------------------
+
 
 @app.command(name="dev")
 @command_handler()
@@ -124,6 +122,7 @@ def run_prd(
 # dev 主流程
 # -----------------------------------------------------------------------------
 
+
 async def _run_dev_async(frontend_dir_override: Path | None = None) -> None:
     console.print()
     console.print(get_logo())
@@ -142,20 +141,30 @@ async def _run_dev_async(frontend_dir_override: Path | None = None) -> None:
     console.info(f"Backend  → http://{settings.dev_http_host}:{settings.dev_http_port}")
 
     exit_code = await _supervise(
-        host, frontend_dir, settings.dev_http_port,
-        backend_host=settings.dev_http_host, frontend_port=settings.dev_frontend_port,
+        host,
+        frontend_dir,
+        settings.dev_http_port,
+        backend_host=settings.dev_http_host,
+        frontend_port=settings.dev_frontend_port,
     )
     if exit_code:
         raise typer.Exit(code=exit_code)
 
 
 async def _supervise(
-    host: Any, frontend_dir: Path, backend_port: int,
-    *, backend_host: str = "127.0.0.1", frontend_port: int = 3000,
+    host: Any,
+    frontend_dir: Path,
+    backend_port: int,
+    *,
+    backend_host: str = "127.0.0.1",
+    frontend_port: int = 3000,
 ) -> int:
     """并发运行前后端, 返回退出码。任一方结束或收到停止信号即整体关闭。"""
     async with _run_frontend(
-        frontend_dir, backend_port, backend_host=backend_host, frontend_port=frontend_port,
+        frontend_dir,
+        backend_port,
+        backend_host=backend_host,
+        frontend_port=frontend_port,
     ) as npm_proc:
         backend_task = asyncio.create_task(host.run_async(), name="backend")
         frontend_task = asyncio.create_task(npm_proc.wait(), name="frontend")
@@ -167,7 +176,7 @@ async def _supervise(
                 all_tasks,
                 return_when=asyncio.FIRST_COMPLETED,
             )
-        except (KeyboardInterrupt, asyncio.CancelledError):
+        except KeyboardInterrupt, asyncio.CancelledError:
             # Windows 上没有 add_signal_handler, Ctrl+C 走这条路
             console.info("Shutting down dev environment...")
             await _cancel_all(all_tasks)
@@ -219,7 +228,7 @@ async def _wait_for_stop_signal() -> None:
     for sig in (signal.SIGINT, signal.SIGTERM):
         try:
             loop.add_signal_handler(sig, stop_event.set)
-        except (NotImplementedError, RuntimeError, AttributeError):
+        except NotImplementedError, RuntimeError, AttributeError:
             continue
         registered.append(sig)
 
@@ -235,13 +244,13 @@ async def _wait_for_stop_signal() -> None:
 # 配置与路径
 # -----------------------------------------------------------------------------
 
+
 def _load_settings_or_exit() -> AppSettings:
     config_path = cli_context.get_default_config_file()
 
     if not cli_context.validate_config_exists():
         console.error(
-            "Shovel configuration missing, "
-            "please use command 'shovel init' to generate a default one."
+            "Shovel configuration missing, please use command 'shovel init' to generate a default one."
         )
         raise typer.Exit(code=1)
 
@@ -258,8 +267,7 @@ def _resolve_frontend_dir(override: Path | None) -> Path:
         project_root = _find_project_root()
         if project_root is None:
             console.error(
-                f"Not inside a Shovel project "
-                f"(no {_PROJECT_MARKER} found from current directory upwards)."
+                f"Not inside a Shovel project (no {_PROJECT_MARKER} found from current directory upwards)."
             )
             raise typer.Exit(code=1)
         frontend_dir = project_root / _FRONTEND_DIR_NAME
@@ -277,12 +285,10 @@ def _find_project_root(start: Path | None = None) -> Path | None:
     candidates = (current, *current.parents)
 
     for candidate in candidates:
-        if (candidate / _PROJECT_MARKER).exists() and (
-            candidate / _FRONTEND_DIR_NAME
-        ).is_dir():
+        if (candidate / _PROJECT_MARKER).exists() and (candidate / _FRONTEND_DIR_NAME).is_dir():
             return candidate
 
-    for candidate in candidates:          # 回退: 只认 marker
+    for candidate in candidates:  # 回退: 只认 marker
         if (candidate / _PROJECT_MARKER).exists():
             return candidate
 
@@ -292,6 +298,7 @@ def _find_project_root(start: Path | None = None) -> Path | None:
 # -----------------------------------------------------------------------------
 # 前端子进程
 # -----------------------------------------------------------------------------
+
 
 def _npm_cmd() -> str:
     # Windows 上 npm 是 npm.cmd, 不带后缀 create_subprocess_exec 会 FileNotFoundError
@@ -360,7 +367,8 @@ async def _run_frontend(
         if pumps:
             # 给泵一点时间把最后几行冲出来, 超时就砍掉
             _, still_running = await asyncio.wait(
-                pumps, timeout=_PUMP_DRAIN_TIMEOUT,
+                pumps,
+                timeout=_PUMP_DRAIN_TIMEOUT,
             )
             await _cancel_all(still_running)
 
@@ -389,7 +397,7 @@ async def _terminate_windows(proc: asyncio.subprocess.Process) -> None:
             stderr=asyncio.subprocess.DEVNULL,
         )
         await killer.wait()
-    except (FileNotFoundError, OSError):
+    except FileNotFoundError, OSError:
         with contextlib.suppress(ProcessLookupError):
             proc.kill()
 
@@ -399,7 +407,7 @@ async def _terminate_windows(proc: asyncio.subprocess.Process) -> None:
 
 async def _terminate_posix(proc: asyncio.subprocess.Process) -> None:
     """POSIX 下按进程组关闭 npm 及其所有子进程。"""
-    if _getpgid is None or _killpg is None:      # Windows, 运行时不会走到
+    if _getpgid is None or _killpg is None:  # Windows, 运行时不会走到
         with contextlib.suppress(ProcessLookupError):
             proc.kill()
         await proc.wait()
@@ -433,13 +441,13 @@ async def _pump_stream(
     while True:
         try:
             raw = await stream.readline()
-        except (asyncio.LimitOverrunError, ValueError):
+        except asyncio.LimitOverrunError, ValueError:
             # 单行超过 StreamReader 默认 64 KiB 上限, 跳过这一段继续读
             continue
         except asyncio.CancelledError:
             raise
 
-        if not raw:                  # EOF
+        if not raw:  # EOF
             break
 
         text = raw.decode("utf-8", errors="replace").rstrip("\r\n")

@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 
-@dataclass(slots=True, frozen=True,kw_only=True)
+@dataclass(slots=True, frozen=True, kw_only=True)
 class ExitCodes:
     SUCCESS = 0
 
@@ -22,4 +22,3 @@ class ExitCodes:
     VALIDATION_ERROR = 60
 
     PERMISSION_ERROR = 70
-

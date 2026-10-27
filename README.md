@@ -44,10 +44,11 @@ runtime, not yet a multi-Agent orchestration or scheduling platform.
 
 Development requires Python 3.14+, Git, and Node.js 22.18+ (22 LTS in CI).
 `py-generic-host` is pinned to a Git commit in both source and wheel dependencies;
-no sibling checkout is required. Native Zvec requires a supported platform;
-on Windows, run Python in WSL/Linux rather than mixing Windows and Linux venvs.
-Inside WSL, use Linux-visible paths (for example `/mnt/c/Notes`) for source folders
-and configuration; adapt the PowerShell path examples below accordingly.
+no sibling checkout is required. On Windows, use **64-bit x64 Python** with the
+committed Zvec 0.7 dependency; it can also run under x64 emulation on Windows ARM64.
+Select it explicitly with `uv sync --python 3.14-x86_64 --locked --all-extras`.
+The current lock does not include a native Windows ARM64 Zvec wheel. Do not mix
+Windows and WSL virtual environments or source paths.
 
 ```powershell
 uv sync --locked --all-extras --dev
@@ -100,6 +101,41 @@ uv run shovel resource add notes --kind local_fs --set 'root_path=C:\Notes'
 uv run shovel scan run notes --no-embed
 uv run shovel scan list
 ```
+
+### Local Outlook mail on Windows
+
+Install the optional integration with `uv sync --locked --extra outlook` (or
+`--all-extras`), open **classic Outlook** with your normal profile, and run Shovel
+in the same logged-in Windows user session. New Outlook, unattended Windows
+services, and direct parsing of raw PST/OST files are not supported. PST archives
+already mounted in classic Outlook can be selected like other stores.
+
+In Resources, choose **Classic Outlook mail (Windows)**, select a mailbox and
+explicit folders, then add/verify and scan. Subfolders are opt-in. The same
+resource works through the existing CLI:
+
+```powershell
+uv run shovel resource outlook-stores
+uv run shovel resource outlook-folders --store-id "<StoreID>"
+# Add --parent-id "<FolderID>" to browse children.
+uv run shovel resource add mail --kind outlook_local --config-json '{"store_id":"<StoreID>","folder_ids":["<FolderID>"],"include_subfolders":false}'
+uv run shovel resource verify mail
+uv run shovel scan run mail --no-embed
+```
+
+Mail headers and readable cached text bodies are indexed, including searchable
+sender/recipient context and source metadata. Attachment names/sizes are recorded,
+not attachment contents. No mail is sent, moved, deleted, marked read, or saved.
+Outlook permissions/security prompts are not bypassed. Header-only, empty, changed,
+or unreadable messages produce visible failures; download full messages in Outlook
+and retry. Outlook/provider activity may still involve network access.
+
+**Deleting mail in Outlook does not delete its indexed Shovel copy.** Automatic
+deletion detection is deliberately disabled, including full sweeps. Remove the
+Shovel resource and clean its index to erase its indexed contents; this never
+deletes original mail. Remote embedding/chat providers receive mail excerpts when
+used. See [Outlook integration](Documents/outlook_local.md) for identity, filtering,
+worker isolation and testing details.
 
 All resource mutations, scans, and cleanup use the same Host-owned background
 queue. With a running backend, the CLI submits REST requests and waits for a
@@ -200,6 +236,7 @@ completed resource. Poll `/operations/{id}` for the result.
 | Surface | Endpoints |
 | --- | --- |
 | Runtime | `GET /status`, `GET /connectors` |
+| Local Outlook | `GET /outlook/stores`, `GET /outlook/folders?store_id=...&parent_id=...` |
 | Resources | `GET/POST /resources`, `GET/PATCH/DELETE /resources/{id}` |
 | Resource actions | `POST /resources/{id}/verify`, `/pause`, `/resume`, `/revoke`, `/scans` |
 | Profiles | `GET /resources/{id}/profiles`, `PUT/DELETE /resources/{id}/profiles/{name}` |

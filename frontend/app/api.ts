@@ -5,13 +5,15 @@ import { forgetPendingRequest, makePendingRequest, savePendingRequest, type Pend
 
 export type Status = { service: string; workspace_id: string; embedding_configured: boolean; model_configured: boolean; model_name: string; memory_configured: boolean };
 export type UnixSeconds = number;
-export type Resource = { id: string; name: string; connector_kind: string; state: string; config: { root_path?: string }; description?: string; authority?: string; sensitivity?: string; state_reason?: string; last_verified_at?: UnixSeconds | null };
+export type Resource = { id: string; name: string; connector_kind: string; state: string; config: { root_path?: string; store_id?: string; folder_ids?: string[]; include_subfolders?: boolean }; description?: string; authority?: string; sensitivity?: string; state_reason?: string; last_verified_at?: UnixSeconds | null };
+export type OutlookStore = { id: string; name: string };
+export type OutlookFolder = { id: string; name: string; path: string };
 export type Connector = { kind: string; display_name: string; description: string; config_schema: unknown; capabilities: string[]; supported_modes: string[]; requires_identity: boolean };
 export type Operation = { id: string; kind: string; state: string; resource_id: string | null; job_id: string | null; result: Record<string, unknown>; error: string | null; queued_at: UnixSeconds; started_at?: UnixSeconds | null; finished_at?: UnixSeconds | null };
 export type Job = { id: string; resource_id: string; resource_name: string; scan_mode: string; state: string; discovered: number; skipped_unchanged: number; fetched: number; parsed: number; chunked: number; embedded: number; failed_docs: number; chunks_written: number; bytes_read: number; current_stage: string; progress: number; error_detail?: string; queued_at: UnixSeconds; started_at?: UnixSeconds | null; finished_at?: UnixSeconds | null; is_cancel_requested: boolean };
 export type JobEvent = { id: string; logged_at: UnixSeconds; level: string; stage: string; code: string; message: string; doc_uri?: string };
 export type Conversation = { id: string; title: string; created_at: UnixSeconds; updated_at: UnixSeconds };
-export type Citation = { index?: number; chunk_id: string; resource_id: string; resource_name: string; doc_uri: string; title: string; text: string; score: number };
+export type Citation = { index?: number; chunk_id: string; resource_id: string; resource_name: string; doc_uri: string; title: string; text: string; score: number; email?: { sender?: string; to?: string; sent_at?: UnixSeconds | null; received_at?: UnixSeconds | null; folder_path?: string } };
 export type Message = { id: string; conversation_id: string; role: "user" | "assistant"; content: string; state: string; citations: Citation[]; warnings: string[]; created_at: UnixSeconds };
 export type Memory = { id: string; memory: string; created_at?: UnixSeconds | null };
 export type Items<T> = { items: T[] };

@@ -231,6 +231,30 @@ def _show_connector(kind: str) -> None:
     console.print(fields)
 
 
+@app.command("outlook-stores")
+@command_handler()
+def outlook_stores() -> None:
+    """List classic Outlook StoreIDs in the current Windows user session."""
+    from shovel.services.outlook import outlook_stores
+
+    console.print_json(data={"items": [store.model_dump() for store in asyncio.run(outlook_stores())]})
+
+
+@app.command("outlook-folders")
+@command_handler()
+def outlook_folders(
+    store_id: Annotated[str, typer.Option("--store-id", help="StoreID from outlook-stores.")],
+    parent_id: Annotated[
+        str | None, typer.Option("--parent-id", help="Browse children of this FolderID; omit for store root.")
+    ] = None,
+) -> None:
+    """List folders and their IDs without reading mail bodies."""
+    from shovel.services.outlook import outlook_folders
+
+    folders = asyncio.run(outlook_folders(store_id, parent_id))
+    console.print_json(data={"items": [folder.model_dump() for folder in folders]})
+
+
 @app.command("add")
 @command_handler()
 def add(

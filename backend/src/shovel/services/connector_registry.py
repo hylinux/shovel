@@ -166,8 +166,10 @@ def register_builtin_connectors() -> None:
     """
 
     from shovel.services.connector_local_fs import LocalFsConnector
+    from shovel.services.connector_outlook import OutlookConnector
 
     register(LocalFsConnector)
+    register(OutlookConnector)
 
 
 # --------------------------------------------------------------------------- #

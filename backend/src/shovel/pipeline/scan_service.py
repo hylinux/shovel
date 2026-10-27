@@ -103,6 +103,7 @@ from shovel.services.connector_base import (
     ConnectorCapability,
     DiscoveredItem,
     DiscoveryScope,
+    connector_session,
 )
 from shovel.services.resource_service import ResourceService
 
@@ -251,17 +252,18 @@ class ScanService:
         try:
             if await self._cancel_requested(job_id):
                 raise asyncio.CancelledError
-            await self._run(
-                job_id=job_id,
-                resource=resource,
-                profile=profile,
-                connector=connector,
-                scan_mode=scan_mode,
-                target_ids=target_ids,
-                limit=limit,
-                force=force,
-                outcome=outcome,
-            )
+            async with connector_session(connector):
+                await self._run(
+                    job_id=job_id,
+                    resource=resource,
+                    profile=profile,
+                    connector=connector,
+                    scan_mode=scan_mode,
+                    target_ids=target_ids,
+                    limit=limit,
+                    force=force,
+                    outcome=outcome,
+                )
 
         except (PipelineError, ConnectorDiscoveryError) as exc:
             # 作业级失败: embedding 端点挂了、向量库写不进去。
@@ -661,6 +663,7 @@ class ScanService:
                 doc_class=hint.doc_class,
                 size_bytes=hint.size_bytes,
                 max_chars=profile.pipeline["parser"]["max_chars"],
+                content_format=hint.content_format,
             )
 
         # 解析是 CPU 密集的 (pypdf 解压、lxml 建树)。丢进线程池,
@@ -1275,6 +1278,12 @@ def _hint_of(resource: Resource, item: DiscoveredItem) -> ParseHint:
         filename=filename,
         doc_class=item.doc_class,
         size_bytes=item.size_bytes,
+        content_format=(
+            "outlook-mail-v1"
+            if resource.connector_kind == "outlook_local"
+            and item.extra.get("content_format") == "outlook-mail-v1"
+            else None
+        ),
     )
 
 

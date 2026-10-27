@@ -95,6 +95,8 @@ def _load(module_name: str) -> Parser:
 def find_parser(hint: ParseHint) -> Parser:
     """给一篇文档挑解析器。挑不出来抛 :class:`UnsupportedDocumentError`。"""
 
+    if hint.content_format == "outlook-mail-v1":
+        return _load("email_doc")
     suffix = hint.suffix
 
     if suffix in _LEGACY_OFFICE:
@@ -118,6 +120,8 @@ def can_parse(hint: ParseHint) -> bool:
     完全不必读它, 而"读完再发现不支持"要白跑一趟 IO。
     """
 
+    if hint.content_format == "outlook-mail-v1":
+        return True
     if hint.suffix in _LEGACY_OFFICE:
         return False
 
@@ -139,7 +143,7 @@ def supported_suffixes() -> tuple[str, ...]:
 def parser_versions() -> dict[str, str]:
     return {
         name: _load(name).spec.version
-        for name in sorted(set(_BY_SUFFIX.values()) | set(_BY_DOC_CLASS.values()))
+        for name in sorted(set(_BY_SUFFIX.values()) | set(_BY_DOC_CLASS.values()) | {"email_doc"})
     }
 
 

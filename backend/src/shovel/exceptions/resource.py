@@ -202,6 +202,6 @@ class ConnectorDiscoveryError(ResourceError):
     def __init__(self, path: str, reason: str) -> None:
         super().__init__(
             f"无法完整列举数据源 {path}: {reason}",
-            hint="恢复目录连接或读取权限后重试扫描;本轮不会按缺失条目删除索引。",
+            hint="恢复数据源连接或读取权限后重试扫描;本轮不会按缺失条目删除索引。",
             details=reason,
         )

@@ -59,7 +59,7 @@ from shovel.exceptions.resource import (
     ResourceVerificationFailedError,
 )
 from shovel.services import connector_registry
-from shovel.services.connector_base import Connector, ConnectorSpec, VerifyResult
+from shovel.services.connector_base import Connector, ConnectorSpec, VerifyResult, connector_session
 from shovel.services.credentials import (
     CredentialRef,
     CredentialStore,
@@ -354,7 +354,8 @@ class ResourceService:
         await self._enter_verifying(resource.id)
 
         connector = await self.build_connector(resource.id)
-        result = await connector.verify()
+        async with connector_session(connector):
+            result = await connector.verify()
 
         target = ResourceState.ACTIVE if result.ok else ResourceState.DEGRADED
 

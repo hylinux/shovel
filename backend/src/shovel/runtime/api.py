@@ -45,6 +45,7 @@ from shovel.runtime.schemas import (
 from shovel.runtime.service import Runtime
 from shovel.services import connector_registry
 from shovel.services.connector_base import ConnectorSpec
+from shovel.services.outlook import OutlookError
 
 
 def resource_view(resource: Resource) -> dict[str, Any]:
@@ -216,6 +217,8 @@ def configure_api(app: FastAPI, provider: Callable[[], object], settings: AppSet
             status = 404
         elif isinstance(exc, (DuplicateResourceNameError, InvalidResourceStateTransitionError)):
             status = 409
+        elif isinstance(exc, OutlookError):
+            status = 503
         return JSONResponse(
             {"error": {"code": type(exc).__name__, "message": exc.message, "hint": exc.hint}},
             status_code=status,
@@ -262,6 +265,21 @@ def configure_api(app: FastAPI, provider: Callable[[], object], settings: AppSet
     @router.get("/connectors/{kind}")
     async def connector(kind: str) -> dict[str, Any]:
         return connector_view(connector_registry.get_spec(kind))
+
+    @router.get("/outlook/stores")
+    async def outlook_stores() -> dict[str, Any]:
+        from shovel.services.outlook import outlook_stores
+
+        return {"items": [store.model_dump() for store in await outlook_stores()]}
+
+    @router.get("/outlook/folders")
+    async def outlook_folders(
+        store_id: str = Query(min_length=1, max_length=4096),
+        parent_id: str | None = Query(None, min_length=1, max_length=4096),
+    ) -> dict[str, Any]:
+        from shovel.services.outlook import outlook_folders
+
+        return {"items": [folder.model_dump() for folder in await outlook_folders(store_id, parent_id)]}
 
     @router.get("/resources")
     async def resources(

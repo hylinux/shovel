@@ -38,9 +38,10 @@ pipeline 一边改协议。
 from __future__ import annotations
 
 from collections.abc import AsyncIterator, Iterable, Mapping
+from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from enum import StrEnum
-from typing import Any, ClassVar, Protocol
+from typing import Any, ClassVar, Protocol, runtime_checkable
 
 from pydantic import BaseModel, SecretStr
 
@@ -314,3 +315,18 @@ class Connector(Protocol):
         其余实现应抛 :class:`ConnectorCapabilityError`。
         """
         ...
+
+
+@runtime_checkable
+class ClosableConnector(Protocol):
+    async def aclose(self) -> None: ...
+
+
+@asynccontextmanager
+async def connector_session(connector: Connector) -> AsyncIterator[Connector]:
+    """Release optional scan-owned resources, including on failure or cancellation."""
+    try:
+        yield connector
+    finally:
+        if isinstance(connector, ClosableConnector):
+            await connector.aclose()

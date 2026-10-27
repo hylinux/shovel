@@ -27,7 +27,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
-from typing import Any, ClassVar, Protocol
+from typing import Any, ClassVar, Literal, Protocol
 
 from shovel.domain.enums import BlockKind, DocClass
 
@@ -125,6 +125,7 @@ class ParseHint:
     mime: str | None = None
     size_bytes: int | None = None
     max_chars: int = DEFAULT_MAX_CHARS
+    content_format: Literal["outlook-mail-v1"] | None = None
 
     @property
     def suffix(self) -> str:

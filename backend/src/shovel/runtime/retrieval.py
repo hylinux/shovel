@@ -10,6 +10,7 @@ from shovel.db.model.config import Resource
 from shovel.db.model.content import Chunk, Document
 from shovel.db.model.retrieval import RetrievalLog
 from shovel.domain.enums import (
+    DocClass,
     DocumentLifecycleState,
     DocumentPipeState,
     Granularity,
@@ -172,6 +173,16 @@ class RetrievalService:
                             "text": (parent.text_ if parent else chunk.text_)[:4000],
                             "score": scores[identifier],
                             "locator": chunk.chunk_meta,
+                            **(
+                                {
+                                    "email": {
+                                        name: document.source_meta.get(name)
+                                        for name in ("sender", "to", "sent_at", "received_at", "folder_path")
+                                    }
+                                }
+                                if document.doc_class is DocClass.EMAIL
+                                else {}
+                            ),
                         }
                     )
                     if len(hits) >= request.limit:

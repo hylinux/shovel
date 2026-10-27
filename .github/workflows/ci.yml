@@ -15,6 +15,25 @@ env:
   UV_DEFAULT_INDEX: https://pypi.org/simple
 
 jobs:
+  windows-outlook:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+      - name: Install Python 3.14 x64
+        run: uv python install 3.14-x86_64
+      - name: Sync Windows dependencies
+        run: uv sync --python 3.14-x86_64 --locked --all-extras
+      - name: Exercise Outlook contracts and shared pipeline without a mailbox
+        run: >-
+          uv run --locked pytest --no-cov
+          backend\tests\test_outlook.py
+          backend\tests\test_parsers.py
+          backend\tests\test_chunker.py
+          backend\tests\test_scan_pipeline.py
+
   quality:
     runs-on: ubuntu-latest
     steps:

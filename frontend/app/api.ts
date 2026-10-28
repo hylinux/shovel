@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useReducer, useRef, useState } from "react";
 import { forgetPendingRequest, makePendingRequest, savePendingRequest, type PendingRequest } from "./request-recovery";
+import { runAgentMessage, type AgentMessageInput } from "./agent-client";
 
 export type Status = { service: string; workspace_id: string; embedding_configured: boolean; model_configured: boolean; model_name: string; memory_configured: boolean };
 export type UnixSeconds = number;
@@ -125,6 +126,32 @@ export function useAction() {
     }
   }, []);
   return { run, busy, error, notice, setNotice };
+}
+
+export function useAgentAction() {
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const [text, setText] = useState("");
+  const [tool, setTool] = useState("");
+  const controller = useRef<AbortController | null>(null);
+  useEffect(() => () => controller.current?.abort(), []);
+  const run = useCallback(async (conversationId: string, input: AgentMessageInput): Promise<boolean> => {
+    if (controller.current) return false;
+    const request = new AbortController();
+    controller.current = request;
+    setBusy(true); setError(""); setText(""); setTool("");
+    try {
+      await runAgentMessage("/api/v1/agent", conversationId, input, request.signal, setText, setTool);
+      return true;
+    } catch (error) {
+      if (!request.signal.aborted) setError(`${errorText(error)} Check conversation history before resending.`);
+      return false;
+    } finally {
+      if (!request.signal.aborted) { setBusy(false); setText(""); setTool(""); }
+      controller.current = null;
+    }
+  }, []);
+  return { run, busy, error, text, tool };
 }
 
 export function date(value?: UnixSeconds | null) {

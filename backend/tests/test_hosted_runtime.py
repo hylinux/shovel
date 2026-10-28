@@ -28,8 +28,8 @@ from shovel.db.model.runtime import ChatMessage, Conversation, Operation
 from shovel.domain.enums import JobState, ScanMode
 from shovel.pipeline.embedder import build_embedder
 from shovel.pipeline.scan_service import ScanService
+from shovel.runtime.agent import model_endpoint
 from shovel.runtime.api import configure_api
-from shovel.runtime.chat import HttpChatModel
 from shovel.runtime.client import execute_command
 from shovel.runtime.diagnostics import development_logging, trace, trace_context
 from shovel.runtime.errors import RuntimeFailure
@@ -48,6 +48,7 @@ def settings_at(path: Path) -> AppSettings:
         {
             "database": {"url": f"sqlite+aiosqlite:///{(path / 'runtime.db').as_posix()}"},
             "zvec": {"knowledge_path": str(path / "vectors"), "dim": 4, "log_dir": str(path / "logs")},
+            "agent": {"workspace_path": str(path / "workspace")},
             "model": {
                 "model_provider_type": "openai",
                 "base_endpoint": "http://model.invalid/v1",
@@ -121,11 +122,15 @@ async def test_dev_diagnostics_trace_runtime_without_logging_payloads(
     (directory / "note.txt").write_text("Shovel private-document-body", encoding="utf-8")
     runtime.settings.log_level = "ERROR" if development else "DEBUG"
     runtime.settings.memory.embedder.model = "test-memory"
-    runtime.memory._memory = FakeMemory()
-    runtime.chat.model._client = httpx.AsyncClient(
+    runtime.memory._memory = FakeMemory(runtime.memory.scope())
+    runtime.chat.agent._client = httpx.AsyncClient(
         transport=httpx.MockTransport(
             lambda _request: httpx.Response(
-                200, json={"choices": [{"message": {"content": "private-model-answer [1]"}}]}
+                200,
+                json={
+                    "created": 1,
+                    "choices": [{"message": {"role": "assistant", "content": "private-model-answer [1]"}}],
+                },
             )
         )
     )
@@ -440,7 +445,7 @@ async def test_legacy_operation_migration_preserves_rows_and_is_repeatable(tmp_p
         async with create_async_session_factory(engine)() as session:
             row = await session.get(Operation, "legacy")
             assert row is not None and row.result == {"completed": 1} and row.request_key is None
-            assert list(await session.scalars(select(SchemaMigration.version))) == [1, 2, 3]
+            assert list(await session.scalars(select(SchemaMigration.version))) == [1, 2, 3, 4]
     finally:
         await context.aclose()
 
@@ -802,10 +807,16 @@ async def test_chat_citations_persist_without_memory(
         assert request.headers["authorization"] == f"Bearer {runtime.settings.model.security_key}"
         captured.append(json.loads(request.content))
         return httpx.Response(
-            200, json={"choices": [{"message": {"content": "Shovel uses a durable queue [1]."}}]}
+            200,
+            json={
+                "created": 1,
+                "choices": [
+                    {"message": {"role": "assistant", "content": "Shovel uses a durable queue [1]."}}
+                ],
+            },
         )
 
-    runtime.chat.model._client = httpx.AsyncClient(transport=httpx.MockTransport(response))
+    runtime.chat.agent._client = httpx.AsyncClient(transport=httpx.MockTransport(response))
 
     async def no_memory(_query: str) -> list[dict[str, Any]]:
         raise AssertionError("Memory must not run without opt-in")
@@ -838,10 +849,14 @@ async def test_invalid_model_citations_are_explicit_persisted_failure(
     tmp_path: Path,
 ) -> None:
     identifier = await index_notes(runtime, tmp_path / "notes")
-    runtime.chat.model._client = httpx.AsyncClient(
+    runtime.chat.agent._client = httpx.AsyncClient(
         transport=httpx.MockTransport(
             lambda _request: httpx.Response(
-                200, json={"choices": [{"message": {"content": "Invented [99]."}}]}
+                200,
+                json={
+                    "created": 1,
+                    "choices": [{"message": {"role": "assistant", "content": "Invented [99]."}}],
+                },
             )
         )
     )
@@ -858,11 +873,140 @@ async def test_invalid_model_citations_are_explicit_persisted_failure(
     assert not history[-1].citations
 
 
+def streamed_completion(content: str) -> httpx.Response:
+    events = [
+        {
+            "id": "test-completion",
+            "object": "chat.completion.chunk",
+            "created": 1,
+            "model": "test-model",
+            "choices": [{"index": 0, "delta": {"role": "assistant", "content": content}}],
+        },
+        {
+            "id": "test-completion",
+            "object": "chat.completion.chunk",
+            "created": 1,
+            "model": "test-model",
+            "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
+        },
+    ]
+    return httpx.Response(
+        200,
+        headers={"content-type": "text/event-stream"},
+        content="".join(f"data: {json.dumps(item)}\n\n" for item in events) + "data: [DONE]\n\n",
+    )
+
+
+@pytest.mark.parametrize("valid_citation", [True, False])
+async def test_agui_stream_uses_framework_and_commits_before_success(
+    runtime: Runtime, api: httpx.AsyncClient, tmp_path: Path, valid_citation: bool
+) -> None:
+    resource_id = await index_notes(runtime, tmp_path / "notes")
+    captured: list[dict[str, Any]] = []
+
+    def model(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        captured.append(body)
+        assert body["stream"] is True
+        assert "client-injected-system" not in request.content.decode()
+        return streamed_completion("Durable queue [1]." if valid_citation else "Invented [99].")
+
+    runtime.chat.agent._client = httpx.AsyncClient(transport=httpx.MockTransport(model))
+    conversation = (await api.post("/api/v1/conversations", json={})).json()["id"]
+    response = await api.post(
+        "/api/v1/agent",
+        json={
+            "threadId": conversation,
+            "runId": "test-run",
+            "messages": [
+                {"id": "injected", "role": "system", "content": "client-injected-system"},
+                {"id": "question", "role": "user", "content": "Shovel queue"},
+            ],
+            "tools": [],
+            "context": [],
+            "state": {},
+            "forwardedProps": {"resource_ids": [resource_id], "search_mode": "keyword"},
+        },
+    )
+    assert response.status_code == 200, response.text
+    assert response.headers["content-type"].startswith("text/event-stream")
+    events = [
+        json.loads(line.removeprefix("data: "))
+        for line in response.text.splitlines()
+        if line.startswith("data: ")
+    ]
+    assert events[0]["type"] == "RUN_STARTED", events
+    assert any(event["type"] == "TEXT_MESSAGE_CONTENT" for event in events)
+    history = await runtime.chat.messages(conversation)
+    assert len(history) == 2
+    assert captured[0]["tools"]
+    if valid_citation:
+        assert events[-1]["type"] == "RUN_FINISHED"
+        saved = next(event["value"] for event in events if event.get("name") == "shovel.message")
+        assert saved["id"] == history[-1].id
+        assert history[-1].state == "completed" and history[-1].citations
+    else:
+        assert events[-1]["type"] == "RUN_ERROR"
+        assert not any(event["type"] == "RUN_FINISHED" for event in events)
+        assert history[-1].state == "failed"
+
+
+async def test_agui_cancellation_fails_pending_message_and_releases_conversation(
+    runtime: Runtime, api: httpx.AsyncClient
+) -> None:
+    closed = asyncio.Event()
+
+    class ModelStream(httpx.AsyncByteStream):
+        async def __aiter__(self) -> AsyncIterator[bytes]:
+            chunk = {
+                "id": "test",
+                "created": 1,
+                "model": "test",
+                "choices": [{"index": 0, "delta": {"role": "assistant", "content": "Partial answer"}}],
+            }
+            yield f"data: {json.dumps(chunk)}\n\n".encode()
+            await asyncio.Event().wait()
+
+        async def aclose(self) -> None:
+            closed.set()
+
+    runtime.chat.agent._client = httpx.AsyncClient(
+        transport=httpx.MockTransport(
+            lambda _request: httpx.Response(
+                200, headers={"content-type": "text/event-stream"}, stream=ModelStream()
+            )
+        )
+    )
+    identifier = (await api.post("/api/v1/conversations", json={})).json()["id"]
+    stream = runtime.chat.stream(identifier, MessageInput(content="Question"), "cancel-run")
+    async with asyncio.timeout(10):
+        async for event in stream:
+            if event.type == "TEXT_MESSAGE_CONTENT":
+                break
+        await stream.aclose()
+    assert closed.is_set()
+    messages = await runtime.chat.messages(identifier)
+    assert messages[-1].state == "failed"
+    await runtime.chat.maintain(identifier, title="Unlocked")
+
+
+async def test_agui_pre_run_failure_has_valid_terminal_events(
+    runtime: Runtime, api: httpx.AsyncClient
+) -> None:
+    identifier = (await api.post("/api/v1/conversations", json={})).json()["id"]
+    runtime.settings.model.model_name = ""
+    events = [
+        event
+        async for event in runtime.chat.stream(identifier, MessageInput(content="Question"), "failed-run")
+    ]
+    assert [event.type for event in events] == ["RUN_STARTED", "RUN_ERROR"]
+    assert await runtime.chat.messages(identifier) == []
+
+
 class FakeMemory:
-    def __init__(self) -> None:
-        self.rows = [
-            {"id": "owned", "memory": "User prefers Chinese", "user_id": "local-user", "agent_id": "shovel"}
-        ]
+    def __init__(self, scope: dict[str, str]) -> None:
+        self.scope = scope
+        self.rows = [{"id": "owned", "memory": "User prefers Chinese", **scope}]
         self.messages: list[dict[str, str]] = []
         self.threads: set[int] = set()
         self.closed = False
@@ -870,13 +1014,17 @@ class FakeMemory:
 
     def search(self, query: str, *, filters: dict[str, str], top_k: int) -> dict[str, Any]:
         self.threads.add(threading.get_ident())
-        assert filters == {"user_id": "local-user", "agent_id": "shovel"}
-        return {"results": self.rows[:top_k]}
+        assert filters["user_id"] == self.scope["user_id"]
+        return {
+            "results": [row for row in self.rows if all(row.get(k) == v for k, v in filters.items())][:top_k]
+        }
 
     def get_all(self, *, filters: dict[str, str], top_k: int) -> dict[str, Any]:
         self.threads.add(threading.get_ident())
-        assert filters["agent_id"] == "shovel"
-        return {"results": self.rows[:top_k]}
+        assert filters["agent_id"] == self.scope["agent_id"]
+        return {
+            "results": [row for row in self.rows if all(row.get(k) == v for k, v in filters.items())][:top_k]
+        }
 
     def add(self, messages: list[dict[str, str]], **scope: str) -> None:
         self.threads.add(threading.get_ident())
@@ -889,6 +1037,9 @@ class FakeMemory:
     def delete(self, identifier: str) -> None:
         self.rows = [row for row in self.rows if row["id"] != identifier]
 
+    def delete_all(self, **scope: str) -> None:
+        self.rows = [row for row in self.rows if not all(row.get(k) == v for k, v in scope.items())]
+
     def close(self) -> None:
         self.closed = True
 
@@ -899,16 +1050,19 @@ async def test_memory_opt_in_recall_write_list_forget(
     tmp_path: Path,
 ) -> None:
     identifier = await index_notes(runtime, tmp_path / "notes")
-    fake = FakeMemory()
+    fake = FakeMemory(runtime.memory.scope())
     runtime.settings.memory.embedder.model = "memory-test"
     runtime.memory._memory = fake
     prompts: list[dict[str, Any]] = []
 
     def response(request: httpx.Request) -> httpx.Response:
         prompts.append(json.loads(request.content))
-        return httpx.Response(200, json={"choices": [{"message": {"content": "持久队列 [1]。"}}]})
+        return httpx.Response(
+            200,
+            json={"created": 1, "choices": [{"message": {"role": "assistant", "content": "持久队列 [1]。"}}]},
+        )
 
-    runtime.chat.model._client = httpx.AsyncClient(transport=httpx.MockTransport(response))
+    runtime.chat.agent._client = httpx.AsyncClient(transport=httpx.MockTransport(response))
     conversation = (await api.post("/api/v1/conversations")).json()
     response = await api.post(
         f"/api/v1/conversations/{conversation['id']}/messages",
@@ -927,6 +1081,62 @@ async def test_memory_opt_in_recall_write_list_forget(
     assert (await api.get("/api/v1/memories")).json()["items"] == []
     fake.rows = [{"id": "foreign", "memory": "other", "user_id": "other", "agent_id": "shovel"}]
     assert (await api.delete("/api/v1/memories/foreign")).status_code == 404
+
+
+async def test_mem0_short_term_isolation_dual_write_and_conversation_cleanup(
+    runtime: Runtime, api: httpx.AsyncClient
+) -> None:
+    fake = FakeMemory(runtime.memory.scope())
+    fake.rows.extend(
+        [
+            {"id": "short-a", "memory": "Only in a", **runtime.memory.scope("a")},
+            {"id": "short-b", "memory": "Only in b", **runtime.memory.scope("b")},
+        ]
+    )
+    runtime.settings.memory.embedder.model = "test"
+    runtime.memory._memory = fake
+    recalled = await runtime.memory.search("context", conversation_id="a")
+    assert {row["id"] for row in recalled} == {"owned", "short-a"}
+    writes: list[dict[str, str]] = []
+
+    def add(messages: list[dict[str, str]], **scope: str) -> None:
+        assert messages == [{"role": "user", "content": "Remember my preference"}]
+        writes.append(scope)
+
+    fake.add = add  # type: ignore[method-assign]
+    await runtime.memory.remember("Remember my preference", conversation_id="a")
+    assert writes == [runtime.memory.scope("a"), runtime.memory.scope()]
+    async with runtime.sessions() as session:
+        session.add(Conversation(id="a", has_short_memory=True))
+        await session.commit()
+    assert (await api.delete("/api/v1/conversations/a")).status_code == 200
+    assert {row["id"] for row in fake.rows} == {"owned", "short-b"}
+    other_settings = runtime.settings.model_copy(deep=True)
+    other_settings.agent.workspace_path = runtime.settings.agent.workspace / "other"
+    other = MemoryService(other_settings)
+    try:
+        assert other.scope()["agent_id"] != runtime.memory.scope()["agent_id"]
+    finally:
+        await other.close()
+
+
+async def test_failed_short_memory_cleanup_keeps_conversation(
+    runtime: Runtime, api: httpx.AsyncClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    conversation = (await api.post("/api/v1/conversations", json={})).json()["id"]
+    async with runtime.sessions() as session:
+        await session.execute(
+            update(Conversation).where(Conversation.id == conversation).values(has_short_memory=True)
+        )
+        await session.commit()
+
+    async def unavailable(_identifier: str) -> None:
+        raise RuntimeFailure("Memory unavailable", status=502)
+
+    monkeypatch.setattr(runtime.memory, "forget_conversation", unavailable)
+    response = await api.delete(f"/api/v1/conversations/{conversation}")
+    assert response.status_code == 502
+    assert (await runtime.chat.conversation(conversation)).id == conversation
 
 
 async def test_local_api_protection_and_safe_errors(api: httpx.AsyncClient) -> None:
@@ -989,7 +1199,7 @@ async def test_existing_database_upgrade_and_fts_backfill(tmp_path: Path) -> Non
         await upgrade_database(engine)
         await upgrade_database(engine)
         async with create_async_session_factory(engine)() as session:
-            assert list(await session.scalars(select(SchemaMigration.version))) == [1, 2, 3]
+            assert list(await session.scalars(select(SchemaMigration.version))) == [1, 2, 3, 4]
             assert await session.scalar(text("SELECT count(*) FROM chunk_search")) == 1
             assert (
                 await session.scalar(
@@ -1047,9 +1257,9 @@ async def test_one_shot_host_lifecycle_and_cli_submission(tmp_path: Path) -> Non
 @pytest.mark.parametrize(
     "provider,expected",
     [
-        ("openai", "https://api.openai.com/v1/chat/completions"),
-        ("ollama", "http://127.0.0.1:11434/api/chat"),
-        ("deepseek", "https://api.deepseek.com/v1/chat/completions"),
+        ("openai", "https://api.openai.com/v1"),
+        ("ollama", "http://127.0.0.1:11434/v1"),
+        ("deepseek", "https://api.deepseek.com/v1"),
     ],
 )
 def test_chat_model_provider_endpoints(provider: str, expected: str) -> None:
@@ -1061,7 +1271,7 @@ def test_chat_model_provider_endpoints(provider: str, expected: str) -> None:
             "model_name": "test",
         }
     )
-    assert HttpChatModel(settings)._request([{"role": "user", "content": "hello"}])[0] == expected
+    assert model_endpoint(settings) == expected
 
 
 async def test_completed_job_receipt_recovers_without_reexecution(runtime: Runtime, tmp_path: Path) -> None:
@@ -1160,9 +1370,17 @@ async def test_context_budget_counts_escaped_evidence_and_bounds_history(
             ]
         }
 
-    async def complete(messages: list[dict[str, str]]) -> str:
-        prompts.append(messages)
-        return "Bounded local evidence [1]."
+    def complete(request: httpx.Request) -> httpx.Response:
+        prompts.append(json.loads(request.content)["messages"])
+        return httpx.Response(
+            200,
+            json={
+                "created": 1,
+                "choices": [{"message": {"role": "assistant", "content": "Bounded local evidence [1]."}}],
+            },
+        )
+
+    runtime.chat.agent._client = httpx.AsyncClient(transport=httpx.MockTransport(complete))
 
     from unittest.mock import patch
 
@@ -1172,7 +1390,6 @@ async def test_context_budget_counts_escaped_evidence_and_bounds_history(
         await session.commit()
     with (
         patch.object(runtime.retrieval, "search", search),
-        patch.object(runtime.chat.model, "complete", complete),
     ):
         for _ in range(3):
             answer = await runtime.chat.send(conversation.id, MessageInput(content="Shovel"))
@@ -1183,6 +1400,60 @@ async def test_context_budget_counts_escaped_evidence_and_bounds_history(
         with pytest.raises(RuntimeFailure, match="上下文预算"):
             await runtime.chat.send(conversation.id, MessageInput(content="x" * 1900))
         assert (await runtime.chat.messages(conversation.id))[-1].state == "failed"
+
+
+async def test_agent_context_budget_counts_native_tool_results(
+    runtime: Runtime, api: httpx.AsyncClient
+) -> None:
+    runtime.settings.model.max_input_chars = 2000
+    runtime.settings.agent.enable_python_extensions = True
+    functions = runtime.settings.agent.workspace / "functions"
+    functions.mkdir(parents=True)
+    (functions / "oversized.py").write_text(
+        "def oversized() -> str:\n"
+        "    '''Return a large result for context-budget testing.'''\n"
+        "    return 'x' * 5000\n"
+        "tools = [oversized]\n",
+        encoding="utf-8",
+    )
+    requests = 0
+
+    def model(_request: httpx.Request) -> httpx.Response:
+        nonlocal requests
+        requests += 1
+        assert requests == 1, "Oversized tool output must not reach the model"
+        return httpx.Response(
+            200,
+            json={
+                "id": "test",
+                "created": 1,
+                "model": "test",
+                "choices": [
+                    {
+                        "index": 0,
+                        "finish_reason": "tool_calls",
+                        "message": {
+                            "role": "assistant",
+                            "content": None,
+                            "tool_calls": [
+                                {
+                                    "id": "oversized-call",
+                                    "type": "function",
+                                    "function": {"name": "oversized", "arguments": "{}"},
+                                }
+                            ],
+                        },
+                    }
+                ],
+            },
+        )
+
+    runtime.chat.agent._client = httpx.AsyncClient(transport=httpx.MockTransport(model))
+    identifier = (await api.post("/api/v1/conversations", json={})).json()["id"]
+    with pytest.raises(RuntimeFailure, match="上下文"):
+        await runtime.chat.send(identifier, MessageInput(content="Use oversized"))
+    assert requests == 1
+    assert (await runtime.chat.messages(identifier))[-1].state == "failed"
 
 
 async def test_real_mem0_local_qdrant_recall_persistence_and_forget(
@@ -1219,11 +1490,16 @@ async def test_real_mem0_local_qdrant_recall_persistence_and_forget(
     info = await asyncio.to_thread(init_memory_store, runtime.settings.memory)
     assert info.created
     assert os.environ["MEM0_TELEMETRY"] == "false"
-    await runtime.memory.remember("I prefer tea.")
+    await runtime.memory.remember("I prefer tea.", conversation_id="tea-conversation")
     rows = await runtime.memory.list()
     assert len(rows) == 1
     identifier = rows[0]["id"]
     assert (await runtime.memory.search("tea"))[0]["id"] == identifier
+    recalled = await runtime.memory.search("tea", conversation_id="tea-conversation")
+    assert len(recalled) == 2
+    assert len(await runtime.memory.search("tea", conversation_id="another-conversation")) == 1
+    await runtime.memory.forget_conversation("tea-conversation")
+    assert len(await runtime.memory.search("tea", conversation_id="tea-conversation")) == 1
     await runtime.memory.close()
     runtime.memory = MemoryService(runtime.settings)
     assert (await runtime.memory.list())[0]["id"] == identifier

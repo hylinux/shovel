@@ -27,8 +27,8 @@ This writes a static application to `frontend\out`. Serve those files from the b
 
 - **Resources:** add a named local folder with an optional description. Creation requests verification but never starts a scan. Verify, pause/resume, revoke, or explicitly confirm deletion. Configure incremental, full-sweep, or targeted scans; embeddings default to the runtime's configured capability. Keyword indexing works without vectors.
 - **Background tasks:** inspect scan stages, counters and document events, request cancellation, inspect/retry operations, and queue index cleanup. Resources, jobs, operations and visible events refresh about every two seconds without clearing forms. Requests are serialized per poller and cancelled on unmount.
-- **Knowledge chat:** create and revisit persisted conversations, select resources, choose retrieval mode, and inspect numbered source excerpts. Empty resource selection means all accessible resources. Search documents works without a chat model. Chat is synchronous and shows a waiting state; history is reloaded even after failed model calls.
-- **Memory:** off by default and never fetched until the user opens the saved Memory section. Opting in can send user statements to configured mem0 models and persist facts. Forgetting a fact requires confirmation.
+- **Knowledge chat:** create and revisit persisted conversations, select resources, choose retrieval mode, and inspect numbered source excerpts. Empty resource selection means all accessible resources. The official AG-UI `HttpAgent` SDK streams the MAF Agent's text and tool activity; history is reloaded after success or failure. Search documents works without a chat model.
+- **Memory:** off by default. Opting in sends user statements to configured mem0 models for separate conversation-short-term and workspace-long-term facts. Deleting a conversation clears its short-term facts but keeps long-term facts. Saved Memory lists long-term facts; forgetting one requires confirmation and does not erase any short-term copy.
 
 Configure `[model]`, `[embedding]`, and optional `[memory]` providers in the backend's `settings.toml`. This interface neither reads nor edits credentials. Local-first storage does not imply that configured model providers run locally.
 
@@ -36,7 +36,13 @@ Configure `[model]`, `[embedding]`, and optional `[memory]` providers in the bac
 
 All fetches use relative `/api/v1` paths. List endpoints return `{items: [...]}`. Resource mutations, scans, retries, and index cleanup return an Operation with HTTP 202; conversations return HTTP 201 on creation, and message creation returns the persisted Message after the model call. IDs are URL-encoded. All `*_at` timestamps are numeric Unix seconds; the shared date formatter multiplies by 1,000 before constructing a JavaScript Date. Missing or invalid dates display `—`; API list ordering is preserved without client-side date sorting. Scan progress is a fraction from 0 to 1. Cancellation returns a Job; memory deletion returns `{deleted: true}`. Errors support `{error: {code, message, hint?}}` and FastAPI validation `detail`.
 
-Endpoints used: `/status`, `/connectors`, `/resources` and its verify/pause/resume/revoke/scans actions, `/jobs` and events/cancel, `/operations` and retry, `/index/cleanup`, `/conversations` and messages, `/search`, `/memories`. The local folder connector uses `config.root_path`. Document paths and source content render as text, never raw HTML or executable file links.
+Chat uses `POST /agent` with AG-UI `threadId`/`runId`, the current user message,
+and scope/Memory options in `forwardedProps`. Only `RUN_FINISHED` confirms
+persistence; `RUN_ERROR` and interrupted connections require inspecting history
+before resending. Switching conversations cancels the previous UI subscription.
+No CopilotKit/Next.js server runtime is needed.
+
+Endpoints used: `/status`, `/connectors`, `/resources` and its verify/pause/resume/revoke/scans actions, `/jobs` and events/cancel, `/operations` and retry, `/index/cleanup`, `/conversations` and messages, `/agent`, `/search`, `/memories`. The local folder connector uses `config.root_path`. Document paths and source content render as text, never raw HTML or executable file links.
 
 ## Validation
 

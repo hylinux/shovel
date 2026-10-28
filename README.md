@@ -40,7 +40,9 @@ The current application includes resource management, durable background scans,
 index recovery/cleanup, keyword/vector/hybrid retrieval, a persistent single-Agent
 chat with numbered local citations, and opt-in Memory. The light Web workbench has
 Resources, Background tasks, and Knowledge chat views. This is a single-owner
-runtime, not yet a multi-Agent orchestration or scheduling platform.
+runtime. Its main Agent uses Microsoft Agent Framework (MAF), with workspace
+Skills, MCP tools, and opt-in Python function/Agent/Workflow extensions. It is not
+a hosted multi-user service or a scheduling platform.
 
 Development requires Python 3.14+, Git, and Node.js 22.18+ (22 LTS in CI).
 `py-generic-host` is pinned to a Git commit in both source and wheel dependencies;
@@ -61,7 +63,7 @@ uv run shovel run dev
 
 `run dev` starts **two separate services**: Next.js on `http://127.0.0.1:3000`
 and the Generic Host/FastAPI backend on `http://127.0.0.1:9999`. Next.js proxies
-`/api/*` to the backend, so the browser uses same-origin REST requests. Top-level
+`/api/*` to the backend, so the browser uses same-origin REST and AG-UI requests. Top-level
 configuration keys `dev_frontend_port`, `dev_http_host`, and `dev_http_port` control
 these addresses. Both services stop when either exits or the command is stopped.
 
@@ -209,8 +211,117 @@ source number fails the answer explicitly; absent evidence or omitted citations
 produce a warning. Number validation does not prove that every model claim is
 supported: inspect the citation excerpts. Remote chat/embedding providers receive
 the question and relevant excerpts; use local models for fully local processing.
-Answers are currently non-streaming and there are no Agent tools or multi-Agent
-execution.
+The Web chat streams AG-UI events through `POST /api/v1/agent`, on the existing
+FastAPI port (9999 in development, 8080 in production). There is no separate
+Agent listener on `agent_port`. The existing message POST remains a non-streaming
+compatibility endpoint, backed by the same MAF Agent.
+
+## Main Agent and workspace extensions
+
+The main Agent uses MAF's `Agent`, Chat Completions client, tool-calling loop,
+`AgentSession`, context-provider hooks, native sliding-window compaction, and
+`SkillsProvider`. A Shovel context provider supplies bounded SQLite conversation
+history, existing RAG evidence, and optional scoped mem0 recall; its after-run
+hook validates citations and writes user-only memories. Tool transcripts and
+loaded Skill instructions are run-local; SQLite retains user/assistant turns and
+cited excerpts across restarts. This is not a custom HTTP model execution loop.
+`model.max_input_chars` bounds text context, not tool schemas or exact tokens.
+Oversized Skill/tool context fails explicitly instead of silently exceeding it.
+
+By default, the workspace is `%USERPROFILE%\.shovel\workspaces\default` on
+Windows. `shovel init` creates `skills`, `functions`, and `pipeline` below the
+configured workspace. Agent extensions are loaded lazily on the first chat;
+restart the Host after changing them or `mcp.json`.
+
+```toml
+[agent]
+workspace_path = '~\.shovel\workspaces\default'
+enable_python_extensions = false
+max_tool_iterations = 10
+```
+
+The built-in tools are read-only: `search` uses the existing RAG and respects the
+request's resource selection/retrieval mode, `list_resources` lists resources, and
+`list_extensions` reports configured extension directories. Tool searches share
+the current answer's numbered citation registry. Resource writes, scans, and
+deletions remain in the existing management interfaces, not Agent built-ins.
+
+**Skills:** put each skill in `skills\<name>\SKILL.md`, with the standard YAML
+`name` and `description` frontmatter. MAF advertises metadata and loads the body
+and reference files on demand using its native tools; it does not concatenate
+every Skill into the system prompt. Python files in a skill's `scripts` directory
+can run only when `enable_python_extensions = true`, with string-array arguments
+and a 30-second execution timeout.
+
+**Functions:** when Python extensions are explicitly enabled, each top-level
+`functions\*.py` module exports a `tools` list of MAF `@tool` functions or typed
+Python callables with descriptive docstrings. For example:
+
+```python
+from agent_framework import tool
+
+
+@tool
+def double(value: int) -> int:
+    """Double an integer."""
+    return value * 2
+
+
+tools = [double]
+```
+
+**Agents/workflows:** each top-level `pipeline\*.py` module exports
+`create_agent(client)` (sync or async). It receives the configured MAF chat client
+and returns a MAF `Agent` or `Workflow`. For example:
+
+```python
+from agent_framework import Agent
+
+
+def create_agent(client):
+    return Agent(
+        client=client,
+        name="editor",
+        description="Review and improve the supplied text.",
+        instructions="Improve the supplied text without inventing facts.",
+    )
+```
+
+The main Agent can invoke it as `pipeline_<module_name>` through MAF's native
+`as_tool()` support. A Workflow must be compatible with MAF's `as_agent()`:
+its start executor accepts `list[Message]`. Child Agents configure their own
+instructions, tools, context providers, and lifecycle; they do not automatically
+inherit the main Agent's RAG/Memory context.
+
+**MCP:** create `mcp.json` at the workspace root with a `mcpServers` object.
+Supported transports are stdio (`command`/`args`/`env`) and Streamable HTTP
+(`url`/`headers`). Each entry optionally accepts `type` (`stdio` or `http`),
+`disabled`, and `allowed_tools`. For example:
+
+```json
+{
+  "mcpServers": {
+    "documents": {
+      "type": "http",
+      "url": "https://mcp.example.com/mcp",
+      "headers": {"Authorization": "Bearer ${DOCUMENTS_MCP_TOKEN}"},
+      "allowed_tools": ["search"]
+    }
+  }
+}
+```
+
+`${NAME}` references an environment variable; a missing reference is an explicit
+configuration error. MCP tools are namespaced by server. Shovel uses MAF's native
+MCP connections and closes them with the Runtime. Invalid extension/MCP
+configuration fails chat explicitly rather than silently dropping capabilities.
+
+**Trust boundary:** enabling Python extensions grants the local modules and
+Skill scripts the Shovel process user's permissions. Configuring a stdio MCP
+server authorizes launching that command; remote MCP servers receive tool
+arguments. These are trusted extensions, not sandboxed code or read-only tools.
+Review them and restrict MCP tool lists before enabling them. Shovel does not
+install user extensions or dependencies automatically.
 
 ## Opt-in Memory
 
@@ -230,8 +341,20 @@ answers. Recalled Memory is not a local-document citation. The workbench exposes
 list/forget controls. Memory errors are visible; a write failure keeps the
 generated answer but attaches a persisted warning.
 
-The current fixed owner scope is `local-user` / `shovel`; there is no multi-user
-identity system. Deleting a Memory item removes that mem0 record, not the source
+Enabled requests read and write **both** conversation-scoped short-term mem0
+facts and workspace-scoped long-term mem0 facts. Short-term facts are isolated
+by conversation ID and removed when that conversation is deleted; long-term
+facts survive and are managed through the saved Memory list/forget controls.
+There is no TTL or automatic promotion. Both writes use only the user's message
+and can incur separate extraction/embedding calls. With Memory off, neither
+scope is read or written; ordinary SQLite conversation history still works.
+
+The owner is `local-user`; the default workspace preserves the existing `shovel`
+long-term scope, while other workspace paths use separate hashed Agent scopes.
+Short-term scopes additionally use mem0's `run_id`. There is no multi-user
+identity system. If short-term cleanup fails, conversation deletion fails and can
+be retried rather than claiming that memories were erased. Deleting a long-term
+Memory item removes that mem0 record, not a short-term copy or the source
 message from persisted conversation history or storage backups. Configured remote
 Memory LLMs/embedders receive user text; Qdrant can be local, server, or cloud as
 configured.
@@ -255,6 +378,7 @@ completed resource. Poll `/operations/{id}` for the result.
 | Scans | `GET /jobs`, `GET /jobs/{id}`, `GET /jobs/{id}/events`, `POST /jobs/{id}/cancel` |
 | Index | `GET /index/cleanup`, `POST /index/cleanup`, `POST /search` |
 | Chat | `GET/POST /conversations`, `PATCH/DELETE /conversations/{id}`, `GET/POST /conversations/{id}/messages` |
+| Agent | `POST /agent` accepts AG-UI `RunAgentInput` and streams SSE |
 | History | `POST /history/prune` explicitly prunes bounded, old terminal history |
 | Memory | `GET /memories`, `DELETE /memories/{id}` |
 | Credentials | `POST /credentials` writes the OS keyring and returns an `identity_ref` |
@@ -271,6 +395,13 @@ All durable writes accept `Idempotency-Key` (1–128 ASCII letters/digits or
 receipt, even after resource/profile deletion; different arguments return 409.
 Do not use a new key just because a response was lost. Chat generation and
 Memory writes do not promise exactly-once execution.
+For AG-UI, `threadId` is an existing conversation ID. `forwardedProps` supplies
+`resource_ids`, `search_mode`, and `memory_enabled`. The server trusts only the
+latest user text, not client-supplied system messages, history, tools, or state.
+`RUN_FINISHED` is emitted only after the answer/citations/warnings are committed;
+the preceding `shovel.message` custom event contains the saved Message.
+Failures emit `RUN_ERROR`, not a successful terminal event. On disconnect, reload
+conversation history before retrying; run IDs are not idempotency receipts.
 
 The CLI records a local receipt before submission and accepts a global key:
 

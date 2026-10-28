@@ -68,6 +68,18 @@ def _upgrade(connection: Connection) -> None:
             )
         )
 
+    if 4 not in versions:
+        columns = {row[1] for row in connection.exec_driver_sql("PRAGMA table_info(conversation)")}
+        if "has_short_memory" not in columns:
+            connection.exec_driver_sql(
+                "ALTER TABLE conversation ADD COLUMN has_short_memory BOOLEAN NOT NULL DEFAULT 0"
+            )
+        connection.execute(
+            insert(SchemaMigration).values(
+                version=4, name="conversation_scoped_mem0_cleanup", applied_at=now_ts()
+            )
+        )
+
 
 async def upgrade_database(engine: AsyncEngine) -> None:
     async with engine.begin() as connection:

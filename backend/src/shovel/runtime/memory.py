@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import inspect
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
@@ -14,8 +15,6 @@ from shovel.memory.store import open_memory
 from shovel.runtime.diagnostics import trace
 from shovel.runtime.errors import NotFound, RuntimeFailure
 
-_SCOPE = {"user_id": "local-user", "agent_id": "shovel"}
-
 
 class MemoryService:
     """One lazy mem0 client on one owning thread, including embedded Qdrant."""
@@ -24,6 +23,22 @@ class MemoryService:
         self.settings = settings
         self._memory: Any = None
         self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="shovel-memory")
+
+    def scope(self, conversation_id: str | None = None) -> dict[str, str]:
+        from pathlib import Path
+
+        workspace = self.settings.agent.workspace
+        default = (Path.home() / ".shovel" / "workspaces" / "default").resolve()
+        # Preserve ownership of memories created before configurable workspaces.
+        agent_id = (
+            "shovel"
+            if workspace == default
+            else f"shovel:{hashlib.sha256(str(workspace).encode()).hexdigest()}"
+        )
+        result = {"user_id": "local-user", "agent_id": agent_id}
+        if conversation_id is not None:
+            result.update(agent_id=f"{agent_id}:short", run_id=conversation_id)
+        return result
 
     @property
     def configured(self) -> bool:
@@ -67,11 +82,13 @@ class MemoryService:
                 hint="检查 Memory 的模型、向量维度和 Qdrant 配置;本次操作未报告成功。",
             ) from exc
 
-    @staticmethod
-    def _scope_arguments(method: Callable[..., Any], limit: int) -> dict[str, Any]:
+    def _scope_arguments(
+        self, method: Callable[..., Any], limit: int, conversation_id: str | None = None
+    ) -> dict[str, Any]:
         parameters = inspect.signature(method).parameters
         # mem0 2.x moved entity arguments into filters and renamed limit to top_k.
-        result: dict[str, Any] = dict(_SCOPE) if "user_id" in parameters else {"filters": dict(_SCOPE)}
+        scope = self.scope(conversation_id)
+        result: dict[str, Any] = scope if "user_id" in parameters else {"filters": scope}
         result["top_k" if "top_k" in parameters else "limit"] = limit
         return result
 
@@ -82,18 +99,34 @@ class MemoryService:
             raise RuntimeFailure("Memory 返回了不支持的数据格式。", status=502)
         return rows
 
-    async def search(self, query: str) -> list[dict[str, Any]]:
+    async def search(self, query: str, *, conversation_id: str | None = None) -> list[dict[str, Any]]:
         def search() -> list[dict[str, Any]]:
             memory = self._get()
-            return self._items(memory.search(query, **self._scope_arguments(memory.search, 5)))
+            rows = self._items(memory.search(query, **self._scope_arguments(memory.search, 5)))
+            if conversation_id is not None:
+                short = self._items(
+                    memory.search(query, **self._scope_arguments(memory.search, 5, conversation_id))
+                )
+                rows = short + rows
+            return rows
 
         return await self._call(search)
 
-    async def remember(self, content: str) -> None:
+    async def remember(self, content: str, *, conversation_id: str | None = None) -> None:
         def add() -> None:
-            self._get().add([{"role": "user", "content": content}], **_SCOPE)
+            memory = self._get()
+            messages = [{"role": "user", "content": content}]
+            if conversation_id is not None:
+                memory.add(messages, **self.scope(conversation_id))
+            memory.add(messages, **self.scope())
 
         await self._call(add)
+
+    async def forget_conversation(self, conversation_id: str) -> None:
+        def forget() -> None:
+            self._get().delete_all(**self.scope(conversation_id))
+
+        await self._call(forget)
 
     async def list(self, limit: int = 100) -> list[dict[str, Any]]:
         def list_memories() -> list[dict[str, Any]]:
@@ -106,7 +139,9 @@ class MemoryService:
         def remove() -> None:
             memory = self._get()
             item = memory.get(identifier)
-            if not isinstance(item, dict) or any(item.get(key) != value for key, value in _SCOPE.items()):
+            if not isinstance(item, dict) or any(
+                item.get(key) != value for key, value in self.scope().items()
+            ):
                 raise NotFound("记忆", identifier)
             memory.delete(identifier)
 

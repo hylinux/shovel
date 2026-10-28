@@ -9,6 +9,9 @@ authors = [ { name = "HongWei Guo" } ]
 
 
 dependencies = [
+    "agent-framework-ag-ui>=1.6.0",
+    "agent-framework-core>=1.22.0",
+    "agent-framework-openai>=1.17.0",
     "aiosqlite>=0.22.1",
     "alembic>=1.18.5",
     "greenlet>=3.5.5",
@@ -19,9 +22,12 @@ dependencies = [
     # 资源凭据: 密钥存进操作系统凭据库, 数据库里只留一个引用字符串。
     # 没有可用后端时硬失败而不是退回明文 —— 见 services/credentials.py
     "keyring>=25.6.0",
+    "mcp>=1.24,<2",
     # 记忆子系统: mem0 负责记忆的抽取/冲突判定/失效, qdrant-client 提供
     # 它唯一可嵌入式运行的向量后端(mem0 不支持 Zvec, 所以记忆不走 Zvec)
     "mem0ai>=0.1.118",
+    # mem0 的 Ollama provider 使用原生 SDK; 主 Agent 仍通过 OpenAI 兼容接口调用。
+    "ollama>=0.6.3",
     # 文档解析器。每种格式一个库, 都是同步的 CPU 密集调用, 统一用
     # asyncio.to_thread 挪出事件循环 —— 见 pipeline/parsers/
     "openpyxl>=3.1.5",      # .xlsx
@@ -55,7 +61,7 @@ dev = [
 
 
 [[tool.uv.index]]
-url = "https://pypi.org/simple"
+url = "https://packagefeedproxy.microsoft.io/pypi/simple/"
 default = true
 
 

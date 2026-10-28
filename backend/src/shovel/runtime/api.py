@@ -1,13 +1,15 @@
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import AsyncIterator, Callable
 from typing import Annotated, Any
 from urllib.parse import urlsplit
 
 import structlog
+from ag_ui.core import RunAgentInput
+from ag_ui.encoder import EventEncoder
 from fastapi import APIRouter, Depends, FastAPI, Header, Query, Request
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import SecretStr, ValidationError
 from sqlalchemy import func, select
 from starlette.types import ASGIApp, Receive, Scope, Send
@@ -639,6 +641,31 @@ def configure_api(
     @router.post("/conversations/{identifier}/messages")
     async def message(identifier: str, body: MessageInput, rt: RuntimeDependency) -> dict[str, Any]:
         return message_view(await rt.chat.send(identifier, body))
+
+    @router.post("/agent")
+    async def agent_run(body: RunAgentInput, rt: RuntimeDependency) -> StreamingResponse:
+        await rt.chat.conversation(body.thread_id)
+        if not body.messages or body.messages[-1].role != "user":
+            raise RuntimeFailure("AG-UI 请求必须以用户文本消息结束。")
+        # The database, not client-supplied system messages or history, owns the conversation.
+        content = body.messages[-1].content
+        if not isinstance(content, str):
+            raise RuntimeFailure("当前 Agent 仅接受文本消息。")
+        properties = body.forwarded_props or {}
+        if not isinstance(properties, dict):
+            raise RuntimeFailure("AG-UI forwardedProps 必须是对象。")
+        request = MessageInput.model_validate({**properties, "content": content})
+        encoder = EventEncoder()
+
+        async def events() -> AsyncIterator[str]:
+            async for event in rt.chat.stream(body.thread_id, request, body.run_id):
+                yield encoder.encode(event)
+
+        return StreamingResponse(
+            events(),
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        )
 
     @router.get("/memories")
     async def memories(rt: RuntimeDependency, limit: int = Query(100, ge=1, le=1000)) -> dict[str, Any]:

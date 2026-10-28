@@ -35,6 +35,9 @@ class Conversation(Base):
 
     id: Mapped[str] = mapped_column(sa.Text, primary_key=True, default=lambda: new_id("chat"))
     title: Mapped[str] = mapped_column(sa.Text, default="新对话", nullable=False)
+    has_short_memory: Mapped[bool] = mapped_column(
+        sa.Boolean, default=False, server_default="0", nullable=False
+    )
     created_at: Mapped[int] = mapped_column(sa.Integer, default=now_ts, nullable=False)
     updated_at: Mapped[int] = mapped_column(sa.Integer, default=now_ts, nullable=False, index=True)
 

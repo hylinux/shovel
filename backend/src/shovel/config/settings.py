@@ -19,6 +19,7 @@ import tomli_w
 from pydantic import Field, SecretStr, ValidationError
 from pydantic_settings import BaseSettings, PydanticBaseSettingsSource, SettingsConfigDict
 
+from .agent_config import AgentSettings
 from .database_config import DatabaseSettings
 from .document_settings import DocumentSettings
 from .embedding_config import EmbeddingSettings
@@ -145,6 +146,7 @@ class AppSettings(BaseSettings):
     # default_factory: 推迟到实例化时才构造, 避免导入期副作用
     document: DocumentSettings = Field(default_factory=DocumentSettings)
     model: DefaultAgentModelSettings = Field(default_factory=DefaultAgentModelSettings)
+    agent: AgentSettings = Field(default_factory=AgentSettings)
     database: DatabaseSettings = Field(default_factory=DatabaseSettings)
 
     #: 知识库向量存储(Zvec)

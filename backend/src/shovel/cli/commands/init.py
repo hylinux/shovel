@@ -119,6 +119,9 @@ def init() -> None:
     # 不再各处硬编码 ~/.shovel 下的路径
     settings = load_settings(config_file)
 
+    for name in ("skills", "functions", "pipeline"):
+        _ensure_dir(settings.agent.workspace / name, f"Agent {name} directory")
+
     # 初始化 SQLite: 建表是幂等的, 已存在的表不会被动
     with console.status(
         "[cyan]Initial the database ......",

@@ -1,54 +1,59 @@
-# `Hello, Shovel!`
+# Shovel
 
-`Shovel` is a personal AI Agent platform that helps users build, run, and manage local or cloud-based AI Agents through a unified Web experience.
+**Local-first by default, extensible when needed.**
 
-Let's us Say :
+Shovel is a personal AI Agent platform built on **Microsoft Agent Framework
+(MAF), FastAPI, and AG-UI**. Its Web workbench combines streaming conversation,
+local knowledge retrieval, native long-term Memory, and trusted workspace
+extensions. CLI and Web management share one Generic Host and durable work queue.
 
-```bash
-uv run shovel version
-```
+**SQLite is the source of truth; Zvec indexes are derived and rebuildable.**
+The default storage architecture needs no external database, cache, or Memory
+Server. Models can run locally through Ollama or use configured remote providers;
+local storage does not make remote inference local.
 
-![Shovel version](shovel-version.png)
+## Current progress
 
-Again, let us Say:
+Current implementation as of **2026-10-29**:
 
-```bash
-uv run shovel version --verbose
-```
+| Area | Implemented |
+| --- | --- |
+| Main Agent | MAF Agent, native tool loop, context providers, session handling, and AG-UI streaming through FastAPI |
+| Knowledge / RAG | Local folders and classic Outlook, durable scans, parent/child chunks, SQLite FTS5, Zvec vectors, hybrid ranking, and numbered citations |
+| Native Memory | Separate history/summaries/facts, structured extraction, deduplication/consolidation, supersession, expiry, soft/hard deletion, provenance, scope isolation, bounded recall, and index recovery |
+| Workspace extensions | MAF Skills, MCP stdio/HTTP, read-only built-ins, and opt-in Python functions and child Agent/Workflow tools |
+| Web workbench | Expanded Chat session tree, persistent session rename/delete/history, Search Documents, Resources, Background tasks, and grouped Settings |
+| Settings | Provider/warmup status, native Memory management and rebuild, and workspace MCP configuration with Agent restart |
+| Reliability | Durable Operations, idempotency receipts, cancellation/restart recovery, vector deletion Outboxes, and foreground-aware background work |
+| Distribution | Static Next.js export served by Python in production, bundled wheels, and installed-package smoke checks in CI |
 
-![Shovel version --verbose](shovel-version-verbose.png)
+This is a **development-stage, loopback-only, single-owner runtime**, not a
+public multi-user service. Visual Agent/Workflow authoring, cron/watch scheduling,
+Graph Memory, and automatic Procedural Memory learning are not implemented.
+Workspace Agent/Workflow tools are supported; they are not a complete multi-Agent
+management product. See the [long-term designs](#documentation) for future goals,
+not the current completion checklist.
 
-## Index recovery and cleanup
+## Contents
 
-After configuring embedding, run `shovel scan run <resource>` to finish documents
-previously scanned with `--no-embed` or interrupted during vector persistence.
-Pending vectors and changed chunker/model versions also trigger reprocessing.
-Use `shovel scan run <resource> --mode full_sweep --force` to rebuild all discovered
-documents after an externally lost vector index; normal source filters still apply.
-
-`shovel resource remove <resource>` persists a deletion intent before cleaning its
-vectors. If cleanup fails, retry with `shovel scan cleanup`, optionally passing
-`--resource-id <id>`. Cleanup does not require an embedding service.
-
-Chunker v2 isolates chunk IDs by resource. Existing documents are reindexed on their
-next scan, which incurs embedding work. See [the pipeline documentation](Documents/scan_pipeline.md)
-for the recovery protocol and its limits.
+- [Run the local workbench](#run-the-local-workbench)
+- [First knowledge loop](#first-knowledge-loop-without-model-credentials)
+- [Configure chat and semantic retrieval](#configure-chat-and-semantic-retrieval)
+- [Main Agent and workspace extensions](#main-agent-and-workspace-extensions)
+- [Native Memory](#native-memory)
+- [REST surface](#rest-surface)
+- [Reliable submissions and profiles](#reliable-submissions-and-profile-management)
+- [History maintenance and quality baselines](#explicit-history-maintenance-and-quality-baselines)
+- [Development and validation](#development-and-validation)
+- [Documentation](#documentation)
 
 ## Run the local workbench
-
-The current application includes resource management, durable background scans,
-index recovery/cleanup, keyword/vector/hybrid retrieval, a persistent single-Agent
-chat with numbered local citations, and default-on Memory. The light Web workbench has
-Resources, Background tasks, and Knowledge chat views. This is a single-owner
-runtime. Its main Agent uses Microsoft Agent Framework (MAF), with workspace
-Skills, MCP tools, and opt-in Python function/Agent/Workflow extensions. It is not
-a hosted multi-user service or a scheduling platform.
 
 Development requires Python 3.14+, Git, and Node.js 22.18+ (22 LTS in CI).
 `py-generic-host` is pinned to a Git commit in both source and wheel dependencies;
 no sibling checkout is required. On Windows, use **64-bit x64 Python** with the
 committed Zvec 0.7 dependency; it can also run under x64 emulation on Windows ARM64.
-Select it explicitly with `uv sync --python 3.14-x86_64 --locked --all-extras`.
+Select it explicitly with `uv sync --python 3.14-x86_64 --locked --all-extras --dev`.
 The current lock does not include a native Windows ARM64 Zvec wheel. Do not mix
 Windows and WSL virtual environments or source paths.
 
@@ -61,11 +66,27 @@ Set-Location ..
 uv run shovel run dev
 ```
 
+`shovel init` prints the configuration path, normally
+`%USERPROFILE%\.shovel\config\settings.toml` on Windows. The workbench and keyword
+indexing can run without model credentials; configure models before using chat
+or semantic retrieval. A complete local Ollama configuration is available in
+[Documents/settings.example.toml](Documents/settings.example.toml).
+Adjust its Windows paths and installed model names before using it.
+
 `run dev` starts **two separate services**: Next.js on `http://127.0.0.1:3000`
 and the Generic Host/FastAPI backend on `http://127.0.0.1:9999`. Next.js proxies
 `/api/*` to the backend, so the browser uses same-origin REST and AG-UI requests. Top-level
 configuration keys `dev_frontend_port`, `dev_http_host`, and `dev_http_port` control
 these addresses. Both services stop when either exits or the command is stopped.
+
+The sidebar exposes **Chat** with indented New Session/existing sessions,
+**Search Documents**, **Resources**, **Background tasks**, and **Settings**.
+MCP Server Management lives inside Settings, alongside native Memory and
+provider/performance status. Editing model/storage configuration still requires
+editing TOML or environment variables and restarting the Host.
+
+<details>
+<summary>Development diagnostics and streaming behavior</summary>
 
 `run dev` also prints detailed backend diagnostics to the terminal: HTTP route,
 status and duration, operation/job IDs, scan stages and counts, retrieval, model
@@ -96,6 +117,10 @@ console logs are forwarded with the `web` prefix; browser console output is
 forwarded verbatim, so do not log sensitive data there. These additional
 diagnostics are scoped to `run dev`, not `run prd` or other CLI commands.
 Normal production lifecycle and error logs are unchanged.
+
+</details>
+
+### Production
 
 Production uses **only Python/FastAPI**, serving an already-exported frontend:
 
@@ -133,6 +158,23 @@ uv run shovel resource add notes --kind local_fs --set 'root_path=C:\Notes'
 uv run shovel scan run notes --no-embed
 uv run shovel scan list
 ```
+
+### Index recovery and cleanup
+
+After configuring embedding, run `shovel scan run <resource>` to finish documents
+previously scanned with `--no-embed` or interrupted during vector persistence.
+Pending vectors and changed chunker/model versions also trigger reprocessing.
+Use `shovel scan run <resource> --mode full_sweep --force` to rebuild all discovered
+documents after an externally lost knowledge index; normal source filters still apply.
+Memory has its own independent [rebuild and recovery flow](#consistency-recovery-and-management).
+
+`shovel resource remove <resource>` persists a deletion intent before cleaning its
+vectors. If cleanup fails, retry with `shovel scan cleanup`, optionally passing
+`--resource-id <id>`. Cleanup does not require an embedding service.
+
+Chunker v2 isolates chunk IDs by resource. Existing documents are reindexed on their
+next scan, which incurs embedding work. See [the pipeline documentation](Documents/scan_pipeline.md)
+for the recovery protocol and its limits.
 
 ### Local Outlook mail on Windows
 
@@ -187,16 +229,36 @@ for example `SHOVEL_MODEL__SECURITY_KEY`. Merge the following into the existing
 configuration rather than duplicating table headings. Restart the Host after
 changing configuration.
 
-For a local Ollama model that you have already downloaded:
+### Local Ollama example
+
+The repository includes a complete
+[settings.example.toml](Documents/settings.example.toml) and a
+[shovel-chat-fast.Modelfile](Documents/shovel-chat-fast.Modelfile).
+With Ollama installed and its service running, execute from the repository root:
+
+```powershell
+ollama pull qwen2.5:3b
+ollama pull bge-m3
+ollama create shovel-chat-fast -f .\Documents\shovel-chat-fast.Modelfile
+ollama show shovel-chat-fast
+```
+
+These are explicit download/create commands, not actions performed by Shovel.
+The Modelfile sets an 8192-token context and temperature 0.1 on `qwen2.5:3b`;
+creating the model does not train or fine-tune its weights.
+The example uses this model for chat and Memory extraction, with `bge-m3`
+configured independently for knowledge and Memory embeddings.
+
+The chat portion is:
 
 ```toml
 [model]
 model_provider_type = "ollama"
 base_endpoint = "http://127.0.0.1:11434"
-model_name = "qwen3:4b"
-max_input_chars = 24000
-max_output_tokens = 2048
-timeout_seconds = 120
+model_name = "shovel-chat-fast"
+max_input_chars = 4000
+max_output_tokens = 512
+timeout_seconds = 300
 ```
 
 Shovel does not install Ollama, download models, or manage GPU drivers. The
@@ -204,6 +266,8 @@ character budget bounds history, retrieved evidence, and recalled Memory;
 it is not a tokenizer-based context-window guarantee. Lower it for small models.
 MAF uses Chat Completions with provider-adapted output limits; Ollama also receives
 `max_tokens` explicitly. Models requiring a different API need a matching adapter.
+
+### Other providers and retrieval
 
 Supported chat adapters include OpenAI, DeepSeek, Qianwen, Kimi, Ollama, and Azure
 OpenAI-compatible deployments. OpenAI-compatible `base_endpoint` includes `/v1`
@@ -405,9 +469,9 @@ Use a separate, smaller `[memory.llm]` model or separate compute if this remaini
 contention matters; Shovel does not download/change models or hardware settings.
 
 Only successful, valid embedding vectors are cached in bounded, expiring,
-process-local caches. Memory and RAG caches are separate; Memory keys include
-query text and model version for both indexes. No prompt text is retained as a
-cache key or logged. Search results,
+process-local caches. Memory and RAG caches are separate; both use keys derived
+from query text and model version. No prompt text is retained as a cache key or
+logged. Search results,
 permissions, revision checks and Memory facts are not cached: deletion/forget
 and resource visibility still take effect. Set entries to zero to disable.
 The RAG HTTP client is owned/closed by Runtime rather than recreated per query;
@@ -540,8 +604,10 @@ record while retaining its vector-cleanup intent; normal deletion is soft.
 
 The live API reference is `/docs`, with schema at `/openapi.json`.
 Routes are under `/api/v1`; collection responses use `{"items": [...]}`.
-Mutating resource/scan/cleanup requests return **202 + an Operation**, not a
-completed resource. Poll `/operations/{id}` for the result.
+Durable resource/scan/cleanup and Memory create/update/rebuild requests return
+**202 + an Operation**, not the completed result.
+Poll `/operations/{id}` for completion; normal Memory deletion returns
+`{"deleted": true}` instead.
 
 | Surface | Endpoints |
 | --- | --- |
@@ -556,8 +622,10 @@ completed resource. Poll `/operations/{id}` for the result.
 | Index | `GET /index/cleanup`, `POST /index/cleanup`, `POST /search` |
 | Chat | `GET/POST /conversations`, `PATCH/DELETE /conversations/{id}`, `GET/POST /conversations/{id}/messages` |
 | Agent | `POST /agent` accepts AG-UI `RunAgentInput` and streams SSE |
+| MCP management | `GET/PUT /agent/mcp`, `POST /agent/restart` |
 | History | `POST /history/prune` explicitly prunes bounded, old terminal history |
-| Memory | `GET /memories`, `DELETE /memories/{id}` |
+| Memory | `GET/POST /memories`, `PUT/DELETE /memories/{id}` |
+| Memory index | `POST /memory/index/rebuild` |
 | Credentials | `POST /credentials` writes the OS keyring and returns an `identity_ref` |
 
 Source text and paths are shown as citation data; there is no API for opening an
@@ -637,7 +705,8 @@ TOML over defaults; `AppSettings.load()` intentionally reads the file only.
 Conversation messages use `limit` (default 100, max 1000) and `before` sequence
 pagination; the response includes `next_before`. The workbench exposes older
 messages, conversation paging, renaming and confirmed deletion. Deletion removes
-messages, not independently saved Memory, and is refused during generation.
+messages, summaries and session-scoped Memory, but retains independently saved
+cross-session facts. It is refused during generation.
 
 `shovel history prune --keep-days 30 --limit 1000` asks for confirmation before
 pruning old terminal Jobs/events, unkeyed Operations, retrieval logs and completed
@@ -655,14 +724,73 @@ The offline baseline checks keyword recall@3 and revoked-resource visibility.
 The opt-in live baseline checks real hybrid recall, required answer facts,
 citations and insufficient-evidence behavior using isolated temporary stores:
 
-```bash
-export SHOVEL_RUN_LIVE_TESTS=1
-export SHOVEL_LIVE_CONFIG=/path/to/settings.toml
-export SHOVEL_BASELINE_REPORT=/path/to/baseline.json
-uv run pytest backend/tests/test_knowledge_baseline.py -m live --no-cov
+```powershell
+$env:SHOVEL_RUN_LIVE_TESTS = "1"
+$env:SHOVEL_LIVE_CONFIG = 'C:\path\to\settings.toml'
+$env:SHOVEL_BASELINE_REPORT = 'C:\path\to\baseline.json'
+uv run pytest backend\tests\test_knowledge_baseline.py -m live --no-cov
 ```
 
 Select both chat and embedding providers explicitly before running; external
 providers receive the synthetic evidence and may charge for calls. The JSON
 report records measured baseline results, not a general model-quality guarantee.
-Agent tools, cron/watch scheduling and multi-Agent workflows remain future work.
+Live results depend on the configured models and deployment; offline mocks are
+not proof that a particular local model will extract facts or cite sources reliably.
+
+## Development and validation
+
+The Python package lives under `backend\src\shovel`, with tests in `backend\tests`.
+`runtime` assembles the Host, Agent, REST/AG-UI, retrieval and background work;
+`memory` contains domain policies, ports, services and SQLite/Zvec/MAF adapters.
+`pipeline` owns document ingestion and `vector` the shared Zvec infrastructure.
+`frontend` is the static-exportable Next.js workbench.
+
+From the repository root, using the committed `uv.lock`:
+
+```powershell
+uv run shovel version --verbose
+uv run shovel config --check
+uv run ruff check .
+uv run ruff format --check .
+uv run mypy backend\src
+uv run pytest
+```
+
+`config --check` validates the active configuration; it requires an existing
+configuration file. Offline tests do not require model credentials.
+For focused native Memory tests:
+
+```powershell
+uv run pytest backend\tests\test_native_memory.py backend\tests\test_memory_tasks.py --no-cov
+```
+
+From `frontend`, using the committed `package-lock.json`:
+
+```powershell
+Set-Location frontend
+npm run lint
+npm run typecheck
+npm test
+npm run build
+```
+
+CI also builds a wheel with bundled frontend assets, installs it in a separate
+environment, and runs `scripts\smoke_wheel.py` with that environment's Python.
+See [CI](.github/workflows/ci.yml) and [release](.github/workflows/release.yml)
+for the complete pipelines. Do not use `uv run` for the installed-wheel smoke
+check: it must exercise the installed artifact, not the source environment.
+
+## Documentation
+
+| Document | Purpose |
+| --- | --- |
+| [Development environment](prepare-develop-env.md) | Prerequisites, Windows x64 setup, and local Ollama model creation |
+| [Complete Ollama configuration](Documents/settings.example.toml) | Chat, independent knowledge/Memory embeddings, SQLite and Zvec paths |
+| [Ollama Modelfile](Documents/shovel-chat-fast.Modelfile) | `shovel-chat-fast` model definition and creation command |
+| [Frontend workbench](frontend/README.md) | Navigation, AG-UI behavior, Settings, MCP and frontend development |
+| [Scan pipeline](Documents/scan_pipeline.md) | Ingestion, lifecycle, durable cleanup, DI and recovery contracts |
+| [Outlook integration](Documents/outlook_local.md) | Supported Outlook environment, source identity and indexing limits |
+| [Memory vector identity](Documents/db_base_memory_vector_id.md) | Deterministic IDs, lifecycle, authority checks and rebuild semantics |
+| [Architecture design](shovel-architecture-design.md) | Architecture guidance and the current native Memory module boundaries |
+| [Studio product design](shovel-architecture-design-v2.md) | Long-term product goals, not an implemented-feature checklist |
+| [Learning roadmap](shovel-learning-roadmap.md) | Project-oriented learning stages and references |

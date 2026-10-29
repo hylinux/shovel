@@ -2,6 +2,7 @@
 
 import { useState } from "react";
 import { segment, useAction, useQuery, type Items, type Memory, type Status } from "./api";
+import { MCPManagement } from "./mcp";
 import { Empty, Feedback } from "./ui";
 
 export function Settings({ status }: { status?: Status }) {
@@ -23,6 +24,7 @@ export function Settings({ status }: { status?: Status }) {
       <button className="text-button" disabled={!status?.memory_configured} onClick={() => setMemoryOpen(!memoryOpen)} aria-expanded={memoryOpen}>{memoryOpen ? "Hide saved Memory" : "Load saved Memory"}</button>
       {memoryOpen && <Memories />}
     </section>
+    <MCPManagement />
   </section>;
 }
 

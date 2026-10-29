@@ -88,7 +88,7 @@ dd { margin: 0 0 8px; }
 .page-heading p { margin-top: 10px; color: var(--muted); }
 .local-label { white-space: nowrap; font-size: 12px; color: var(--muted); padding-top: 6px; }
 .configuration { margin-bottom: 28px; border: 1px solid var(--border); border-radius: 6px; background: var(--surface); padding: 4px 16px; }
-.configuration > h2 { margin: 14px 0 10px; }
+.configuration > h2, .mcp-section .configuration > h3 { margin: 14px 0 10px; }
 .configuration > p:last-child { margin-bottom: 14px; }
 .configuration summary { display: list-item; }
 .configuration summary span, .scope-panel summary span { font-size: 12px; color: var(--muted); font-weight: 400; margin-left: 12px; }
@@ -194,7 +194,8 @@ progress::-moz-progress-bar { background: var(--accent); }
 .search-options { display: grid; grid-template-columns: minmax(70px, .5fr) minmax(100px, 1fr) minmax(170px, 1.5fr); gap: 12px; margin-bottom: 12px; }
 .search-options select { margin-top: 6px; }
 .grow { flex: 1; min-width: 0; }
-.memory-section { margin-top: 28px; padding-top: 20px; border-top: 1px solid var(--border); }
+.memory-section, .mcp-section { margin-top: 28px; padding-top: 20px; border-top: 1px solid var(--border); }
+.mcp-section > h2 { margin-bottom: 16px; }
 .text-button { background: transparent; border: 0; color: var(--accent); padding: 3px 0; }
 .memory-section > p { margin-top: 6px; }
 .memory-panel { margin-top: 20px; }

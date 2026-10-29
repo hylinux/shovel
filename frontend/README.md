@@ -46,16 +46,16 @@ This writes a static application to `frontend\out`. Serve those files from the b
 - **Background tasks:** inspect scan stages, counters and document events, request cancellation, inspect/retry operations, and queue index cleanup. Resources, jobs, operations and visible events refresh about every two seconds without clearing forms. Requests are serialized per poller and cancelled on unmount. Periodic queries pause while the browser tab is hidden and refresh on return; in-flight reads may finish, and explicit actions/Agent streams are not interrupted. Resources poll only in Resources, Background tasks (for cleanup scope), and Search Documents, never in Chat or Settings.
 - **Search Documents:** an independent menu below Background tasks. Select resources, retrieval mode, Top N (1–30), and relevance/title sort direction. Sorting applies only to the returned Top N passages. Empty resource selection means all accessible resources. Search works without a chat model or Memory.
 - **Chat:** click the main navigation item to open or collapse the sidebar's Session section without interrupting the active chat. New Session creates and selects a persisted session; history is ordered by latest interaction in a bounded scroll area, with Load more sessions for older pages. Rename/delete controls live under the selected Session in the sidebar. The Session page contains message history, numbered source excerpts, and a multiline composer: Enter inserts a newline; Ctrl + Enter or Send Message submits. The official AG-UI `HttpAgent` SDK streams the MAF Agent's text and tool activity; message and Session history are refreshed after success or failure.
-- **Settings:** the bottom sidebar menu contains runtime provider status and long-term Memory list/forget controls. Memory is enabled for every Session without a toggle. Short-term mem0 Memory stores original user messages without a duplicate LLM extraction; long-term mem0 Memory still extracts and merges user facts. Deleting a Session clears its short-term Memory but keeps long-term facts. Forgetting a long-term fact requires confirmation and does not erase its short-term copy.
+- **Settings:** the bottom sidebar menu contains runtime provider status, long-term Memory list/forget controls, and MCP Server Management. Memory is enabled for every Session without a toggle. Short-term mem0 Memory stores original user messages without a duplicate LLM extraction; long-term mem0 Memory still extracts and merges user facts. Deleting a Session clears its short-term Memory but keeps long-term facts. Forgetting a long-term fact requires confirmation and does not erase its short-term copy.
 
-**MCP Server Management** lists the current workspace's saved servers and edits
+**Settings → MCP Server Management** lists the current workspace's saved servers and edits
 `mcp.json` as JSON (stdio and Streamable HTTP, enabled/disabled, allowed tools,
 environment and headers). Saving validates and atomically writes the file with
 revision conflict protection, without opening connections or running commands.
 The separate **Restart Agent** action closes cached clients; extensions load on
 the next chat. It is rejected while any session is generating and retains
 sessions, Memory and background tasks. Reloading a dirty editor asks before
-discarding edits. This page does not poll resources. Only configure trusted
+discarding edits. Settings does not poll resources. Only configure trusted
 servers and prefer `${ENV_VAR}` credential references: the editor shows the
 actual file, including any inline secrets.
 

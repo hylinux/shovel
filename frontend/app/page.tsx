@@ -8,18 +8,16 @@ import { Tasks } from "./tasks";
 import { Knowledge } from "./knowledge";
 import { SearchDocuments } from "./search";
 import { Settings } from "./settings";
-import { MCPManagement } from "./mcp";
 import { Feedback } from "./ui";
 
-const views = ["Resources", "Background tasks", "Search Documents", "Chat", "MCP Server Management"] as const;
+const views = ["Resources", "Background tasks", "Search Documents", "Chat"] as const;
 type View = typeof views[number] | "Settings";
 const descriptions: Record<View, string> = {
   Resources: "Choose which local documents and Outlook mail Shovel can work with.",
   "Background tasks": "Follow scans, inspect events, and recover failed operations.",
   "Search Documents": "Find relevant passages in your indexed documents.",
   Chat: "Ask your documents. Keep the sources in view.",
-  "MCP Server Management": "Manage workspace MCP servers and reload the main Agent.",
-  Settings: "Review providers and manage saved Memory.",
+  Settings: "Review providers, manage MCP servers and saved Memory.",
 };
 
 export default function Home() {
@@ -48,7 +46,7 @@ export default function Home() {
         <Link href="/" className="brand" aria-label="Shovel home"><span className="brand-mark" aria-hidden="true">S</span>Shovel</Link>
         <p className="sidebar-caption">Personal knowledge workbench</p>
         <nav className="main-navigation" aria-label="Main navigation">
-          {views.map((item, index) => <button key={item} aria-current={view === item ? "page" : undefined} aria-expanded={item === "Chat" ? showSessions : undefined} aria-controls={item === "Chat" ? "session-navigation" : undefined} onClick={() => navigate(item)}><span aria-hidden="true" className="nav-symbol">{["▤", "≡", "⌕", "◇", "+"][index]}</span>{item}{item === "Chat" && <span className="nav-chevron" aria-hidden="true">{showSessions ? "−" : "+"}</span>}</button>)}
+          {views.map((item, index) => <button key={item} aria-current={view === item ? "page" : undefined} aria-expanded={item === "Chat" ? showSessions : undefined} aria-controls={item === "Chat" ? "session-navigation" : undefined} onClick={() => navigate(item)}><span aria-hidden="true" className="nav-symbol">{["▤", "≡", "⌕", "◇"][index]}</span>{item}{item === "Chat" && <span className="nav-chevron" aria-hidden="true">{showSessions ? "−" : "+"}</span>}</button>)}
         </nav>
         <section id="session-navigation" className="session-navigation" aria-labelledby="sessions-heading" hidden={!showSessions}>
           {view === "Chat" && <SessionNavigation selected={selectedSession} revision={sessionRevision} onSelect={selectSession} onDeleted={() => { setSelectedSession(""); refreshSessions(); }} />}
@@ -67,7 +65,6 @@ export default function Home() {
         {view === "Search Documents" && <SearchDocuments resources={resources.data?.items || []} status={status.data} />}
         {view === "Chat" && <Knowledge status={status.data} sessionId={selectedSession} onSessionChanged={refreshSessions} />}
         {view === "Settings" && <Settings status={status.data} />}
-        {view === "MCP Server Management" && <MCPManagement />}
         <footer className="page-footer">Shovel · Local documents, connected knowledge</footer>
       </main>
     </div>

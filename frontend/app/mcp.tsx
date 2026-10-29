@@ -6,7 +6,8 @@ import { Empty, Feedback } from "./ui";
 
 export function MCPManagement() {
   const query = useQuery<MCPConfiguration>("/agent/mcp");
-  return <section>
+  return <section className="mcp-section" aria-labelledby="mcp-management-heading">
+    <h2 id="mcp-management-heading">MCP Server Management</h2>
     <Feedback error={query.error} retry={query.refresh} />
     {query.loading && <p role="status">Loading MCP configuration...</p>}
     {query.data && <MCPEditor initial={query.data} />}
@@ -45,14 +46,14 @@ function MCPEditor({ initial }: { initial: MCPConfiguration }) {
   }
   return <>
     <section className="configuration">
-      <h2>Workspace MCP configuration</h2>
+      <h3>Workspace MCP configuration</h3>
       <p className="mcp-path"><code>{config.path}</code></p>
       <p>Saving updates this file only. Restart Agent to close cached MCP connections and reload extensions on the next chat. Active conversations must finish first; sessions and Memory are kept.</p>
       <p className="muted">Only configure trusted servers. Enabled stdio servers can run commands with your account permissions; HTTP servers receive tool arguments. Prefer <code>{"${ENV_VAR}"}</code> references for credentials. Environment references are resolved when the Agent loads connections; restart the Host after changing its environment.</p>
       <p role="status">{config.agent_state === "restart_failed" ? "Agent restart failed. Retry Restart Agent before chatting." : config.agent_state === "restarting" ? "Agent is restarting." : config.restart_required ? "Saved configuration differs from the Agent cache. Restart required." : config.agent_loaded ? "Agent has loaded this configuration." : "MCP connections have not loaded. The next chat will load the saved file."}</p>
     </section>
     <section aria-labelledby="mcp-servers-heading">
-      <h2 id="mcp-servers-heading">Saved servers <span className="count">{config.items.length}</span></h2>
+      <h3 id="mcp-servers-heading">Saved servers <span className="count">{config.items.length}</span></h3>
       <Feedback error={config.validation_error || ""} />
       {config.items.length ? <div className="mcp-servers"><table>
         <caption className="sr-only">Servers in the saved workspace configuration</caption>

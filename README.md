@@ -251,7 +251,7 @@ Oversized Skill/tool context fails explicitly instead of silently exceeding it.
 By default, the workspace is `%USERPROFILE%\.shovel\workspaces\default` on
 Windows. `shovel init` creates `skills`, `functions`, and `pipeline` below the
 configured workspace. Agent extensions are loaded lazily on the first chat.
-Use **MCP Server Management → Restart Agent** after changing extensions or
+Use **Settings → MCP Server Management → Restart Agent** after changing extensions or
 `mcp.json`, or restart the Host.
 
 ```toml
@@ -337,7 +337,7 @@ configuration error. MCP tools are namespaced by server. Shovel uses MAF's nativ
 MCP connections and closes them with the Runtime. Invalid extension/MCP
 configuration fails chat explicitly rather than silently dropping capabilities.
 
-The Web sidebar's **MCP Server Management** page lists saved servers and provides
+The Web **Settings → MCP Server Management** section lists saved servers and provides
 a JSON editor for the current workspace's `mcp.json`. Saving validates the schema
 and atomically replaces the file, rejecting stale editor revisions rather than
 overwriting another edit. Invalid existing JSON remains editable. Saving does not

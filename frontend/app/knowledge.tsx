@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, type FormEvent } from "react";
+import { useEffect, useRef, useState, type FormEvent } from "react";
 import { segment, useAction, useAgentAction, useQuery, type MessagePage, type Operation, type Status } from "./api";
 import { Empty, Feedback, Sources } from "./ui";
 import { chatTrace } from "./agent-client";
@@ -18,6 +18,12 @@ function Chat({ sessionId, status, onActivity }: { sessionId: string; status?: S
   const [content, setContent] = useState("");
   const [pendingQuestion, setPendingQuestion] = useState("");
   const action = useAgentAction();
+  const messagesRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (before && !action.busy) return;
+    const messages = messagesRef.current;
+    if (messages) messages.scrollTop = messages.scrollHeight;
+  }, [before, history.data, history.loading, pendingQuestion, action.busy, action.text, action.tool]);
   const sendDisabled = action.busy || !content.trim() || !status?.model_configured || !status?.memory_configured || history.loading || Boolean(history.error);
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -35,7 +41,7 @@ function Chat({ sessionId, status, onActivity }: { sessionId: string; status?: S
     history.refresh();
     chatTrace("chat.history.refresh.requested", { run_id: runId, conversation_id: sessionId });
   }
-  return <><div className="messages" aria-label="Session messages" aria-busy={history.loading || action.busy}>
+  return <><div ref={messagesRef} className="messages" aria-label="Session messages" aria-busy={history.loading || action.busy}>
     {(history.data?.next_before || before) && <div className="button-row">
       {history.data?.next_before && <button disabled={action.busy} onClick={() => setBefore(history.data?.next_before ?? undefined)}>Older messages</button>}
       {before && <button disabled={action.busy} onClick={() => setBefore(undefined)}>Latest messages</button>}

@@ -44,7 +44,7 @@ export default function Home() {
       <a className="skip-link" href="#main">Skip to content</a>
       <aside className="sidebar">
         <Link href="/" className="brand" aria-label="Shovel home"><span className="brand-mark" aria-hidden="true">S</span>Shovel</Link>
-        <p className="sidebar-caption">Personal knowledge workbench</p>
+        <p className="sidebar-caption">Personal Agent Platform</p>
         <nav className="main-navigation" aria-label="Main navigation">
           {views.map((item, index) => <button key={item} aria-current={view === item ? "page" : undefined} aria-expanded={item === "Chat" ? showSessions : undefined} aria-controls={item === "Chat" ? "session-navigation" : undefined} onClick={() => navigate(item)}><span aria-hidden="true" className="nav-symbol">{["▤", "≡", "⌕", "◇"][index]}</span>{item}{item === "Chat" && <span className="nav-chevron" aria-hidden="true">{showSessions ? "⌄" : "›"}</span>}</button>)}
         </nav>

@@ -1,0 +1,63 @@
+# Local Ollama example with native SQLite/Zvec Memory.
+# Adjust model names and Windows paths for your environment.
+
+service_name = "shovel"
+agent_host = "127.0.0.1"
+agent_port = 19566
+http_host = "127.0.0.1"
+dev_http_host = "127.0.0.1"
+dev_http_port = 9999
+http_port = 8080
+log_level = "INFO"
+
+[document]
+
+[model]
+model_provider_type = "ollama"
+base_endpoint = "http://127.0.0.1:11434"
+model_name = "shovel-chat-fast"
+max_input_chars = 4000
+max_output_tokens = 512
+security_key = ""
+api_version = ""
+timeout_seconds = 300
+
+[embedding]
+provider = "ollama"
+base_url = "http://127.0.0.1:11434"
+model = "bge-m3"
+api_key = ""
+api_version = ""
+batch_size = 8
+timeout_seconds = 300
+
+[zvec]
+dim = 1024
+knowledge_path = 'C:\Users\honguo\.shovel\knowledge\shovel_chunk'
+
+[memory]
+collection = "shovel_memory"
+dim = 1024
+index_path = 'C:\Users\honguo\.shovel\memory\zvec'
+
+[memory.llm]
+model_provider_type = "ollama"
+base_endpoint = "http://127.0.0.1:11434"
+model_name = "shovel-chat-fast"
+security_key = ""
+api_version = ""
+max_output_tokens = 2000
+timeout_seconds = 300
+
+[memory.embedder]
+provider = "ollama"
+base_url = "http://127.0.0.1:11434"
+model = "bge-m3"
+api_key = ""
+api_version = ""
+batch_size = 8
+timeout_seconds = 300
+
+[database]
+url = "sqlite+aiosqlite:///C:/Users/honguo/.shovel/data/shovel.db"
+echo = false

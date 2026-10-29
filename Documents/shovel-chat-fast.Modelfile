@@ -1,0 +1,6 @@
+# Run from the repository root:
+# ollama create shovel-chat-fast -f .\Documents\shovel-chat-fast.Modelfile
+
+FROM qwen2.5:3b
+PARAMETER num_ctx 8192
+PARAMETER temperature 0.1

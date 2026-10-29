@@ -112,4 +112,23 @@ uv run shovel run dev
 在 Settings 查看 Memory 索引状态和待处理数量，必要时执行索引重建。
 重建可能调用配置的 embedding 服务，不是无成本的目录初始化。
 
+## 4. 创建本地 Ollama 模型示例
+
+模型定义文件为 [Documents/shovel-chat-fast.Modelfile](Documents/shovel-chat-fast.Modelfile)。
+安装 Ollama 并启动本地服务后，在 Shovel 仓库根目录执行：
+
+```powershell
+ollama pull qwen2.5:3b
+ollama create shovel-chat-fast -f .\Documents\shovel-chat-fast.Modelfile
+ollama show shovel-chat-fast
+```
+
+`pull` 会下载基础模型。`create` 基于该模型创建名为 `shovel-chat-fast`
+的本地模型配置，不进行训练或微调；示例设置 `num_ctx = 8192`、
+`temperature = 0.1`。Ollama 的上下文长度单位为 token，
+与 Shovel 的 `max_input_chars` 字符预算不同。
+
+完整 Shovel 配置见 [Documents/settings.example.toml](Documents/settings.example.toml)，
+其中 `[model]` 和 `[memory.llm]` 的 `model_name` 均使用 `shovel-chat-fast`。
+
 `Have Fun!`

@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import hashlib
 import importlib.util
 import inspect
 import os
@@ -28,6 +27,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from shovel.config.agent_config import AgentSettings
 from shovel.runtime.errors import RuntimeFailure
+from shovel.runtime.workspace_config import content_revision as mcp_revision
 
 
 class MCPServerSettings(BaseModel):
@@ -60,10 +60,6 @@ class MCPServerSettings(BaseModel):
 class MCPSettings(BaseModel):
     model_config = ConfigDict(extra="forbid")
     mcpServers: dict[str, MCPServerSettings] = Field(default_factory=dict)
-
-
-def mcp_revision(content: bytes | None) -> str:
-    return hashlib.sha256(b"missing" if content is None else b"file:" + content).hexdigest()
 
 
 def _environment(value: str) -> str:

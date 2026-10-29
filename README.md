@@ -22,8 +22,8 @@ Current implementation as of **2026-10-29**:
 | Knowledge / RAG | Local folders and classic Outlook, durable scans, parent/child chunks, SQLite FTS5, Zvec vectors, hybrid ranking, and numbered citations |
 | Native Memory | Separate history/summaries/facts, structured extraction, deduplication/consolidation, supersession, expiry, soft/hard deletion, provenance, scope isolation, bounded recall, and index recovery |
 | Workspace extensions | MAF Skills, MCP stdio/HTTP, read-only built-ins, and opt-in Python functions and child Agent/Workflow tools |
-| Web workbench | Expanded Chat session tree, persistent session rename/delete/history, Search Documents, Resources, Background tasks, and grouped Settings |
-| Settings | Provider/warmup status, native Memory management and rebuild, and workspace MCP configuration with Agent restart |
+| Web workbench | Expanded Chat session tree, persistent session rename/delete/history, Search Documents, Resources, Background tasks, and tabbed Settings |
+| Settings | Separate runtime, native Memory, MCP management, and editable Agent instructions tabs with automatic Agent restart |
 | Reliability | Durable Operations, idempotency receipts, cancellation/restart recovery, vector deletion Outboxes, and foreground-aware background work |
 | Distribution | Static Next.js export served by Python in production, bundled wheels, and installed-package smoke checks in CI |
 
@@ -318,6 +318,24 @@ Windows. `shovel init` creates `skills`, `functions`, and `pipeline` below the
 configured workspace. Agent extensions are loaded lazily on the first chat.
 Use **Settings → MCP Server Management → Restart Agent** after changing extensions or
 `mcp.json`, or restart the Host.
+
+Settings has four tabs: **Runtime configuration**, **Manage long-term Memory**,
+**MCP Server Management**, and **Agent instructions**. Switching tabs preserves
+mounted editors and unsaved drafts.
+
+**Agent instructions** saves additional role, tone, and behavior instructions in
+the workspace's `agent-instructions.md`. Shovel retains its built-in citation,
+Memory, and tool-use rules and appends the custom text to MAF's `instructions`.
+Saving atomically writes the UTF-8 file with revision conflict protection and
+automatically replaces the main Agent. The next message, including in an existing
+session, uses the new instructions; conversations, Memory, and background tasks
+are retained. Model and extension clients still initialize on demand.
+Saving is rejected while any conversation or model warmup is active, without
+writing the file or interrupting the run. Empty instructions restore the built-in
+defaults. Custom text counts toward `model.max_input_chars`; the editor exposes
+the available character limit. Native Memory extraction and summary prompts are
+not changed. If saving succeeds but restart fails, reload the saved file and retry
+**Restart Agent**. Do not store credentials in instructions.
 
 ```toml
 [agent]
@@ -623,6 +641,7 @@ Poll `/operations/{id}` for completion; normal Memory deletion returns
 | Chat | `GET/POST /conversations`, `PATCH/DELETE /conversations/{id}`, `GET/POST /conversations/{id}/messages` |
 | Agent | `POST /agent` accepts AG-UI `RunAgentInput` and streams SSE |
 | MCP management | `GET/PUT /agent/mcp`, `POST /agent/restart` |
+| Agent instructions | `GET/PUT /agent/instructions` (workspace text, revision, built-in policies, budget, and application state; PUT saves and restarts) |
 | History | `POST /history/prune` explicitly prunes bounded, old terminal history |
 | Memory | `GET/POST /memories`, `PUT/DELETE /memories/{id}` |
 | Memory index | `POST /memory/index/rebuild` |
@@ -791,6 +810,7 @@ check: it must exercise the installed artifact, not the source environment.
 | [Scan pipeline](Documents/scan_pipeline.md) | Ingestion, lifecycle, durable cleanup, DI and recovery contracts |
 | [Outlook integration](Documents/outlook_local.md) | Supported Outlook environment, source identity and indexing limits |
 | [Memory vector identity](Documents/db_base_memory_vector_id.md) | Deterministic IDs, lifecycle, authority checks and rebuild semantics |
+| [Native Memory implementation](Documents/native_memory_architecture.md) | Detailed Chinese guide to principles, architecture, extraction, recall, transactions, recovery and implementation boundaries |
 | [Architecture design](shovel-architecture-design.md) | Architecture guidance and the current native Memory module boundaries |
 | [Studio product design](shovel-architecture-design-v2.md) | Long-term product goals, not an implemented-feature checklist |
 | [Learning roadmap](shovel-learning-roadmap.md) | Project-oriented learning stages and references |

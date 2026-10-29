@@ -17,6 +17,7 @@ from shovel.runtime.locking import RuntimeLock
 from shovel.services.resource_service import ResourceService
 
 if TYPE_CHECKING:
+    from shovel.runtime.agent_instructions import AgentInstructionsService
     from shovel.runtime.chat import ChatService
     from shovel.runtime.mcp_config import MCPConfigurationService
     from shovel.runtime.memory import MemoryService
@@ -33,6 +34,7 @@ class Runtime:
         sessions: async_sessionmaker[AsyncSession],
         resources: ResourceService,
     ) -> None:
+        from shovel.runtime.agent_instructions import AgentInstructionsService
         from shovel.runtime.chat import ChatService
         from shovel.runtime.mcp_config import MCPConfigurationService
         from shovel.runtime.memory import MemoryService
@@ -56,6 +58,9 @@ class Runtime:
         self.retrieval: RetrievalService = RetrievalService(self)
         self.memory: MemoryService = MemoryService(settings, sessions)
         self.memory_tasks: MemoryTaskService = MemoryTaskService(self)
+        self.instructions: AgentInstructionsService = AgentInstructionsService(
+            settings.agent.workspace, settings.model.max_input_chars
+        )
         self.chat: ChatService = ChatService(self)
         self.mcp: MCPConfigurationService = MCPConfigurationService(settings.agent.workspace)
         self.warmup: RuntimeWarmup = RuntimeWarmup(self)

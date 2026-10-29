@@ -46,7 +46,7 @@ This writes a static application to `frontend\out`. Serve those files from the b
 - **Background tasks:** inspect scan stages, counters and document events, request cancellation, inspect/retry operations, and queue index cleanup. Resources, jobs, operations and visible events refresh about every two seconds without clearing forms. Requests are serialized per poller and cancelled on unmount. Periodic queries pause while the browser tab is hidden and refresh on return; in-flight reads may finish, and explicit actions/Agent streams are not interrupted. Resources poll only in Resources, Background tasks (for cleanup scope), and Search Documents, never in Chat or Settings.
 - **Search Documents:** an independent menu below Background tasks. Select resources, retrieval mode, Top N (1–30), and relevance/title sort direction. Sorting applies only to the returned Top N passages. Empty resource selection means all accessible resources. Search works without a chat model or Memory.
 - **Chat:** the session tree is expanded by default and stays visible while visiting other pages. New Session and existing sessions are indented children of Chat, without a separate Sessions heading. Enter Chat to open it; click Chat again to collapse or expand its children without interrupting the active chat. New Session creates and selects a persisted session; history is ordered by latest interaction in a bounded scroll area, with Load more sessions for older pages. Rename/delete controls live under the selected Session in the sidebar. The Session page contains message history, numbered source excerpts, and a multiline composer: Enter inserts a newline; Ctrl + Enter or Send Message submits. The official AG-UI `HttpAgent` SDK streams the MAF Agent's text and tool activity; message and Session history are refreshed after success or failure.
-- **Settings:** the bottom sidebar menu opens grouped cards for provider readiness, performance/warmup, native Memory, and MCP Server Management. Section shortcuts preserve mounted editors and drafts. Provider changes require editing settings.toml and restarting the backend. Saved facts load from SQLite only on request. Memory shows its Zvec index status and pending operations, supports confirmed soft deletion, and can queue a rebuild in Background tasks. Conversation history, session summaries and long-term facts remain separate; session deletion removes its summary/session-scoped Memory, not cross-session facts.
+- **Settings:** the bottom sidebar menu opens four keyboard-accessible tabs: Runtime configuration, Manage long-term Memory, MCP Server Management, and Agent instructions. Switching tabs preserves mounted editors and drafts. Runtime configuration includes provider readiness and performance/warmup; provider changes require editing settings.toml and restarting the backend. Saved facts load from SQLite only on request. Memory shows its Zvec index status and pending operations, supports confirmed soft deletion, and can queue a rebuild in Background tasks. Conversation history, session summaries and long-term facts remain separate; session deletion removes its summary/session-scoped Memory, not cross-session facts.
 
 **Settings → MCP Server Management** lists the current workspace's saved servers and edits
 `mcp.json` as JSON (stdio and Streamable HTTP, enabled/disabled, allowed tools,
@@ -58,6 +58,19 @@ sessions, Memory and background tasks. Reloading a dirty editor asks before
 discarding edits. Settings does not poll resources. Only configure trusted
 servers and prefer `${ENV_VAR}` credential references: the editor shows the
 actual file, including any inline secrets.
+
+**Settings → Agent instructions** edits additional instructions in the workspace's
+`agent-instructions.md`. Built-in citation, Memory and tool-use policies remain
+visible and are always retained; custom text is appended to MAF's `instructions`.
+**Save & restart Agent** atomically saves with revision conflict protection and
+automatically replaces the Agent for the next message in existing or new sessions,
+preserving conversations and Memory. Model and extension clients initialize on
+demand. Saving is rejected during active conversations or model warmup, without
+changing the file or interrupting work. Empty text restores built-in defaults.
+The editor shows the character limit derived from `model.max_input_chars`;
+isolated Memory extraction and summary prompts are unaffected. Reload asks before
+discarding a dirty draft. After a lost response or saved-but-failed restart, reload
+the file and retry **Restart Agent**. Never put credentials in these instructions.
 
 Configure `[model]` for chat, optional `[memory.embedder]` for Memory semantic recall, and optional `[embedding]` for document vector search in the backend's `settings.toml`. Native Memory persists in SQLite without an embedder; unavailable semantic recall is explicitly reported instead of blocking chat. Provider credentials remain outside this interface; inline MCP credentials are visible in the MCP editor. Local-first storage does not imply local model inference.
 
@@ -83,7 +96,7 @@ atomically; index failures have their own durable retry queue. Recent SQLite
 history is immediately available; cross-session semantic recall becomes available
 after extraction and indexing finish.
 
-Endpoints used: `/status`, `/connectors`, `/resources` and its verify/pause/resume/revoke/scans actions, `/jobs` and events/cancel, `/operations` and retry, `/index/cleanup`, `/conversations` and messages, `/agent`, `/agent/mcp` (GET/PUT), `/agent/restart` (POST), `/search`, `/memories`. The local folder connector uses `config.root_path`. Document paths and source content render as text, never raw HTML or executable file links.
+Endpoints used: `/status`, `/connectors`, `/resources` and its verify/pause/resume/revoke/scans actions, `/jobs` and events/cancel, `/operations` and retry, `/index/cleanup`, `/conversations` and messages, `/agent`, `/agent/mcp` (GET/PUT), `/agent/instructions` (GET/PUT, no-store), `/agent/restart` (POST), `/search`, `/memories`. The local folder connector uses `config.root_path`. Document paths and source content render as text, never raw HTML or executable file links.
 
 ## Validation
 

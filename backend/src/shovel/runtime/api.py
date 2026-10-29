@@ -32,10 +32,12 @@ from shovel.exceptions.resource import (
     ResourceNotFoundError,
     UnknownConnectorError,
 )
+from shovel.runtime.agent_instructions import AgentInstructionsView
 from shovel.runtime.diagnostics import DevelopmentRequestLogging, trace
 from shovel.runtime.errors import NotFound, RuntimeFailure
 from shovel.runtime.hosting import resolve_runtime
 from shovel.runtime.schemas import (
+    AgentInstructionsInput,
     CleanupInput,
     CommandInput,
     ConversationInput,
@@ -288,6 +290,29 @@ def configure_api(
     async def restart_agent(rt: RuntimeDependency) -> JSONResponse:
         await rt.chat.restart_agent()
         return mcp_response(rt, await asyncio.to_thread(rt.mcp.read))
+
+    def instructions_response(rt: Runtime, result: AgentInstructionsView) -> JSONResponse:
+        loaded_revision = rt.chat.agent.instructions_revision
+        state = rt.chat.agent_state
+        return JSONResponse(
+            {
+                **result,
+                "applied": loaded_revision == result["revision"]
+                and state not in {"restarting", "restart_failed"},
+                "agent_state": state,
+                "restart_required": state == "restart_failed"
+                or (loaded_revision is not None and loaded_revision != result["revision"]),
+            },
+            headers={"Cache-Control": "no-store"},
+        )
+
+    @router.get("/agent/instructions")
+    async def agent_instructions(rt: RuntimeDependency) -> JSONResponse:
+        return instructions_response(rt, await asyncio.to_thread(rt.instructions.read))
+
+    @router.put("/agent/instructions")
+    async def save_agent_instructions(body: AgentInstructionsInput, rt: RuntimeDependency) -> JSONResponse:
+        return instructions_response(rt, await rt.chat.restart_agent(instructions=body))
 
     @app.exception_handler(ShovelError)
     async def shovel_error(_request: Request, exc: ShovelError) -> JSONResponse:

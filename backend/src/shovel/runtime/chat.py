@@ -15,9 +15,10 @@ from sqlalchemy import func, select, update
 from shovel.db.base import now_ts
 from shovel.db.model.runtime import ChatMessage, Conversation
 from shovel.runtime.agent import EventSink, ShovelAgent
+from shovel.runtime.agent_instructions import AgentInstructionsView
 from shovel.runtime.diagnostics import trace, trace_context
 from shovel.runtime.errors import NotFound, RuntimeFailure
-from shovel.runtime.schemas import MessageInput
+from shovel.runtime.schemas import AgentInstructionsInput, MessageInput
 
 if TYPE_CHECKING:
     from shovel.runtime.service import Runtime
@@ -41,25 +42,46 @@ class ChatService:
             return "restart_failed"
         return "loaded" if self.agent.extensions.mcp_revision is not None else "not_loaded"
 
-    async def restart_agent(self) -> None:
+    async def restart_agent(
+        self, *, instructions: AgentInstructionsInput | None = None
+    ) -> AgentInstructionsView:
         if self.runtime.stopping.is_set():
             raise RuntimeFailure("Host 正在停止。", status=503)
         if self._active_runs or self._restarting:
             raise RuntimeFailure("Agent 正在处理会话或重启,请完成后重试。", status=409)
         # Admission and the run counter change without awaits on the Host event loop.
-        self._restarting = self._restart_failed = True
+        self._restarting = True
+        task = asyncio.create_task(self._restart_agent(instructions))
+        try:
+            return await asyncio.shield(task)
+        except asyncio.CancelledError:
+            with CancelScope(shield=True):
+                await task
+            raise
+
+    async def _restart_agent(self, instructions: AgentInstructionsInput | None) -> AgentInstructionsView:
         trace("agent.restart.started")
         try:
-            await self.agent.close()
-            self.agent = ShovelAgent(self.runtime)
-            self._restart_failed = False
-            trace("agent.restart.completed")
-        except Exception as exc:
-            self._log.error("agent.restart.failed", error_type=type(exc).__name__)
-            raise RuntimeFailure(
-                "Agent 重启失败,请重试;如果仍失败请重启 Host。",
-                status=503,
-            ) from exc
+            configuration = await asyncio.to_thread(
+                self.runtime.instructions.read
+                if instructions is None
+                else lambda: self.runtime.instructions.save(instructions.content, instructions.revision)
+            )
+            self.runtime.instructions.validate(configuration["content"])
+            self._restart_failed = True
+            try:
+                await self.agent.close()
+                self.agent = ShovelAgent(self.runtime, configuration=configuration)
+                self._restart_failed = False
+                trace("agent.restart.completed")
+                return configuration
+            except Exception as exc:
+                self._log.error("agent.restart.failed", error_type=type(exc).__name__)
+                raise RuntimeFailure(
+                    ("Instructions 已保存,但 Agent 重启失败。" if instructions is not None else "")
+                    + "请重试重启 Agent;如果仍失败请重启 Host。",
+                    status=503,
+                ) from exc
         finally:
             self._restarting = False
 

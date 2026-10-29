@@ -1,21 +1,19 @@
 from __future__ import annotations
 
-import os
-import tempfile
-import threading
 from pathlib import Path
 from typing import Any
 
 from pydantic import ValidationError
 
-from shovel.runtime.agent_extensions import MCPSettings, mcp_revision
+from shovel.runtime.agent_extensions import MCPSettings
 from shovel.runtime.errors import RuntimeFailure
+from shovel.runtime.workspace_config import WorkspaceTextFile, WorkspaceTextView
 
 
 class MCPConfigurationService:
     def __init__(self, workspace: Path) -> None:
         self.path = workspace / "mcp.json"
-        self._lock = threading.Lock()
+        self._file = WorkspaceTextFile(self.path, default='{\n  "mcpServers": {}\n}\n')
 
     @staticmethod
     def _validate(content: str) -> MCPSettings:
@@ -27,18 +25,11 @@ class MCPConfigurationService:
                 status=422,
             ) from exc
 
-    def _read(self) -> bytes | None:
-        try:
-            return self.path.read_bytes()
-        except FileNotFoundError:
-            return None
-
-    def _view(self, content: bytes | None) -> dict[str, Any]:
-        text = content.decode("utf-8") if content is not None else '{\n  "mcpServers": {}\n}\n'
+    def _view(self, view: WorkspaceTextView) -> dict[str, Any]:
         error = None
         items = []
         try:
-            config = self._validate(text)
+            config = self._validate(view["content"])
         except RuntimeFailure as exc:
             error = exc.message
         else:
@@ -51,47 +42,14 @@ class MCPConfigurationService:
                 for name, server in config.mcpServers.items()
             ]
         return {
-            "path": str(self.path),
-            "content": text,
-            "revision": mcp_revision(content),
-            "exists": content is not None,
+            **view,
             "items": items,
             "validation_error": error,
         }
 
     def read(self) -> dict[str, Any]:
-        try:
-            with self._lock:
-                return self._view(self._read())
-        except (OSError, UnicodeError) as exc:
-            raise RuntimeFailure("无法读取工作区 mcp.json,请检查文件权限和 UTF-8 编码。", status=503) from exc
+        return self._view(self._file.read())
 
     def save(self, content: str, revision: str) -> dict[str, Any]:
         self._validate(content)
-        encoded = content.encode("utf-8")
-        try:
-            with self._lock:
-                if mcp_revision(self._read()) != revision:
-                    raise RuntimeFailure(
-                        "mcp.json 已被修改。请重新加载文件,合并修改后再保存。",
-                        status=409,
-                    )
-                self.path.parent.mkdir(parents=True, exist_ok=True)
-                temporary: Path | None = None
-                try:
-                    with tempfile.NamedTemporaryFile(
-                        dir=self.path.parent, prefix=".mcp-", suffix=".tmp", delete=False
-                    ) as file:
-                        temporary = Path(file.name)
-                        file.write(encoded)
-                        file.flush()
-                        os.fsync(file.fileno())
-                    if mcp_revision(self._read()) != revision:
-                        raise RuntimeFailure("mcp.json 已被修改,请重新加载后再保存。", status=409)
-                    os.replace(temporary, self.path)
-                finally:
-                    if temporary is not None:
-                        temporary.unlink(missing_ok=True)
-                return self._view(encoded)
-        except (OSError, UnicodeError) as exc:
-            raise RuntimeFailure("无法保存工作区 mcp.json,请检查文件权限和磁盘空间。", status=503) from exc
+        return self._view(self._file.save(content, revision))

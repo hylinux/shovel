@@ -201,8 +201,10 @@ progress::-moz-progress-bar { background: var(--accent); }
 .grow { flex: 1; min-width: 0; }
 .settings-content { display: grid; gap: 22px; max-width: 1120px; }
 .settings-index { position: sticky; top: 16px; z-index: 1; display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 5px; padding: 5px; border: 1px solid var(--border); border-radius: 10px; background: var(--surface); box-shadow: 0 3px 14px #263f5008; }
-.settings-index a { display: block; padding: 10px 12px; border-radius: 6px; color: var(--muted); text-align: center; text-decoration: none; font-weight: 550; font-size: 13px; }
-.settings-index a:hover, .settings-index a:focus-visible { color: var(--accent); background: var(--accent-soft); }
+.settings-index button { display: block; min-height: 48px; padding: 10px 12px; border: 0; border-radius: 6px; color: var(--muted); background: transparent; text-align: center; font-weight: 550; font-size: 13px; }
+.settings-index button:hover, .settings-index button:focus-visible, .settings-index button[aria-selected="true"] { color: var(--accent); background: var(--accent-soft); }
+.settings-panel { display: grid; min-width: 0; gap: 22px; }
+.settings-panel[hidden] { display: none; }
 .settings-card { min-width: 0; padding: 24px; background: var(--surface); border: 1px solid var(--border); border-radius: 10px; box-shadow: 0 2px 6px #263f5003; scroll-margin-top: 110px; }
 .settings-card-header { display: flex; justify-content: space-between; align-items: flex-start; flex-wrap: wrap; gap: 16px; margin-bottom: 22px; }
 .settings-card-header > div { min-width: 0; flex: 1 1 230px; }
@@ -226,6 +228,9 @@ progress::-moz-progress-bar { background: var(--accent); }
 .settings-details { margin-top: 16px; color: var(--muted); font-size: 13px; }
 .settings-details summary { color: var(--foreground); }
 .settings-details p { max-width: 80ch; }
+.instructions-editor { display: grid; gap: 14px; margin-top: 20px; }
+.instructions-editor textarea { min-height: 300px; font-family: ui-monospace, "Cascadia Code", Consolas, monospace; font-size: 13px; line-height: 1.65; }
+.instructions-policy { margin-top: 8px; padding: 16px; border: 1px solid var(--border); border-radius: 7px; background: #f8fafb; }
 .mcp-section .configuration { background: #f8fafb; margin-bottom: 22px; }
 .mcp-section .configuration > .settings-details { margin-bottom: 10px; }
 .mcp-section > .configuration:last-child { margin-bottom: 0; }

@@ -161,7 +161,7 @@ async def test_mcp_invalid_file_is_editable_and_failed_save_preserves_original(
     def fail_replace(_source: Path, _destination: Path) -> None:
         raise PermissionError("private-file-error")
 
-    monkeypatch.setattr("shovel.runtime.mcp_config.os.replace", fail_replace)
+    monkeypatch.setattr("shovel.runtime.workspace_config.os.replace", fail_replace)
     failed = await api.put(
         "/api/v1/agent/mcp",
         json={"content": '{"mcpServers":{}}\n', "revision": repaired.json()["revision"]},

@@ -5,6 +5,7 @@ from typing import Any, Literal
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from shovel.domain.enums import ScanMode, Sensitivity
+from shovel.runtime.agent_instructions import MAX_INSTRUCTIONS_CHARS
 
 SearchMode = Literal["auto", "keyword", "vector", "hybrid"]
 
@@ -71,6 +72,12 @@ class MemoryInput(InputModel):
 class MCPConfigurationInput(BaseModel):
     model_config = ConfigDict(extra="forbid")
     content: str = Field(max_length=1_048_576)
+    revision: str = Field(pattern=r"^[a-f0-9]{64}$")
+
+
+class AgentInstructionsInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    content: str = Field(max_length=MAX_INSTRUCTIONS_CHARS)
     revision: str = Field(pattern=r"^[a-f0-9]{64}$")
 
 

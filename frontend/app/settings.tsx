@@ -1,8 +1,9 @@
 "use client";
 
-import { useState } from "react";
+import { useRef, useState, type KeyboardEvent } from "react";
 import { segment, useAction, useQuery, type Items, type Memory, type Operation, type Status } from "./api";
 import { MCPManagement } from "./mcp";
+import { AgentInstructionsManagement } from "./instructions";
 import { Empty, Feedback } from "./ui";
 
 const warmupNames: Record<string, string> = {
@@ -12,18 +13,54 @@ const warmupNames: Record<string, string> = {
   chat_model: "Chat model",
 };
 
+const settingsTabs = [
+  { id: "runtime", label: "Runtime configuration" },
+  { id: "memory", label: "Manage long-term Memory" },
+  { id: "mcp", label: "MCP Server Management" },
+  { id: "instructions", label: "Agent instructions" },
+] as const;
+type SettingsTab = typeof settingsTabs[number]["id"];
+
 export function Settings({ status }: { status?: Status }) {
-  const [memoryOpen, setMemoryOpen] = useState(false);
+  const [active, setActive] = useState<SettingsTab>("runtime");
+  const [visited, setVisited] = useState<SettingsTab[]>(["runtime"]);
+  const buttons = useRef<(HTMLButtonElement | null)[]>([]);
+  function select(id: SettingsTab) {
+    setActive(id);
+    setVisited((current) => current.includes(id) ? current : [...current, id]);
+  }
+  function navigate(event: KeyboardEvent<HTMLButtonElement>, index: number) {
+    let target: number;
+    if (event.key === "ArrowRight") target = (index + 1) % settingsTabs.length;
+    else if (event.key === "ArrowLeft") target = (index + settingsTabs.length - 1) % settingsTabs.length;
+    else if (event.key === "Home") target = 0;
+    else if (event.key === "End") target = settingsTabs.length - 1;
+    else return;
+    event.preventDefault();
+    select(settingsTabs[target].id);
+    buttons.current[target]?.focus();
+  }
+  return <div className="settings-content">
+    <div className="settings-index" role="tablist" aria-label="Settings">
+      {settingsTabs.map((tab, index) => <button key={tab.id} type="button" role="tab" id={`settings-tab-${tab.id}`} aria-controls={`settings-panel-${tab.id}`} aria-selected={active === tab.id} tabIndex={active === tab.id ? 0 : -1} ref={(element) => { buttons.current[index] = element; }} onClick={() => select(tab.id)} onKeyDown={(event) => navigate(event, index)}>{tab.label}</button>)}
+    </div>
+    {settingsTabs.map((tab) => <div key={tab.id} className="settings-panel" id={`settings-panel-${tab.id}`} role="tabpanel" aria-labelledby={`settings-tab-${tab.id}`} hidden={active !== tab.id} tabIndex={0}>
+      {visited.includes(tab.id) && (tab.id === "runtime" ? <RuntimeConfiguration status={status} />
+        : tab.id === "memory" ? <MemoryManagement status={status} />
+          : tab.id === "mcp" ? <MCPManagement />
+            : <AgentInstructionsManagement running={Boolean(status?.chat_capacity && (status.chat_capacity.running || status.chat_capacity.waiting))} />)}
+    </div>)}
+  </div>;
+}
+
+function RuntimeConfiguration({ status }: { status?: Status }) {
   const chatReady = status?.model_configured && status.memory_configured;
   const providers = [
     { name: "Chat model", section: "model", ready: status?.model_configured, value: status?.model_configured ? status.model_name : "Required for chat", description: "Generates replies through the main Agent.", optional: false },
     { name: "Knowledge embedding", section: "embedding", ready: status?.embedding_configured, value: status?.embedding_configured ? "Vector search available" : "Keyword search available", description: "Adds semantic search to your local documents.", optional: true },
     { name: "Native Memory", section: "memory", ready: status?.memory_configured, value: status?.memory_configured ? "SQLite · local source of truth" : "Unavailable", description: "Long-term facts with a separate, rebuildable Zvec semantic index.", optional: false },
   ];
-  return <div className="settings-content">
-    <nav className="settings-index" aria-label="Settings sections">
-      <a href="#settings-providers">Providers</a><a href="#settings-performance">Performance</a><a href="#settings-memory">Memory</a><a href="#settings-mcp">MCP servers</a>
-    </nav>
+  return <>
     <section className="settings-card" id="settings-providers" aria-labelledby="settings-providers-heading" tabIndex={-1}>
       <header className="settings-card-header">
         <div><p className="settings-kicker">Models & connections</p><h2 id="settings-providers-heading">Runtime configuration</h2><p className="muted">Your configured providers and conversation readiness.</p></div>
@@ -45,7 +82,12 @@ export function Settings({ status }: { status?: Status }) {
       </li>)}</ul><p className="muted">Local model warmup uses a synthetic prompt, not session data. Disabled components initialize on demand; ready models may later be unloaded.</p></>}
       {!status?.warmup && !status?.chat_capacity && <p className="muted">{status ? "Performance metrics are not available from this Host." : "Waiting for runtime status…"}</p>}
     </section>
-    <section className="settings-card" id="settings-memory" aria-labelledby="settings-memory-heading" tabIndex={-1}>
+  </>;
+}
+
+function MemoryManagement({ status }: { status?: Status }) {
+  const [memoryOpen, setMemoryOpen] = useState(false);
+  return <section className="settings-card" id="settings-memory" aria-labelledby="settings-memory-heading" tabIndex={-1}>
       <header className="settings-card-header">
         <div><p className="settings-kicker">User context</p><h2 id="settings-memory-heading">Manage long-term Memory</h2><p className="muted">Review the facts your Agent remembers across sessions.</p></div>
         <button disabled={!status?.memory_configured} onClick={() => setMemoryOpen(!memoryOpen)} aria-expanded={memoryOpen} aria-controls="saved-memory">{memoryOpen ? "Hide saved Memory" : "Load saved Memory"}</button>
@@ -54,9 +96,7 @@ export function Settings({ status }: { status?: Status }) {
       {status?.memory && <p role="status">Semantic index: <strong>{status.memory.index_state}</strong> · {status.memory.pending_index_operations} pending{status.memory.last_error && <span className="warning"> · {status.memory.last_error}</span>}</p>}
       <details className="settings-details"><summary>How Memory works</summary><p>Conversation history and session summaries are separate from long-term facts. Native Memory extracts durable user assertions, consolidates duplicates and preserves superseded facts.</p><p>Deleting a session removes its summary and session-scoped Memory, not cross-session facts. Forgetting a fact hides it immediately; vector cleanup is retried in the background. This does not erase source messages or backups.</p></details>
       <div id="saved-memory" hidden={!memoryOpen}>{memoryOpen && <Memories indexEnabled={status?.memory?.index_state !== "disabled"} />}</div>
-    </section>
-    <MCPManagement />
-  </div>;
+    </section>;
 }
 
 function Memories({ indexEnabled }: { indexEnabled: boolean }) {

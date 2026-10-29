@@ -182,6 +182,7 @@ def message_view(message: ChatMessage) -> dict[str, Any]:
             "warnings",
             "created_at",
             "sequence",
+            "memory_operation_id",
         )
     }
 
@@ -721,6 +722,8 @@ def configure_api(
 
     @router.delete("/memories/{identifier}")
     async def forget(identifier: str, rt: RuntimeDependency) -> dict[str, bool]:
+        await rt.memory.owned(identifier)
+        await rt.memory_tasks.invalidate()
         await rt.memory.delete(identifier)
         return {"deleted": True}
 

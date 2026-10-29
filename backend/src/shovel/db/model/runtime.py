@@ -56,5 +56,13 @@ class ChatMessage(Base):
     warnings: Mapped[list[str]] = mapped_column(JSONList, default=list, nullable=False)
     created_at: Mapped[int] = mapped_column(sa.Integer, default=now_ts, nullable=False)
     sequence: Mapped[int] = mapped_column(sa.Integer, nullable=False)
+    memory_operation_id: Mapped[str | None] = mapped_column(sa.Text)
 
     __table_args__ = (sa.UniqueConstraint("conversation_id", "sequence", name="uq_chat_sequence"),)
+
+
+class MemoryEpoch(Base):
+    __tablename__ = "memory_epoch"
+
+    id: Mapped[int] = mapped_column(sa.Integer, primary_key=True)
+    generation: Mapped[int] = mapped_column(sa.Integer, nullable=False, default=0)

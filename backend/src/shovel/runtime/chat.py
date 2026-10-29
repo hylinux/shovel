@@ -55,6 +55,7 @@ class ChatService:
             if conversation is None:
                 raise NotFound("对话", identifier)
             if title is None:
+                await self.runtime.memory_tasks.invalidate(conversation_id=identifier)
                 if conversation.has_short_memory:
                     await self.runtime.memory.forget_conversation(identifier)
                 await session.delete(conversation)
@@ -154,6 +155,7 @@ class ChatService:
             conversation = await session.get(Conversation, identifier)
             if conversation is None:
                 raise NotFound("对话", identifier)
+            generation = await self.runtime.memory_tasks.generation(session)
             history = list(
                 await session.scalars(
                     select(ChatMessage)
@@ -208,10 +210,17 @@ class ChatService:
                 assert saved is not None
                 saved.state, saved.content = "completed", result.content
                 saved.citations, saved.warnings = result.sources, result.warnings
+                if result.extract_long_term:
+                    saved.memory_operation_id = await self.runtime.memory_tasks.enqueue(
+                        session, user, generation=generation, run_id=run_id
+                    )
                 await session.execute(
                     update(Conversation).where(Conversation.id == identifier).values(updated_at=now_ts())
                 )
                 await session.commit()
+                if saved.memory_operation_id:
+                    self.runtime.memory_wake.set()
+                    trace("memory.extraction.queued", operation_id=saved.memory_operation_id)
                 trace(
                     "chat.answer.persisted",
                     message_id=saved.id,

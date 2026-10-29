@@ -1,4 +1,4 @@
-export function startQueryPolling(load: (signal: AbortSignal) => Promise<void>, interval: number): () => void {
+export function startQueryPolling(load: (signal: AbortSignal) => Promise<void | boolean>, interval: number): () => void {
   const controller = new AbortController();
   const page = document;
   let timer: ReturnType<typeof setTimeout>;
@@ -8,7 +8,7 @@ export function startQueryPolling(load: (signal: AbortSignal) => Promise<void>, 
     if (controller.signal.aborted || pending || (interval > 0 && page.hidden)) return;
     pending = true;
     try {
-      await load(controller.signal);
+      if (await load(controller.signal) === false) stop();
     } finally {
       pending = false;
       if (!controller.signal.aborted && interval > 0 && !page.hidden) timer = setTimeout(run, interval);
@@ -22,9 +22,10 @@ export function startQueryPolling(load: (signal: AbortSignal) => Promise<void>, 
 
   if (interval > 0) page.addEventListener("visibilitychange", visibilityChanged);
   void run();
-  return () => {
+  function stop() {
     controller.abort();
     clearTimeout(timer);
     if (interval > 0) page.removeEventListener("visibilitychange", visibilityChanged);
-  };
+  }
+  return stop;
 }

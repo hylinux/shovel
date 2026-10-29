@@ -121,6 +121,7 @@ class MemoryLlmSettings(BaseModel):
     base_url: str = ""
     temperature: float = 0.1
     max_tokens: int = 2000
+    timeout_seconds: float = Field(default=120, gt=0, le=1800)
 
 
 class MemoryEmbedderSettings(BaseModel):

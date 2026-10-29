@@ -80,6 +80,15 @@ def _upgrade(connection: Connection) -> None:
             )
         )
 
+    if 5 not in versions:
+        columns = {row[1] for row in connection.exec_driver_sql("PRAGMA table_info(chat_message)")}
+        if "memory_operation_id" not in columns:
+            connection.exec_driver_sql("ALTER TABLE chat_message ADD COLUMN memory_operation_id TEXT")
+        connection.exec_driver_sql("INSERT OR IGNORE INTO memory_epoch(id, generation) VALUES (1, 0)")
+        connection.execute(
+            insert(SchemaMigration).values(version=5, name="durable_memory_extraction", applied_at=now_ts())
+        )
+
 
 async def upgrade_database(engine: AsyncEngine) -> None:
     async with engine.begin() as connection:

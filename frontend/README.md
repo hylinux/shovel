@@ -54,8 +54,13 @@ before resending. Switching sessions cancels the previous UI subscription.
 No CopilotKit/Next.js server runtime is needed.
 The backend sends `Cache-Control: no-cache, no-transform` on AG-UI responses to
 prevent the development proxy's gzip compression from buffering small SSE
-frames. Text appears before completion even while awaited Memory extraction is
-still running; early text is not confirmation that the message has been saved.
+frames. Early text is not confirmation that the message has been saved.
+`RUN_FINISHED` confirms the durable answer and queued long-term Memory task,
+not completed extraction. A compact message status shows the background update;
+it pauses polling in hidden tabs and stops on completion/failure/cancellation.
+Safe failures offer retry; potentially partial writes require review in
+Settings rather than automatic replay. Short-term Memory is available immediately;
+cross-Session long-term facts become available after extraction finishes.
 
 Endpoints used: `/status`, `/connectors`, `/resources` and its verify/pause/resume/revoke/scans actions, `/jobs` and events/cancel, `/operations` and retry, `/index/cleanup`, `/conversations` and messages, `/agent`, `/search`, `/memories`. The local folder connector uses `config.root_path`. Document paths and source content render as text, never raw HTML or executable file links.
 

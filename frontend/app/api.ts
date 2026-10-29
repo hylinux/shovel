@@ -17,7 +17,7 @@ export type Job = { id: string; resource_id: string; resource_name: string; scan
 export type JobEvent = { id: string; logged_at: UnixSeconds; level: string; stage: string; code: string; message: string; doc_uri?: string };
 export type Session = { id: string; title: string; created_at: UnixSeconds; updated_at: UnixSeconds };
 export type Citation = { index?: number; chunk_id: string; resource_id: string; resource_name: string; doc_uri: string; title: string; text: string; score: number; email?: { sender?: string; to?: string; sent_at?: UnixSeconds | null; received_at?: UnixSeconds | null; folder_path?: string } };
-export type Message = { id: string; conversation_id: string; role: "user" | "assistant"; content: string; state: string; citations: Citation[]; warnings: string[]; created_at: UnixSeconds };
+export type Message = { id: string; conversation_id: string; role: "user" | "assistant"; content: string; state: string; citations: Citation[]; warnings: string[]; created_at: UnixSeconds; memory_operation_id?: string | null };
 export type Memory = { id: string; memory: string; created_at?: UnixSeconds | null };
 export type Items<T> = { items: T[] };
 export type Profile = { id: string; name: string; scan_mode: string; is_enabled: boolean; include: string[]; exclude: string[]; max_file_bytes: number; time_window_days: number | null; pipeline: Record<string, unknown> };
@@ -55,7 +55,7 @@ export async function api<T>(path: string, options: RequestInit = {}): Promise<T
   return body as T;
 }
 
-export function useQuery<T>(path: string | null, interval = 0) {
+export function useQuery<T>(path: string | null, interval = 0, shouldPoll?: (result: T) => boolean) {
   const [data, setData] = useState<T>();
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(Boolean(path));
@@ -65,14 +65,17 @@ export function useQuery<T>(path: string | null, interval = 0) {
     return startQueryPolling(async (signal) => {
       try {
         const result = await api<T>(path, { signal });
-        if (!signal.aborted) { setData(result); setError(""); }
+        if (!signal.aborted) {
+          setData(result); setError("");
+          return shouldPoll?.(result);
+        }
       } catch (error) {
         if (!signal.aborted) setError(errorText(error));
       } finally {
         if (!signal.aborted) setLoading(false);
       }
     }, interval);
-  }, [path, interval, revision]);
+  }, [path, interval, revision, shouldPoll]);
   return { data, error, loading, refresh };
 }
 

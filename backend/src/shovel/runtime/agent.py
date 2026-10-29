@@ -104,6 +104,7 @@ class AgentResult:
     content: str = ""
     sources: list[dict[str, Any]] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
+    extract_long_term: bool = False
 
 
 class ShovelContextProvider(ContextProvider):
@@ -264,8 +265,11 @@ class ShovelContextProvider(ContextProvider):
                 await self.runtime.memory.remember(
                     self.request.content,
                     conversation_id=self.identifier,
-                    extract_long_term=not self.standalone_greeting,
+                    extract_long_term=False,
                 )
+                self.result.extract_long_term = not self.standalone_greeting
+                if self.standalone_greeting:
+                    trace("memory.long_term.skipped", reason="standalone_greeting")
             except RuntimeFailure as exc:
                 self.result.warnings.append(f"回答已生成,但记忆写入失败:{exc.message}")
                 structlog.get_logger("shovel.agent").error(

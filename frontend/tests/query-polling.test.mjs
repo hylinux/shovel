@@ -112,3 +112,31 @@ test("One-off reads still run in a hidden tab and do not refresh on visibility c
   await settled();
   assert.equal(calls, 1);
 });
+
+test("Terminal results stop polling and visibility refresh; a retry starts a fresh query", async (t) => {
+  const page = setup(t);
+  let calls = 0;
+  let pending = true;
+  const load = async () => { calls++; return pending; };
+  const stop = startQueryPolling(load, 2000);
+  t.after(stop);
+  await settled();
+  assert.equal(calls, 1);
+  pending = false;
+  t.mock.timers.tick(2000);
+  await settled();
+  assert.equal(calls, 2);
+  page.show(false);
+  page.show(true);
+  t.mock.timers.tick(20000);
+  await settled();
+  assert.equal(calls, 2);
+  pending = true;
+  const retryStop = startQueryPolling(load, 2000);
+  t.after(retryStop);
+  await settled();
+  assert.equal(calls, 3);
+  t.mock.timers.tick(2000);
+  await settled();
+  assert.equal(calls, 4);
+});

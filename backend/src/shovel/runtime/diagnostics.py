@@ -15,7 +15,7 @@ from structlog.typing import FilteringBoundLogger
 
 _logger: ContextVar[FilteringBoundLogger | None] = ContextVar("shovel_development_logger", default=None)
 _POLL_PATH = re.compile(
-    r"/api/v1/(?:status|resources|jobs|operations|resources/[^/]+/profiles|jobs/[^/]+/events)/?"
+    r"/api/v1/(?:status|resources|jobs|operations(?:/[^/]+)?|resources/[^/]+/profiles|jobs/[^/]+/events)/?"
 )
 _SLOW_REQUEST_SECONDS = 1.0
 

@@ -17,6 +17,7 @@
 from __future__ import annotations
 
 import os
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -179,6 +180,8 @@ def init_memory_store(settings: MemorySettings) -> MemoryStoreInfo:
 def open_memory(
     settings: MemorySettings,
     model: DefaultAgentModelSettings,
+    *,
+    entity_store: Callable[[Callable[[], Any]], Any] | None = None,
 ) -> Memory:
     """构造可读写的 mem0 Memory。
 
@@ -186,6 +189,16 @@ def open_memory(
     """
 
     memory_cls = _require_mem0()
+    if entity_store is not None and hasattr(memory_cls, "entity_store"):
+        base = memory_cls
+        wrap_entity_store = entity_store
+
+        class HostedMemory(base):  # type: ignore[misc, valid-type]  # Optional untyped dependency.
+            @property
+            def entity_store(self) -> Any:
+                return wrap_entity_store(lambda: super(HostedMemory, self).entity_store)
+
+        memory_cls = HostedMemory
 
     return memory_cls.from_config(build_memory_config(settings, model))
 

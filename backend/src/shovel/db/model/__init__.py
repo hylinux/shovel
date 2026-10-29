@@ -37,7 +37,7 @@ from .retrieval import (
     RetrievalLog,
     SchemaMigration,
 )
-from .runtime import ChatMessage, Conversation, Operation
+from .runtime import ChatMessage, Conversation, MemoryEpoch, Operation
 
 __all__ = [
     "AgentScope",
@@ -60,6 +60,7 @@ __all__ = [
     "JobEvent",
     "MemoryBelief",
     "MemoryEpisode",
+    "MemoryEpoch",
     "MemoryLink",
     "MemoryProcedure",
     "MemoryRevision",

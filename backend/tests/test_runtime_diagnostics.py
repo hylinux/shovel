@@ -17,6 +17,17 @@ from shovel.runtime.diagnostics import DevelopmentRequestLogging, development_lo
         ("GET", "/api/v1/resources", "/api/v1/resources", 200, 0.01, None, False),
         ("GET", "/api/v1/jobs", "/api/v1/jobs", 200, 0.01, None, False),
         ("GET", "/api/v1/operations", "/api/v1/operations", 200, 0.01, None, False),
+        ("GET", "/api/v1/operations/memory-id", "/api/v1/operations/{identifier}", 200, 0.01, None, False),
+        ("GET", "/api/v1/operations/memory-id", "/api/v1/operations/{identifier}", 500, 0.01, None, True),
+        (
+            "POST",
+            "/api/v1/operations/memory-id/retry",
+            "/api/v1/operations/{identifier}/retry",
+            200,
+            0.01,
+            None,
+            True,
+        ),
         (
             "GET",
             "/api/v1/resources/private-id/profiles",

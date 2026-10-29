@@ -448,7 +448,7 @@ async def test_legacy_operation_migration_preserves_rows_and_is_repeatable(tmp_p
         async with create_async_session_factory(engine)() as session:
             row = await session.get(Operation, "legacy")
             assert row is not None and row.result == {"completed": 1} and row.request_key is None
-            assert list(await session.scalars(select(SchemaMigration.version))) == [1, 2, 3, 4]
+            assert list(await session.scalars(select(SchemaMigration.version))) == [1, 2, 3, 4, 5]
     finally:
         await context.aclose()
 
@@ -970,8 +970,8 @@ async def test_agui_stream_uses_framework_and_commits_before_success(
             "agent.response.validated",
             "memory.short_term.started",
             "memory.short_term.completed",
-            "memory.long_term.started",
-            "memory.long_term.completed",
+            "memory.long_term.deferred",
+            "memory.extraction.queued",
             "chat.answer.persisted",
             "agent.stream.completed",
         ]
@@ -1254,6 +1254,7 @@ async def test_independent_greetings_keep_recall_and_short_memory_without_fact_e
 
     def add(messages: list[dict[str, str]], *, infer: bool = True, **scope: str) -> None:
         assert messages == [{"role": "user", "content": content.strip()}]
+        scope.pop("metadata", None)
         writes.append((scope, infer))
 
     monkeypatch.setattr(runtime.retrieval, "search", search)
@@ -1292,10 +1293,13 @@ async def test_independent_greetings_keep_recall_and_short_memory_without_fact_e
     assert len(searches) == (0 if fast_path else 1)
     assert len(fake.searches) == 1
     expected = [(runtime.memory.scope(identifier), False)]
-    if not fast_path:
-        expected.append((runtime.memory.scope(), True))
     assert writes == expected
     saved = (await runtime.chat.messages(identifier))[-1]
+    assert bool(saved.memory_operation_id) is not fast_path
+    if not fast_path:
+        assert await runtime.memory_tasks.run_once()
+        expected.append((runtime.memory.scope(), True))
+    assert writes == expected
     assert saved.state == "completed" and saved.content == "Hello!"
     assert bool(saved.warnings) is not fast_path
     assert (await runtime.chat.conversation(identifier)).has_short_memory
@@ -1389,7 +1393,7 @@ async def test_memory_enabled_by_default_recall_write_list_forget(
     assert (await api.delete("/api/v1/memories/foreign")).status_code == 404
 
 
-async def test_long_memory_failure_keeps_answer_and_persisted_warning(
+async def test_long_memory_failure_keeps_answer_and_reports_durable_task_failure(
     runtime: Runtime, api: httpx.AsyncClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     fake = FakeMemory(runtime.memory.scope())
@@ -1421,10 +1425,20 @@ async def test_long_memory_failure_keeps_answer_and_persisted_warning(
     assert response.status_code == 200
     saved = (await runtime.chat.messages(identifier))[-1]
     assert saved.state == "completed" and saved.content == "Answer remains available."
-    assert any("记忆写入失败" in warning for warning in saved.warnings)
+    assert not any("记忆写入失败" in warning for warning in saved.warnings)
+    assert writes == [([{"role": "user", "content": "I prefer tea."}], False)]
+    for _ in range(3):
+        async with runtime.sessions() as session:
+            operation = await session.get(Operation, saved.memory_operation_id)
+            assert operation is not None
+            operation.result = {}
+            await session.commit()
+        assert await runtime.memory_tasks.run_once()
+    operation = await runtime.operations.get(saved.memory_operation_id)
+    assert operation.state == "failed" and operation.attempts == 3 and operation.error
     assert writes == [
         ([{"role": "user", "content": "I prefer tea."}], False),
-        ([{"role": "user", "content": "I prefer tea."}], True),
+        *[([{"role": "user", "content": "I prefer tea."}], True)] * 3,
     ]
 
 
@@ -1547,7 +1561,7 @@ async def test_existing_database_upgrade_and_fts_backfill(tmp_path: Path) -> Non
         await upgrade_database(engine)
         await upgrade_database(engine)
         async with create_async_session_factory(engine)() as session:
-            assert list(await session.scalars(select(SchemaMigration.version))) == [1, 2, 3, 4]
+            assert list(await session.scalars(select(SchemaMigration.version))) == [1, 2, 3, 4, 5]
             assert await session.scalar(text("SELECT count(*) FROM chunk_search")) == 1
             assert (
                 await session.scalar(

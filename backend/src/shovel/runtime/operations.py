@@ -297,6 +297,9 @@ class OperationService:
             return job
 
     async def retry(self, identifier: str) -> Operation:
+        existing = await self.get(identifier)
+        if existing.kind == "memory.extract":
+            return await self.runtime.memory_tasks.retry(existing)
         async with self.runtime.sessions() as session:
             operation = await session.get(Operation, identifier)
             if operation is None:
@@ -322,6 +325,11 @@ class OperationService:
         async with self.runtime.sessions() as session:
             interrupted = list(await session.scalars(select(Operation).where(Operation.state == "running")))
             for operation in interrupted:
+                if operation.kind == "memory.extract" and operation.result.get("write_started"):
+                    operation.state = "failed"
+                    operation.error = "任务被中断且可能已部分写入,请检查记忆;不能自动重放。"
+                    operation.finished_at = now_ts()
+                    continue
                 job = await session.get(Job, operation.job_id) if operation.job_id else None
                 interrupted_shutdown = (
                     job is not None and job.state == JobState.CANCELLED and not job.is_cancel_requested
@@ -405,7 +413,7 @@ class OperationService:
         async with self.runtime.sessions() as session:
             identifier = await session.scalar(
                 select(Operation.id)
-                .where(Operation.state == "queued")
+                .where(Operation.state == "queued", Operation.kind != "memory.extract")
                 .order_by(Operation.queued_at, text("operation.rowid"))
                 .limit(1)
             )

@@ -107,6 +107,41 @@ class RuntimeWorker(BackgroundService):  # type: ignore[misc]  # Framework does 
                 self._endpoint.unlink(missing_ok=True)
 
 
+class MemoryExtractionWorker(BackgroundService):  # type: ignore[misc]
+    def __init__(self, provider: Callable[[], object]) -> None:
+        super().__init__(stop_timeout=45)
+        self._provider = provider
+        self._runtime: Runtime | None = None
+
+    async def start(self, stopping: asyncio.Event) -> None:
+        self._runtime = await resolve_runtime(self._provider)
+        self._runtime.stopping = stopping
+        await super().start(stopping)
+
+    async def execute_async(self, stopping: asyncio.Event) -> None:
+        assert self._runtime is not None
+        runtime = self._runtime
+        try:
+            while not stopping.is_set():
+                runtime.memory_wake.clear()
+                if await runtime.memory_tasks.run_once():
+                    continue
+                try:
+                    await asyncio.wait_for(runtime.memory_wake.wait(), timeout=1)
+                except TimeoutError:
+                    continue
+        except Exception as exc:
+            structlog.get_logger("shovel.memory").error("memory.worker.failed", error_type=type(exc).__name__)
+            stopping.set()
+            raise
+
+    async def stop(self, stopping: asyncio.Event) -> None:
+        if self._runtime is not None:
+            self._runtime.memory.cancel_extraction()
+            self._runtime.memory_wake.set()
+        await super().stop(stopping)
+
+
 class FrontendFiles(StaticFiles):
     async def get_response(self, path: str, scope: Scope) -> Response:
         try:
@@ -153,6 +188,7 @@ def build_host(
         .enable_health_checks(False)
         .use_urls(host, port)
         .add_hosted_service(worker)
+        .add_hosted_service(MemoryExtractionWorker(container.runtime))
         .configure_endpoint(
             lambda _ctx, app: configure_api(app, container.runtime, settings, development=development)
         )
@@ -167,7 +203,7 @@ def build_cli_host(settings: AppSettings) -> tuple[Host, Callable[[], object]]:
     lifetime = ApplicationLifetime()
     host = Host(
         container=container,
-        services=[RuntimeWorker(container.runtime)],
+        services=[RuntimeWorker(container.runtime), MemoryExtractionWorker(container.runtime)],
         lifetime=lifetime,
     )
     return host, container.runtime

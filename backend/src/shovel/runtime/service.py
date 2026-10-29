@@ -18,6 +18,7 @@ from shovel.services.resource_service import ResourceService
 if TYPE_CHECKING:
     from shovel.runtime.chat import ChatService
     from shovel.runtime.memory import MemoryService
+    from shovel.runtime.memory_tasks import MemoryTaskService
     from shovel.runtime.operations import OperationService
     from shovel.runtime.retrieval import RetrievalService
 
@@ -31,6 +32,7 @@ class Runtime:
     ) -> None:
         from shovel.runtime.chat import ChatService
         from shovel.runtime.memory import MemoryService
+        from shovel.runtime.memory_tasks import MemoryTaskService
         from shovel.runtime.operations import OperationService
         from shovel.runtime.retrieval import RetrievalService
 
@@ -39,6 +41,7 @@ class Runtime:
         self.resources = resources
         self.stopping = asyncio.Event()
         self.wake = asyncio.Event()
+        self.memory_wake = asyncio.Event()
         self.worker_state = "idle"
         self.worker_error: str | None = None
         self._sink: ZvecChunkSink | None = None
@@ -46,6 +49,7 @@ class Runtime:
         self.operations: OperationService = OperationService(self)
         self.retrieval: RetrievalService = RetrievalService(self)
         self.memory: MemoryService = MemoryService(settings)
+        self.memory_tasks: MemoryTaskService = MemoryTaskService(self)
         self.chat: ChatService = ChatService(self)
 
     def redact(self, message: str) -> str:

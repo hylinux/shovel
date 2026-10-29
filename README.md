@@ -361,8 +361,9 @@ it instead of overwriting the existing collection.
 When enabled, Memory recalls user background before answering and extracts
 memories from **only the user's message**, never retrieved documents or generated
 answers. Recalled Memory is not a local-document citation. The workbench exposes
-list/forget controls. Memory errors are visible; a write failure keeps the
-generated answer but attaches a persisted warning.
+list/forget controls. A short-term write failure keeps the generated answer
+with a persisted warning; long-term failures appear on the saved message and
+in Background tasks.
 
 Enabled requests use **both** Session-scoped short-term mem0
 messages and workspace-scoped long-term mem0 facts. Short-term Memory stores
@@ -390,9 +391,30 @@ dedicated `memory.llm` model can help further. Use development diagnostics
 elapsed milliseconds) to distinguish extraction inference, embedding, Qdrant
 access and chat inference without logging message bodies. Changing only the Memory LLM does
 not require rebuilding vectors; changing the embedder can require a new
-collection and matching dimensions. Memory writes remain awaited so failures
-can be attached to the saved answer; they are not silently discarded as
-untracked background tasks.
+collection and matching dimensions.
+
+Long-term extraction is a durable background `memory.extract` Operation. Saving
+the answer and enqueueing its extraction share one SQLite transaction; AG-UI
+`RUN_FINISHED` confirms this commit, not completed long-term Memory. The queue
+contains source-message references, not copied text or credentials. A dedicated
+FIFO worker runs independently of scans. Slow LLM inference uses an isolated
+process; embedded Qdrant and mem0 history stay on their single owning thread, so
+the next recall or short-term write does not wait behind that inference.
+Short-term Memory remains immediately available; new long-term facts are
+eventually consistent and may not be available in another Session immediately.
+Shared local model servers can still serialize inference or compete for CPU/GPU.
+
+The worker retries failures before any possible storage write up to three
+attempts. Interrupted pre-write tasks resume after restart. Once a write might
+have started, failure/interruption requires review in Settings and cannot be
+blindly replayed: SQLite and Qdrant do not share an atomic transaction. A safe
+failed task can be retried from its message or Background tasks, unless a newer
+task has already written facts. Session deletion cancels its pending extraction;
+forgetting a fact invalidates all older pending extraction and fences late
+writes. Existing long-term facts survive Session deletion. Forgetting does not
+erase short-term copies or prevent future user messages from introducing facts.
+Queued/running message statuses poll only while the browser tab is visible and
+stop at a terminal state. Background diagnostics retain the originating run ID.
 
 For example, after separately installing and checking a suitable small Ollama
 model, configure it independently of the main Agent:
@@ -404,12 +426,17 @@ base_url = "http://127.0.0.1:11434"
 model = "qwen2.5:3b"
 temperature = 0.1
 max_tokens = 512
+timeout_seconds = 120
 ```
 
 This is a tuning example, not a new default or an automatic model download.
 Check JSON extraction quality with both short inputs and multiple facts before
 adopting the output budget; increase it if results truncate. No existing model
 configuration, embedding model or stored vectors are changed by these optimizations.
+`memory.llm.timeout_seconds` bounds each background LLM call (including worker
+startup); timeout terminates its isolated process. It is not a timeout for
+embedding/vector I/O, and cancelling a remote request does not guarantee that the
+provider stops server-side computation.
 
 The owner is `local-user`; the default workspace preserves the existing `shovel`
 long-term scope, while other workspace paths use separate hashed Agent scopes.

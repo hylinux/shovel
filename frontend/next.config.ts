@@ -9,7 +9,7 @@ export default function nextConfig(phase: string): NextConfig {
           logging: {
             incomingRequests: {
               // FastAPI retains failures and slow requests; avoid duplicate proxy polling logs.
-              ignore: [/^\/api\/v1\/(?:status|resources|jobs|operations|resources\/[^/?]+\/profiles|jobs\/[^/?]+\/events)\/?(?:\?|$)/],
+              ignore: [/^\/api\/v1\/(?:status|resources|jobs|operations(?:\/[^/?]+)?|resources\/[^/?]+\/profiles|jobs\/[^/?]+\/events)\/?(?:\?|$)/],
             },
             browserToTerminal: true,
           },

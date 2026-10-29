@@ -6,7 +6,7 @@ import inspect
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from contextvars import copy_context
-from functools import partial
+from functools import partial, wraps
 from time import perf_counter
 from typing import Any
 
@@ -15,6 +15,39 @@ from shovel.memory.config import memory_paths
 from shovel.memory.store import open_memory
 from shovel.runtime.diagnostics import trace
 from shovel.runtime.errors import NotFound, RuntimeFailure
+
+
+class _TimedMemoryComponent:
+    def __init__(self, target: Any, phase: str, methods: set[str]) -> None:
+        self._target, self._phase, self._methods = target, phase, methods
+
+    def __getattr__(self, name: str) -> Any:
+        value = getattr(self._target, name)
+        if name not in self._methods or not callable(value):
+            return value
+
+        @wraps(value)
+        def call(*args: Any, **kwargs: Any) -> Any:
+            started = perf_counter()
+            trace(f"memory.{self._phase}.started", action=name)
+            try:
+                result = value(*args, **kwargs)
+            except BaseException as exc:
+                trace(
+                    f"memory.{self._phase}.failed",
+                    action=name,
+                    error_type=type(exc).__name__,
+                    elapsed_ms=round((perf_counter() - started) * 1000, 2),
+                )
+                raise
+            trace(
+                f"memory.{self._phase}.completed",
+                action=name,
+                elapsed_ms=round((perf_counter() - started) * 1000, 2),
+            )
+            return result
+
+        return call
 
 
 class MemoryService:
@@ -61,6 +94,14 @@ class MemoryService:
             for path in memory_paths(self.settings.memory):
                 path.mkdir(parents=True, exist_ok=True)
             self._memory = open_memory(self.settings.memory, self.settings.model)
+            for name, phase, methods in (
+                ("llm", "llm", {"generate_response"}),
+                ("embedding_model", "embedding", {"embed", "embed_batch"}),
+                ("vector_store", "vector", {"search", "insert", "update", "delete", "get"}),
+            ):
+                component = getattr(self._memory, name, None)
+                if component is not None:
+                    setattr(self._memory, name, _TimedMemoryComponent(component, phase, methods))
             trace("memory.client.ready", elapsed_ms=round((perf_counter() - started) * 1000, 2))
         return self._memory
 
@@ -122,7 +163,9 @@ class MemoryService:
 
         return await self._call(search)
 
-    async def remember(self, content: str, *, conversation_id: str | None = None) -> None:
+    async def remember(
+        self, content: str, *, conversation_id: str | None = None, extract_long_term: bool = True
+    ) -> None:
         def add() -> None:
             memory = self._get()
             messages = [{"role": "user", "content": content}]
@@ -132,6 +175,9 @@ class MemoryService:
                 # Short-term recall keeps the original user text; only long-term facts need inference.
                 memory.add(messages, infer=False, **self.scope(conversation_id))
                 trace("memory.short_term.completed", elapsed_ms=round((perf_counter() - started) * 1000, 2))
+            if not extract_long_term:
+                trace("memory.long_term.skipped", reason="standalone_greeting")
+                return
             started = perf_counter()
             trace("memory.long_term.started", inference=True)
             memory.add(messages, **self.scope())

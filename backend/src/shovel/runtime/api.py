@@ -712,7 +712,7 @@ def configure_api(
         return StreamingResponse(
             _encode_agent_events(rt.chat.stream(body.thread_id, request, body.run_id), run_id=body.run_id),
             media_type="text/event-stream",
-            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+            headers={"Cache-Control": "no-cache, no-transform", "X-Accel-Buffering": "no"},
         )
 
     @router.get("/memories")

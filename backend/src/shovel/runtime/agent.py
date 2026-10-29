@@ -47,6 +47,28 @@ SYSTEM = """你是 Shovel,用户电脑上的个人知识助手。
 
 EventSink = Callable[[BaseEvent], Awaitable[None]]
 
+_GREETING = re.compile(r"(?:hi|hello|hey|你好|您好|嗨)[\s!\uff01.\u3002]*", re.IGNORECASE)
+_SOCIAL_REPLY = re.compile(
+    r"(?:hi|hello|hey|你好|您好|嗨)[\s!\uff01,.\uff0c\u3002]*"
+    r"(?:(?:how can i help you(?: today)?|有什么可以帮(?:助|到)?(?:你|您)的(?:吗)?)"
+    r"[\s?\uff1f!\uff01.\u3002]*)?",
+    re.IGNORECASE,
+)
+
+
+def standalone_greeting(request: MessageInput, history: list[Message]) -> bool:
+    if (
+        request.search_mode != "auto"
+        or request.resource_ids
+        or not _GREETING.fullmatch(request.content.strip())
+    ):
+        return False
+    # A short answer to a contextual question may be a name or preference, not small talk.
+    return all(
+        (_GREETING if message.role == "user" else _SOCIAL_REPLY).fullmatch(message.text.strip())
+        for message in history
+    )
+
 
 def text_within_json_budget(value: str, limit: int) -> str:
     low, high = 0, min(len(value), max(0, limit))
@@ -93,6 +115,7 @@ class ShovelContextProvider(ContextProvider):
         super().__init__("shovel_knowledge_memory")
         self.runtime, self.identifier, self.request, self.history = runtime, identifier, request, history
         self.result = AgentResult()
+        self.standalone_greeting = standalone_greeting(request, history)
 
     async def search(self, query: str) -> dict[str, Any]:
         """Search accessible local knowledge within this request's resource scope."""
@@ -155,16 +178,21 @@ class ShovelContextProvider(ContextProvider):
                 used = len(json.dumps(entry, ensure_ascii=False)) + 20
                 budget -= used
                 memory_budget -= used
-        search = await self.runtime.retrieval.search(
-            SearchInput(
-                query=request.content[:8000],
-                resource_ids=request.resource_ids,
-                mode=request.search_mode,
-                limit=6,
+        if self.standalone_greeting:
+            trace("retrieval.skipped", reason="standalone_greeting")
+            sources = []
+        else:
+            search = await self.runtime.retrieval.search(
+                SearchInput(
+                    query=request.content[:8000],
+                    resource_ids=request.resource_ids,
+                    mode=request.search_mode,
+                    limit=6,
+                )
             )
-        )
+            sources = search["items"]
         source_budget = budget * 3 // 4
-        for source in search["items"]:
+        for source in sources:
             candidate = {"index": len(self.result.sources) + 1, **source}
             metadata = len(json.dumps({**candidate, "text": ""}, ensure_ascii=False))
             if source_budget - metadata < 150:
@@ -220,9 +248,9 @@ class ShovelContextProvider(ContextProvider):
         references = {int(value) for value in re.findall(r"\[(\d+)\]", self.result.content)}
         if not references.issubset({source["index"] for source in self.result.sources}):
             raise RuntimeFailure("模型返回了未提供的引用编号,回答未标记为成功。", status=502)
-        if not self.result.sources:
+        if not self.result.sources and not self.standalone_greeting:
             self.result.warnings.append("未检索到匹配的本地资料;回答不能视为有本地来源支持的结论。")
-        elif not references:
+        elif self.result.sources and not references:
             self.result.warnings.append("模型未标注本地引用;请自行核实回答。")
         self.result.sources = [item for item in self.result.sources if item["index"] in references]
         trace(
@@ -233,7 +261,11 @@ class ShovelContextProvider(ContextProvider):
         )
         if self.request.memory_enabled:
             try:
-                await self.runtime.memory.remember(self.request.content, conversation_id=self.identifier)
+                await self.runtime.memory.remember(
+                    self.request.content,
+                    conversation_id=self.identifier,
+                    extract_long_term=not self.standalone_greeting,
+                )
             except RuntimeFailure as exc:
                 self.result.warnings.append(f"回答已生成,但记忆写入失败:{exc.message}")
                 structlog.get_logger("shovel.agent").error(

@@ -42,6 +42,38 @@ test("AG-UI terminal failure is not treated as a saved answer", async (t) => {
     () => {}, () => {}), /Citation validation failed/);
 });
 
+test("AG-UI renders incremental text before the response body and durable run finish", { timeout: 5000 }, async (t) => {
+  let controller;
+  let closed = false;
+  let firstText;
+  const received = new Promise((resolve) => { firstText = resolve; });
+  let finished = false;
+  const encoder = new TextEncoder();
+  const emit = (event) => controller.enqueue(encoder.encode(`data: ${JSON.stringify(event)}\n\n`));
+  t.mock.method(globalThis, "fetch", async (_url, options) => {
+    const request = JSON.parse(options.body);
+    return new Response(new ReadableStream({
+      start(stream) {
+        controller = stream;
+        emit({ type: "RUN_STARTED", threadId: request.threadId, runId: request.runId });
+        emit({ type: "TEXT_MESSAGE_START", messageId: "answer", role: "assistant" });
+        emit({ type: "TEXT_MESSAGE_CONTENT", messageId: "answer", delta: "Early text" });
+      },
+    }), { headers: { "content-type": "text/event-stream", "cache-control": "no-cache, no-transform" } });
+  });
+  t.after(() => { if (!closed) controller?.close(); });
+  const run = runAgentMessage("/api/v1/agent", "session", input, new AbortController().signal,
+    (text) => { assert.equal(text, "Early text"); firstText(); }, () => {}, "incremental-run").then(() => { finished = true; });
+  await received;
+  assert.equal(finished, false);
+  emit({ type: "TEXT_MESSAGE_END", messageId: "answer" });
+  emit({ type: "RUN_FINISHED", threadId: "session", runId: "incremental-run" });
+  closed = true;
+  controller.close();
+  await run;
+  assert.equal(finished, true);
+});
+
 test("AG-UI requests respect cancellation before submission", async (t) => {
   const fetch = t.mock.method(globalThis, "fetch", () => { throw new Error("Must not send"); });
   const controller = new AbortController();

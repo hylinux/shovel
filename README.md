@@ -88,6 +88,9 @@ that a quiet request is still open; they do not mean the model has completed.
 duration covers the whole Agent run, including context and Memory work.
 Logs include metadata only, never prompts, answers, retrieved excerpts, Memory
 facts, tool arguments/results or credentials.
+AG-UI responses use `Cache-Control: no-cache, no-transform` so the Next.js
+development proxy does not gzip-buffer small SSE events until the run ends.
+Other responses retain their normal compression behavior.
 Next.js server output and browser
 console logs are forwarded with the `web` prefix; browser console output is
 forwarded verbatim, so do not log sensitive data there. These additional
@@ -361,7 +364,7 @@ answers. Recalled Memory is not a local-document citation. The workbench exposes
 list/forget controls. Memory errors are visible; a write failure keeps the
 generated answer but attaches a persisted warning.
 
-Enabled requests read and write **both** Session-scoped short-term mem0
+Enabled requests use **both** Session-scoped short-term mem0
 messages and workspace-scoped long-term mem0 facts. Short-term Memory stores
 the original user message with `infer=False`, avoiding a duplicate LLM
 extraction; long-term Memory still extracts and merges facts. Recall combines
@@ -372,15 +375,41 @@ Settings. There is no TTL or automatic promotion. Both writes use only the
 user's message. With Memory explicitly disabled through the API, neither
 scope is read or written; ordinary SQLite conversation history still works.
 
+For narrowly recognized standalone greetings (such as `Hi` or `你好`), the Agent
+keeps Memory recall and the short-term write, but skips automatic RAG and
+long-term fact extraction. This applies only to automatic retrieval without an
+explicit resource selection, in a new Session or recognized greeting-only
+history. Contextual answers (for example a nickname), other short messages and
+explicit searches retain the normal path. Model-invoked search tools remain
+available. Intentional greeting-only replies do not get a missing-source warning.
+
 These optimizations reduce model calls, not the cost of the remaining model
 inference. For CPU-only Ollama, a smaller tool-capable chat model and a smaller
 dedicated `memory.llm` model can help further. Use development diagnostics
-(`memory.completed` / `model.completed`, elapsed milliseconds) to identify the
-bottleneck without logging message bodies. Changing only the Memory LLM does
+(`memory.llm.*`, `memory.embedding.*`, `memory.vector.*`, and `model.call.*`,
+elapsed milliseconds) to distinguish extraction inference, embedding, Qdrant
+access and chat inference without logging message bodies. Changing only the Memory LLM does
 not require rebuilding vectors; changing the embedder can require a new
 collection and matching dimensions. Memory writes remain awaited so failures
 can be attached to the saved answer; they are not silently discarded as
 untracked background tasks.
+
+For example, after separately installing and checking a suitable small Ollama
+model, configure it independently of the main Agent:
+
+```toml
+[memory.llm]
+provider = "ollama"
+base_url = "http://127.0.0.1:11434"
+model = "qwen2.5:3b"
+temperature = 0.1
+max_tokens = 512
+```
+
+This is a tuning example, not a new default or an automatic model download.
+Check JSON extraction quality with both short inputs and multiple facts before
+adopting the output budget; increase it if results truncate. No existing model
+configuration, embedding model or stored vectors are changed by these optimizations.
 
 The owner is `local-user`; the default workspace preserves the existing `shovel`
 long-term scope, while other workspace paths use separate hashed Agent scopes.

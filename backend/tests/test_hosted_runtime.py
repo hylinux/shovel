@@ -1010,6 +1010,7 @@ async def test_agui_stream_uses_framework_and_commits_before_success(
         assert private not in output
     assert response.status_code == 200, response.text
     assert response.headers["content-type"].startswith("text/event-stream")
+    assert "no-transform" in response.headers["cache-control"]
     events = [
         json.loads(line.removeprefix("data: "))
         for line in response.text.splitlines()
@@ -1212,6 +1213,96 @@ class FakeMemory:
 
     def close(self) -> None:
         self.closed = True
+
+
+@pytest.mark.parametrize(
+    ("content", "history", "mode", "resource_ids", "fast_path"),
+    [
+        (" Hi! ", [], "auto", [], True),
+        ("你好\uff01", [("Hi", "Hello! How can I help you today?")], "auto", [], True),
+        ("Hi", [("你好", "你好\uff01有什么可以帮你的吗\uff1f")], "auto", [], True),
+        ("Hi", [("Remember my nickname", "What is your nickname?")], "auto", [], False),
+        ("Hi", [("Remember my nickname", "Tell me your nickname.")], "auto", [], False),
+        pytest.param("Hi", [("Hi", "What is your nickname?")], "auto", [], False, id="greeting-as-name"),
+        ("Yes", [], "auto", [], False),
+        ("I prefer private-tea.", [], "auto", [], False),
+        ("Hi, search my notes", [], "auto", [], False),
+        ("Hi", [], "keyword", [], False),
+        ("Hi", [], "auto", ["selected-resource"], False),
+    ],
+)
+async def test_independent_greetings_keep_recall_and_short_memory_without_fact_extraction(
+    runtime: Runtime,
+    api: httpx.AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    content: str,
+    history: list[tuple[str, str]],
+    mode: str,
+    resource_ids: list[str],
+    fast_path: bool,
+) -> None:
+    runtime.settings.memory.embedder.model = "test"
+    fake = FakeMemory(runtime.memory.scope())
+    runtime.memory._memory = fake
+    searches: list[SearchInput] = []
+    writes: list[tuple[dict[str, str], bool]] = []
+
+    async def search(request: SearchInput) -> dict[str, Any]:
+        searches.append(request)
+        return {"items": []}
+
+    def add(messages: list[dict[str, str]], *, infer: bool = True, **scope: str) -> None:
+        assert messages == [{"role": "user", "content": content.strip()}]
+        writes.append((scope, infer))
+
+    monkeypatch.setattr(runtime.retrieval, "search", search)
+    monkeypatch.setattr(fake, "add", add)
+    runtime.chat.agent._client = httpx.AsyncClient(
+        transport=httpx.MockTransport(lambda _request: streamed_completion("Hello!"))
+    )
+    identifier = (await api.post("/api/v1/conversations", json={})).json()["id"]
+    async with runtime.sessions() as session:
+        for index, (question, answer) in enumerate(history):
+            session.add_all(
+                [
+                    ChatMessage(
+                        conversation_id=identifier, role="user", content=question, sequence=index * 2 + 1
+                    ),
+                    ChatMessage(
+                        conversation_id=identifier, role="assistant", content=answer, sequence=index * 2 + 2
+                    ),
+                ]
+            )
+        await session.commit()
+    with development_logging():
+        response = await api.post(
+            "/api/v1/agent",
+            json={
+                "threadId": identifier,
+                "runId": "greeting-run",
+                "messages": [{"id": "question", "role": "user", "content": content}],
+                "tools": [],
+                "context": [],
+                "state": {},
+                "forwardedProps": {"search_mode": mode, "resource_ids": resource_ids},
+            },
+        )
+    assert '"RUN_FINISHED"' in response.text, response.text
+    assert len(searches) == (0 if fast_path else 1)
+    assert len(fake.searches) == 1
+    expected = [(runtime.memory.scope(identifier), False)]
+    if not fast_path:
+        expected.append((runtime.memory.scope(), True))
+    assert writes == expected
+    saved = (await runtime.chat.messages(identifier))[-1]
+    assert saved.state == "completed" and saved.content == "Hello!"
+    assert bool(saved.warnings) is not fast_path
+    assert (await runtime.chat.conversation(identifier)).has_short_memory
+    output = capsys.readouterr().out
+    assert ("retrieval.skipped" in output) is fast_path
+    assert ("memory.long_term.skipped" in output) is fast_path
+    assert "private-tea" not in output
 
 
 @pytest.mark.parametrize("protocol", ["rest", "agui"])
@@ -1755,13 +1846,17 @@ async def test_tool_diagnostics_preserve_results_and_exceptions_without_payloads
 
 
 async def test_real_mem0_local_qdrant_recall_persistence_and_forget(
-    runtime: Runtime, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    runtime: Runtime,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
     monkeypatch.setenv("MEM0_TELEMETRY", "false")
     from mem0.utils.factory import EmbedderFactory, LlmFactory
 
     llm_calls: list[dict[str, Any]] = []
     recall_embeddings: list[str] = []
+    fail_llm = False
 
     class Embedder:
         def embed(self, _text: str, _action: str | None = None) -> list[float]:
@@ -1775,6 +1870,8 @@ async def test_real_mem0_local_qdrant_recall_persistence_and_forget(
     class Llm:
         def generate_response(self, **kwargs: Any) -> str:
             llm_calls.append(kwargs)
+            if fail_llm:
+                raise ValueError("private-provider-error")
             return json.dumps(
                 {
                     "facts": ["User prefers tea."],
@@ -1794,7 +1891,18 @@ async def test_real_mem0_local_qdrant_recall_persistence_and_forget(
     info = await asyncio.to_thread(init_memory_store, runtime.settings.memory)
     assert info.created
     assert os.environ["MEM0_TELEMETRY"] == "false"
-    await runtime.memory.remember("I prefer tea.", conversation_id="tea-conversation")
+    with development_logging(), trace_context(run_id="mem0-phases"):
+        await runtime.memory.remember("I prefer tea.", conversation_id="tea-conversation")
+    output = capsys.readouterr().out
+    for event in (
+        "memory.llm.started",
+        "memory.llm.completed",
+        "memory.embedding.completed",
+        "memory.vector.completed",
+    ):
+        line = next(line for line in output.splitlines() if f"{event} " in line)
+        assert "run_id=mem0-phases" in line
+    assert "I prefer tea" not in output and "User prefers tea" not in output
     assert len(llm_calls) == 1
     rows = await runtime.memory.list()
     assert len(rows) == 1
@@ -1813,6 +1921,12 @@ async def test_real_mem0_local_qdrant_recall_persistence_and_forget(
     assert (await runtime.memory.list())[0]["id"] == identifier
     await runtime.memory.delete(identifier)
     assert await runtime.memory.list() == []
+    fail_llm = True
+    with development_logging(), pytest.raises(RuntimeFailure, match="Memory"):
+        await runtime.memory.remember("private-failure-input")
+    output = capsys.readouterr().out
+    assert "memory.llm.failed" in output and "error_type=ValueError" in output
+    assert "private-provider-error" not in output and "private-failure-input" not in output
 
 
 @pytest.mark.parametrize("development", [False, True])

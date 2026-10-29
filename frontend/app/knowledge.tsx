@@ -19,6 +19,12 @@ function Chat({ sessionId, status, onActivity }: { sessionId: string; status?: S
   const [pendingQuestion, setPendingQuestion] = useState("");
   const action = useAgentAction();
   const messagesRef = useRef<HTMLDivElement>(null);
+  const questionRef = useRef<HTMLTextAreaElement>(null);
+  const wasBusy = useRef(false);
+  useEffect(() => {
+    if (wasBusy.current && !action.busy) questionRef.current?.focus({ preventScroll: true });
+    wasBusy.current = action.busy;
+  }, [action.busy]);
   useEffect(() => {
     if (before && !action.busy) return;
     const messages = messagesRef.current;
@@ -56,7 +62,7 @@ function Chat({ sessionId, status, onActivity }: { sessionId: string; status?: S
   </div><form className="composer" onSubmit={submit}>
     {status && (!status.model_configured || !status.memory_configured) && <p className="warning">Configure Chat and Memory in Settings before sending a message.</p>}
     <Feedback error={action.error} /><label htmlFor="question">Message</label>
-    <textarea id="question" value={content} onChange={(event) => setContent(event.target.value)} onKeyDown={(event) => {
+    <textarea ref={questionRef} id="question" value={content} onChange={(event) => setContent(event.target.value)} onKeyDown={(event) => {
       if (event.key === "Enter" && event.ctrlKey && !event.nativeEvent.isComposing) {
         event.preventDefault();
         if (!event.repeat && !sendDisabled) event.currentTarget.form?.requestSubmit();

@@ -1,13 +1,12 @@
-# Local Ollama example with native SQLite/Zvec Memory.
-# Adjust model names and Windows paths for your environment.
-
 service_name = "shovel"
 agent_host = "127.0.0.1"
 agent_port = 19566
 http_host = "127.0.0.1"
 dev_http_host = "127.0.0.1"
 dev_http_port = 9999
+dev_frontend_port = 3000
 http_port = 8080
+frontend_path = ""
 log_level = "INFO"
 
 [document]
@@ -16,11 +15,39 @@ log_level = "INFO"
 model_provider_type = "ollama"
 base_endpoint = "http://127.0.0.1:11434"
 model_name = "shovel-chat-fast"
-max_input_chars = 4000
-max_output_tokens = 512
+max_input_chars = 48000
+max_output_tokens = 32000
 security_key = ""
 api_version = ""
 timeout_seconds = 300
+
+
+[agent]
+workspace_path = "C:/Users/hongw/.shovel/workspaces/default"
+enable_python_extensions = false
+max_tool_iterations = 10
+
+[performance]
+warm_index = true
+warm_local_models = true
+max_foreground_runs = 0
+foreground_queue_seconds = 120
+background_idle_seconds = 5
+embedding_cache_entries = 128
+embedding_cache_seconds = 300
+
+[database]
+url = "sqlite+aiosqlite:///C:/Users/hongw/.shovel/data/shovel.db"
+echo = false
+
+[zvec]
+knowledge_path = "C:/Users/hongw/.shovel/knowledge/shovel_chunk"
+chunk_collection = "shovel_chunk"
+dim = 1024
+metric = "cosine"
+hnsw_m = 16
+hnsw_ef_construction = 200
+log_dir = "C:/Users/hongw/.shovel/logs"
 
 [embedding]
 provider = "ollama"
@@ -31,33 +58,36 @@ api_version = ""
 batch_size = 8
 timeout_seconds = 300
 
-[zvec]
-dim = 1024
-knowledge_path = 'C:\Users\honguo\.shovel\knowledge\shovel_chunk'
 
 [memory]
 collection = "shovel_memory"
+index_path = "C:/Users/hongw/.shovel/memory/zvec"
 dim = 1024
-index_path = 'C:\Users\honguo\.shovel\memory\zvec'
+context_max_chars = 2000
+max_items = 10
+min_similarity = 0.55
+min_confidence = 0.8
+summary_max_chars = 2000
+history_messages = 20
+
+[memory.embedder]
+provider = "ollama"
+model = "bge-m3"
+revision = ""
+base_url = "http://127.0.0.1:11434"
+api_key = ""
+api_version = ""
+batch_size = 32
+timeout_seconds = 120.0
+max_retries = 3
+max_input_chars = 8000
 
 [memory.llm]
 model_provider_type = "ollama"
 base_endpoint = "http://127.0.0.1:11434"
 model_name = "shovel-chat-fast"
+api_version = ""
 security_key = ""
-api_version = ""
-max_output_tokens = 2000
-timeout_seconds = 300
-
-[memory.embedder]
-provider = "ollama"
-base_url = "http://127.0.0.1:11434"
-model = "bge-m3"
-api_key = ""
-api_version = ""
-batch_size = 8
-timeout_seconds = 300
-
-[database]
-url = "sqlite+aiosqlite:///C:/Users/honguo/.shovel/data/shovel.db"
-echo = false
+max_input_chars = 24000
+max_output_tokens = 2048
+timeout_seconds = 120

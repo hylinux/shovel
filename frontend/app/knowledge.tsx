@@ -44,7 +44,7 @@ function Chat({ sessionId, status, onActivity }: { sessionId: string; status?: S
     {history.loading ? <p role="status">Loading session…</p> : history.data?.items.length === 0 ? <Empty title="What would you like to find out?">Ask a specific question about your indexed documents. Answers include source excerpts when available.</Empty> : history.data?.items.map((message) =>
       <article className={`message ${message.role}`} key={message.id}><h3>{message.role === "user" ? "You" : "Shovel"}{message.state === "failed" && <span className="badge bad">Failed</span>}</h3>
         <p className="preserve">{message.content || (message.state === "failed" ? "The model could not complete this response." : "")}</p>
-        {message.warnings?.map((warning, index) => <p className="warning" key={index}>{warning}</p>)}<Sources items={message.citations || []} />
+        {message.warnings?.map((warning, index) => <p className="warning" key={index}>{warning}</p>)}<Sources items={message.citations || []} collapsible />
         {message.memory_operation_id && <MemoryTaskStatus id={message.memory_operation_id} />}</article>)}
     {action.busy && <div role="status" className="pending-answer"><p className="preserve">{pendingQuestion}</p>{action.text ? <p className="preserve">{action.text}</p> : <span>Shovel is preparing an answer…</span>}{action.tool && <p className="muted">Tool: {action.tool}</p>}</div>}
   </div><form className="composer" onSubmit={submit}>

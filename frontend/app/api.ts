@@ -3,6 +3,8 @@
 import { useCallback, useEffect, useReducer, useRef, useState } from "react";
 import { forgetPendingRequest, makePendingRequest, savePendingRequest, type PendingRequest } from "./request-recovery";
 import { runAgentMessage, type AgentMessageInput } from "./agent-client";
+import { mergeSessionHistory } from "./session-history";
+import { startQueryPolling } from "./query-polling";
 
 export type Status = { service: string; workspace_id: string; embedding_configured: boolean; model_configured: boolean; model_name: string; memory_configured: boolean };
 export type UnixSeconds = number;
@@ -13,7 +15,7 @@ export type Connector = { kind: string; display_name: string; description: strin
 export type Operation = { id: string; kind: string; state: string; resource_id: string | null; job_id: string | null; result: Record<string, unknown>; error: string | null; queued_at: UnixSeconds; started_at?: UnixSeconds | null; finished_at?: UnixSeconds | null };
 export type Job = { id: string; resource_id: string; resource_name: string; scan_mode: string; state: string; discovered: number; skipped_unchanged: number; fetched: number; parsed: number; chunked: number; embedded: number; failed_docs: number; chunks_written: number; bytes_read: number; current_stage: string; progress: number; error_detail?: string; queued_at: UnixSeconds; started_at?: UnixSeconds | null; finished_at?: UnixSeconds | null; is_cancel_requested: boolean };
 export type JobEvent = { id: string; logged_at: UnixSeconds; level: string; stage: string; code: string; message: string; doc_uri?: string };
-export type Conversation = { id: string; title: string; created_at: UnixSeconds; updated_at: UnixSeconds };
+export type Session = { id: string; title: string; created_at: UnixSeconds; updated_at: UnixSeconds };
 export type Citation = { index?: number; chunk_id: string; resource_id: string; resource_name: string; doc_uri: string; title: string; text: string; score: number; email?: { sender?: string; to?: string; sent_at?: UnixSeconds | null; received_at?: UnixSeconds | null; folder_path?: string } };
 export type Message = { id: string; conversation_id: string; role: "user" | "assistant"; content: string; state: string; citations: Citation[]; warnings: string[]; created_at: UnixSeconds };
 export type Memory = { id: string; memory: string; created_at?: UnixSeconds | null };
@@ -53,7 +55,6 @@ export async function api<T>(path: string, options: RequestInit = {}): Promise<T
   return body as T;
 }
 
-// Schedule the next poll only after the previous request finishes.
 export function useQuery<T>(path: string | null, interval = 0) {
   const [data, setData] = useState<T>();
   const [error, setError] = useState("");
@@ -61,25 +62,54 @@ export function useQuery<T>(path: string | null, interval = 0) {
   const [revision, refresh] = useReducer((value: number) => value + 1, 0);
   useEffect(() => {
     if (!path) return;
-    const controller = new AbortController();
-    let timer: ReturnType<typeof setTimeout>;
-    async function load() {
+    return startQueryPolling(async (signal) => {
       try {
-        const result = await api<T>(path!, { signal: controller.signal });
-        if (!controller.signal.aborted) { setData(result); setError(""); }
+        const result = await api<T>(path, { signal });
+        if (!signal.aborted) { setData(result); setError(""); }
       } catch (error) {
-        if (!controller.signal.aborted) setError(errorText(error));
+        if (!signal.aborted) setError(errorText(error));
       } finally {
-        if (!controller.signal.aborted) {
-          setLoading(false);
-          if (interval) timer = setTimeout(load, interval);
-        }
+        if (!signal.aborted) setLoading(false);
       }
-    }
-    void load();
-    return () => { controller.abort(); clearTimeout(timer); };
+    }, interval);
   }, [path, interval, revision]);
   return { data, error, loading, refresh };
+}
+
+export function useSessionHistory(revision: number) {
+  const [data, setData] = useState<Session[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState("");
+  const [hasMore, setHasMore] = useState(false);
+  const [refreshRevision, refresh] = useReducer((value: number) => value + 1, 0);
+  const controller = useRef<AbortController | null>(null);
+  const nextOffset = useRef(0);
+  const load = useCallback((offset: number) => {
+    controller.current?.abort();
+    const request = new AbortController();
+    controller.current = request;
+    void api<Items<Session>>(`/conversations?limit=100&offset=${offset}`, { signal: request.signal }).then((page) => {
+      if (!request.signal.aborted) {
+        setData((current) => mergeSessionHistory(offset === 0 ? [] : current, page.items));
+        nextOffset.current = offset + page.items.length;
+        setHasMore(page.items.length === 100);
+        setError("");
+      }
+    }, (error: unknown) => {
+      if (!request.signal.aborted) setError(errorText(error));
+    }).finally(() => {
+      if (!request.signal.aborted) setLoading(false);
+      if (controller.current === request) controller.current = null;
+    });
+  }, []);
+  useEffect(() => {
+    void load(0);
+    return () => controller.current?.abort();
+  }, [load, revision, refreshRevision]);
+  const loadMore = useCallback(() => {
+    if (!controller.current) { setLoading(true); void load(nextOffset.current); }
+  }, [load]);
+  return { data, loading, error, hasMore, refresh, loadMore };
 }
 
 export function useAction() {
@@ -135,16 +165,16 @@ export function useAgentAction() {
   const [tool, setTool] = useState("");
   const controller = useRef<AbortController | null>(null);
   useEffect(() => () => controller.current?.abort(), []);
-  const run = useCallback(async (conversationId: string, input: AgentMessageInput): Promise<boolean> => {
+  const run = useCallback(async (sessionId: string, input: AgentMessageInput): Promise<boolean> => {
     if (controller.current) return false;
     const request = new AbortController();
     controller.current = request;
     setBusy(true); setError(""); setText(""); setTool("");
     try {
-      await runAgentMessage("/api/v1/agent", conversationId, input, request.signal, setText, setTool);
+      await runAgentMessage("/api/v1/agent", sessionId, input, request.signal, setText, setTool);
       return true;
     } catch (error) {
-      if (!request.signal.aborted) setError(`${errorText(error)} Check conversation history before resending.`);
+      if (!request.signal.aborted) setError(`${errorText(error)} Check session history before resending.`);
       return false;
     } finally {
       if (!request.signal.aborted) { setBusy(false); setText(""); setTool(""); }

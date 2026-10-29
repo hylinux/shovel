@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import re
 import sys
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -13,6 +14,10 @@ from starlette.types import ASGIApp, Message, Receive, Scope, Send
 from structlog.typing import FilteringBoundLogger
 
 _logger: ContextVar[FilteringBoundLogger | None] = ContextVar("shovel_development_logger", default=None)
+_POLL_PATH = re.compile(
+    r"/api/v1/(?:status|resources|jobs|operations|resources/[^/]+/profiles|jobs/[^/]+/events)/?"
+)
+_SLOW_REQUEST_SECONDS = 1.0
 
 
 @contextmanager
@@ -61,6 +66,8 @@ class DevelopmentRequestLogging:
         started = perf_counter()
         status = 500
         request_id = uuid4().hex
+        routine_poll = scope["method"] == "GET" and _POLL_PATH.fullmatch(scope["path"]) is not None
+        failed = False
 
         async def send_response(message: Message) -> None:
             nonlocal status
@@ -73,18 +80,22 @@ class DevelopmentRequestLogging:
             await send(message)
 
         with trace_context(request_id=request_id):
-            trace("http.started", method=scope["method"])
+            if not routine_poll:
+                trace("http.started", method=scope["method"])
             try:
                 await self.app(scope, receive, send_response)
             except BaseException as exc:
+                failed = True
                 trace("http.failed", error_type=type(exc).__name__)
                 raise
             finally:
-                # Route templates exclude user-controlled path/query values and credentials.
-                trace(
-                    "http.completed",
-                    method=scope["method"],
-                    route=getattr(scope.get("route"), "path", "<unmatched>"),
-                    status=status,
-                    elapsed_ms=round((perf_counter() - started) * 1000, 2),
-                )
+                elapsed = perf_counter() - started
+                if failed or not routine_poll or not 200 <= status < 300 or elapsed >= _SLOW_REQUEST_SECONDS:
+                    # Route templates exclude user-controlled path/query values and credentials.
+                    trace(
+                        "http.completed",
+                        method=scope["method"],
+                        route=getattr(scope.get("route"), "path", "<unmatched>"),
+                        status=status,
+                        elapsed_ms=round(elapsed * 1000, 2),
+                    )

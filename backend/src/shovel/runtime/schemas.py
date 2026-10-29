@@ -172,7 +172,7 @@ class ConversationInput(InputModel):
 class MessageInput(InputModel):
     content: str = Field(min_length=1, max_length=16000)
     resource_ids: list[str] = Field(default_factory=list, max_length=200)
-    memory_enabled: bool = False
+    memory_enabled: bool = True
     search_mode: SearchMode = "auto"
 
 

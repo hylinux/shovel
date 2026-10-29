@@ -38,7 +38,7 @@ for the recovery protocol and its limits.
 
 The current application includes resource management, durable background scans,
 index recovery/cleanup, keyword/vector/hybrid retrieval, a persistent single-Agent
-chat with numbered local citations, and opt-in Memory. The light Web workbench has
+chat with numbered local citations, and default-on Memory. The light Web workbench has
 Resources, Background tasks, and Knowledge chat views. This is a single-owner
 runtime. Its main Agent uses Microsoft Agent Framework (MAF), with workspace
 Skills, MCP tools, and opt-in Python function/Agent/Workflow extensions. It is not
@@ -71,7 +71,13 @@ these addresses. Both services stop when either exits or the command is stopped.
 status and duration, operation/job IDs, scan stages and counts, retrieval, model
 calls, and Memory actions. Responses include `X-Shovel-Request-ID` for correlating
 requests with these logs. Backend diagnostics omit request/response bodies,
-credentials, document text and source paths. Next.js server output and browser
+credentials, document text and source paths. Successful routine polling reads
+(status, resource/job/operation lists, scan profiles and job events) omit HTTP
+start/completion logs unless they take at least one second. Failed responses,
+exceptions and slow requests remain visible, as do scan, Agent and Memory
+diagnostics. Next.js omits duplicate access logs for these polling URLs; the
+backend remains responsible for their failure and latency diagnostics.
+Next.js server output and browser
 console logs are forwarded with the `web` prefix; browser console output is
 forwarded verbatim, so do not log sensitive data there. These additional
 diagnostics are scoped to `run dev`, not `run prd` or other CLI commands.
@@ -221,7 +227,7 @@ compatibility endpoint, backed by the same MAF Agent.
 The main Agent uses MAF's `Agent`, Chat Completions client, tool-calling loop,
 `AgentSession`, context-provider hooks, native sliding-window compaction, and
 `SkillsProvider`. A Shovel context provider supplies bounded SQLite conversation
-history, existing RAG evidence, and optional scoped mem0 recall; its after-run
+history, existing RAG evidence, and default-on scoped mem0 recall; its after-run
 hook validates citations and writes user-only memories. Tool transcripts and
 loaded Skill instructions are run-local; SQLite retains user/assistant turns and
 cited excerpts across restarts. This is not a custom HTTP model execution loop.
@@ -323,10 +329,13 @@ arguments. These are trusted extensions, not sandboxed code or read-only tools.
 Review them and restrict MCP tool lists before enabling them. Shovel does not
 install user extensions or dependencies automatically.
 
-## Opt-in Memory
+## Memory
 
-Memory is disabled by default for each chat request. Enabling it requires an
+Memory is enabled by default for every chat request. It requires an
 explicit `[memory.embedder]` model and either `[model]` or `[memory.llm]`.
+Unconfigured Memory is an explicit error, not a silent fallback to a memory-free
+chat. The Web interface has no per-message toggle; API clients can explicitly set
+`memory_enabled = false` for memory-free requests.
 Memory uses mem0 and its own Qdrant collection, independent of the Zvec knowledge
 index; its embedding dimension must match `memory.dim`.
 
@@ -341,13 +350,26 @@ answers. Recalled Memory is not a local-document citation. The workbench exposes
 list/forget controls. Memory errors are visible; a write failure keeps the
 generated answer but attaches a persisted warning.
 
-Enabled requests read and write **both** conversation-scoped short-term mem0
-facts and workspace-scoped long-term mem0 facts. Short-term facts are isolated
-by conversation ID and removed when that conversation is deleted; long-term
-facts survive and are managed through the saved Memory list/forget controls.
-There is no TTL or automatic promotion. Both writes use only the user's message
-and can incur separate extraction/embedding calls. With Memory off, neither
+Enabled requests read and write **both** Session-scoped short-term mem0
+messages and workspace-scoped long-term mem0 facts. Short-term Memory stores
+the original user message with `infer=False`, avoiding a duplicate LLM
+extraction; long-term Memory still extracts and merges facts. Recall combines
+the current Session and workspace scopes in one filtered mem0 search, embedding
+the query once. Short-term messages are isolated by Session ID and removed when
+that Session is deleted; long-term facts survive and are managed through
+Settings. There is no TTL or automatic promotion. Both writes use only the
+user's message. With Memory explicitly disabled through the API, neither
 scope is read or written; ordinary SQLite conversation history still works.
+
+These optimizations reduce model calls, not the cost of the remaining model
+inference. For CPU-only Ollama, a smaller tool-capable chat model and a smaller
+dedicated `memory.llm` model can help further. Use development diagnostics
+(`memory.completed` / `model.completed`, elapsed milliseconds) to identify the
+bottleneck without logging message bodies. Changing only the Memory LLM does
+not require rebuilding vectors; changing the embedder can require a new
+collection and matching dimensions. Memory writes remain awaited so failures
+can be attached to the saved answer; they are not silently discarded as
+untracked background tasks.
 
 The owner is `local-user`; the default workspace preserves the existing `shovel`
 long-term scope, while other workspace paths use separate hashed Agent scopes.

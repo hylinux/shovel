@@ -122,7 +122,8 @@ async def test_live_chinese_retrieval_grounding_and_unknown_answer_baseline(tmp_
                 session.add(conversation)
                 await session.commit()
             answer = await runtime.chat.send(
-                conversation.id, MessageInput(content=case["question"], search_mode="hybrid")
+                conversation.id,
+                MessageInput(content=case["question"], search_mode="hybrid", memory_enabled=False),
             )
             grounded = all(fact in answer.content for fact in case["facts"]) and any(
                 citation["doc_uri"].endswith(case["document"]) for citation in answer.citations
@@ -145,6 +146,7 @@ async def test_live_chinese_retrieval_grounding_and_unknown_answer_baseline(tmp_
             MessageInput(
                 content="请仅根据本地资料回答:火星基地的预算是多少?如果没有记载请明确说不知道。",
                 search_mode="keyword",
+                memory_enabled=False,
             ),
         )
         report["unknown_answer"] = unknown.content

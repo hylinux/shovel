@@ -820,7 +820,7 @@ async def test_chat_citations_persist_without_memory(
     runtime.chat.agent._client = httpx.AsyncClient(transport=httpx.MockTransport(response))
 
     async def no_memory(_query: str) -> list[dict[str, Any]]:
-        raise AssertionError("Memory must not run without opt-in")
+        raise AssertionError("Memory must not run when explicitly disabled")
 
     monkeypatch.setattr(runtime.memory, "search", no_memory)
     conversation = (await api.post("/api/v1/conversations", json={})).json()
@@ -867,7 +867,10 @@ async def test_invalid_model_citations_are_explicit_persisted_failure(
         await session.commit()
     with pytest.raises(RuntimeFailure, match="引用编号"):
         await runtime.chat.send(
-            conversation.id, MessageInput(content="Shovel", resource_ids=[identifier], search_mode="keyword")
+            conversation.id,
+            MessageInput(
+                content="Shovel", resource_ids=[identifier], search_mode="keyword", memory_enabled=False
+            ),
         )
     history = await runtime.chat.messages(conversation.id)
     assert history[-1].state == "failed"
@@ -926,7 +929,11 @@ async def test_agui_stream_uses_framework_and_commits_before_success(
             "tools": [],
             "context": [],
             "state": {},
-            "forwardedProps": {"resource_ids": [resource_id], "search_mode": "keyword"},
+            "forwardedProps": {
+                "resource_ids": [resource_id],
+                "search_mode": "keyword",
+                "memory_enabled": False,
+            },
         },
     )
     assert response.status_code == 200, response.text
@@ -976,7 +983,7 @@ async def test_agui_silent_model_keeps_stream_alive_until_terminal_event(
             "tools": [],
             "context": [],
             "state": {},
-            "forwardedProps": {"search_mode": "keyword"},
+            "forwardedProps": {"search_mode": "keyword", "memory_enabled": False},
         },
     )
     assert response.status_code == 200
@@ -1009,7 +1016,7 @@ async def test_agui_disconnect_cancel_scope_preserves_failed_message(
     monkeypatch.setattr(runtime.chat.agent, "respond", respond)
     identifier = (await api.post("/api/v1/conversations", json={})).json()["id"]
     stream = _encode_agent_events(
-        runtime.chat.stream(identifier, MessageInput(content="hi"), "disconnect-run")
+        runtime.chat.stream(identifier, MessageInput(content="hi", memory_enabled=False), "disconnect-run")
     )
     async with asyncio.timeout(10):
         assert "RUN_STARTED" in await anext(stream)
@@ -1052,7 +1059,9 @@ async def test_agui_cancellation_fails_pending_message_and_releases_conversation
         )
     )
     identifier = (await api.post("/api/v1/conversations", json={})).json()["id"]
-    stream = runtime.chat.stream(identifier, MessageInput(content="Question"), "cancel-run")
+    stream = runtime.chat.stream(
+        identifier, MessageInput(content="Question", memory_enabled=False), "cancel-run"
+    )
     async with asyncio.timeout(10):
         async for event in stream:
             if event.type == "TEXT_MESSAGE_CONTENT":
@@ -1082,16 +1091,23 @@ class FakeMemory:
         self.scope = scope
         self.rows = [{"id": "owned", "memory": "User prefers Chinese", **scope}]
         self.messages: list[dict[str, str]] = []
+        self.searches: list[dict[str, Any]] = []
         self.threads: set[int] = set()
         self.closed = False
         self.vector_store = SimpleNamespace(client=SimpleNamespace(close=lambda: None))
 
-    def search(self, query: str, *, filters: dict[str, str], top_k: int) -> dict[str, Any]:
+    def search(self, query: str, *, filters: dict[str, Any], top_k: int) -> dict[str, Any]:
         self.threads.add(threading.get_ident())
         assert filters["user_id"] == self.scope["user_id"]
-        return {
-            "results": [row for row in self.rows if all(row.get(k) == v for k, v in filters.items())][:top_k]
-        }
+        self.searches.append(filters)
+
+        def matches(row: dict[str, Any], conditions: dict[str, Any]) -> bool:
+            return all(
+                any(matches(row, branch) for branch in value) if key == "OR" else row.get(key) == value
+                for key, value in conditions.items()
+            )
+
+        return {"results": [row for row in self.rows if matches(row, filters)][:top_k]}
 
     def get_all(self, *, filters: dict[str, str], top_k: int) -> dict[str, Any]:
         self.threads.add(threading.get_ident())
@@ -1100,7 +1116,7 @@ class FakeMemory:
             "results": [row for row in self.rows if all(row.get(k) == v for k, v in filters.items())][:top_k]
         }
 
-    def add(self, messages: list[dict[str, str]], **scope: str) -> None:
+    def add(self, messages: list[dict[str, str]], *, infer: bool = True, **scope: str) -> None:
         self.threads.add(threading.get_ident())
         self.messages = messages
         assert scope["user_id"] == "local-user"
@@ -1118,10 +1134,39 @@ class FakeMemory:
         self.closed = True
 
 
-async def test_memory_opt_in_recall_write_list_forget(
+@pytest.mark.parametrize("protocol", ["rest", "agui"])
+async def test_default_memory_requires_configuration(
+    runtime: Runtime, api: httpx.AsyncClient, protocol: str
+) -> None:
+    identifier = (await api.post("/api/v1/conversations", json={})).json()["id"]
+    if protocol == "rest":
+        response = await api.post(f"/api/v1/conversations/{identifier}/messages", json={"content": "Hello"})
+        assert response.status_code == 503
+    else:
+        response = await api.post(
+            "/api/v1/agent",
+            json={
+                "threadId": identifier,
+                "runId": "unconfigured-memory",
+                "messages": [{"id": "question", "role": "user", "content": "Hello"}],
+                "tools": [],
+                "context": [],
+                "state": {},
+                "forwardedProps": {},
+            },
+        )
+        assert '"RUN_ERROR"' in response.text
+        assert '"RUN_FINISHED"' not in response.text
+    assert "Memory" in response.text
+    assert await runtime.chat.messages(identifier) == []
+
+
+@pytest.mark.parametrize("protocol", ["rest", "agui"])
+async def test_memory_enabled_by_default_recall_write_list_forget(
     runtime: Runtime,
     api: httpx.AsyncClient,
     tmp_path: Path,
+    protocol: str,
 ) -> None:
     identifier = await index_notes(runtime, tmp_path / "notes")
     fake = FakeMemory(runtime.memory.scope())
@@ -1130,7 +1175,10 @@ async def test_memory_opt_in_recall_write_list_forget(
     prompts: list[dict[str, Any]] = []
 
     def response(request: httpx.Request) -> httpx.Response:
-        prompts.append(json.loads(request.content))
+        body = json.loads(request.content)
+        prompts.append(body)
+        if body.get("stream"):
+            return streamed_completion("持久队列 [1]。")
         return httpx.Response(
             200,
             json={"created": 1, "choices": [{"message": {"role": "assistant", "content": "持久队列 [1]。"}}]},
@@ -1138,23 +1186,75 @@ async def test_memory_opt_in_recall_write_list_forget(
 
     runtime.chat.agent._client = httpx.AsyncClient(transport=httpx.MockTransport(response))
     conversation = (await api.post("/api/v1/conversations")).json()
-    response = await api.post(
-        f"/api/v1/conversations/{conversation['id']}/messages",
-        json={
-            "content": "Tell me about Shovel",
-            "resource_ids": [identifier],
-            "memory_enabled": True,
-        },
-    )
+    if protocol == "rest":
+        response = await api.post(
+            f"/api/v1/conversations/{conversation['id']}/messages",
+            json={"content": "Tell me about Shovel", "resource_ids": [identifier]},
+        )
+    else:
+        response = await api.post(
+            "/api/v1/agent",
+            json={
+                "threadId": conversation["id"],
+                "runId": "default-memory",
+                "messages": [{"id": "question", "role": "user", "content": "Tell me about Shovel"}],
+                "tools": [],
+                "context": [],
+                "state": {},
+                "forwardedProps": {"resource_ids": [identifier]},
+            },
+        )
+        assert '"RUN_FINISHED"' in response.text
     assert response.status_code == 200, response.text
     assert "User prefers Chinese" in prompts[0]["messages"][-2]["content"]
     assert fake.messages == [{"role": "user", "content": "Tell me about Shovel"}]
     assert len(fake.threads) == 1
+    assert len(fake.searches) == 1
+    assert (await runtime.chat.conversation(conversation["id"])).has_short_memory
     assert (await api.get("/api/v1/memories")).json()["items"][0]["id"] == "owned"
     assert (await api.delete("/api/v1/memories/owned")).json()["deleted"]
     assert (await api.get("/api/v1/memories")).json()["items"] == []
     fake.rows = [{"id": "foreign", "memory": "other", "user_id": "other", "agent_id": "shovel"}]
     assert (await api.delete("/api/v1/memories/foreign")).status_code == 404
+
+
+async def test_long_memory_failure_keeps_answer_and_persisted_warning(
+    runtime: Runtime, api: httpx.AsyncClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fake = FakeMemory(runtime.memory.scope())
+    runtime.settings.memory.embedder.model = "test"
+    runtime.memory._memory = fake
+    writes: list[tuple[list[dict[str, str]], bool]] = []
+
+    def add(messages: list[dict[str, str]], *, infer: bool = True, **scope: str) -> None:
+        writes.append((messages, infer))
+        if infer:
+            raise RuntimeError("Extraction unavailable")
+
+    monkeypatch.setattr(fake, "add", add)
+    runtime.chat.agent._client = httpx.AsyncClient(
+        transport=httpx.MockTransport(
+            lambda _request: httpx.Response(
+                200,
+                json={
+                    "created": 1,
+                    "choices": [{"message": {"role": "assistant", "content": "Answer remains available."}}],
+                },
+            )
+        )
+    )
+    identifier = (await api.post("/api/v1/conversations", json={})).json()["id"]
+    response = await api.post(
+        f"/api/v1/conversations/{identifier}/messages", json={"content": "I prefer tea."}
+    )
+    assert response.status_code == 200
+    saved = (await runtime.chat.messages(identifier))[-1]
+    assert saved.state == "completed" and saved.content == "Answer remains available."
+    assert any("记忆写入失败" in warning for warning in saved.warnings)
+    assert writes == [
+        ([{"role": "user", "content": "I prefer tea."}], False),
+        ([{"role": "user", "content": "I prefer tea."}], True),
+    ]
 
 
 async def test_mem0_short_term_isolation_dual_write_and_conversation_cleanup(
@@ -1165,26 +1265,29 @@ async def test_mem0_short_term_isolation_dual_write_and_conversation_cleanup(
         [
             {"id": "short-a", "memory": "Only in a", **runtime.memory.scope("a")},
             {"id": "short-b", "memory": "Only in b", **runtime.memory.scope("b")},
+            {"id": "foreign", "memory": "Other workspace", **fake.scope, "agent_id": "foreign"},
+            {"id": "foreign-user", "memory": "Other user", **fake.scope, "user_id": "foreign"},
         ]
     )
     runtime.settings.memory.embedder.model = "test"
     runtime.memory._memory = fake
     recalled = await runtime.memory.search("context", conversation_id="a")
     assert {row["id"] for row in recalled} == {"owned", "short-a"}
-    writes: list[dict[str, str]] = []
+    assert len(fake.searches) == 1
+    writes: list[tuple[dict[str, str], bool]] = []
 
-    def add(messages: list[dict[str, str]], **scope: str) -> None:
+    def add(messages: list[dict[str, str]], *, infer: bool = True, **scope: str) -> None:
         assert messages == [{"role": "user", "content": "Remember my preference"}]
-        writes.append(scope)
+        writes.append((scope, infer))
 
     fake.add = add  # type: ignore[method-assign]
     await runtime.memory.remember("Remember my preference", conversation_id="a")
-    assert writes == [runtime.memory.scope("a"), runtime.memory.scope()]
+    assert writes == [(runtime.memory.scope("a"), False), (runtime.memory.scope(), True)]
     async with runtime.sessions() as session:
         session.add(Conversation(id="a", has_short_memory=True))
         await session.commit()
     assert (await api.delete("/api/v1/conversations/a")).status_code == 200
-    assert {row["id"] for row in fake.rows} == {"owned", "short-b"}
+    assert {row["id"] for row in fake.rows} == {"owned", "short-b", "foreign", "foreign-user"}
     other_settings = runtime.settings.model_copy(deep=True)
     other_settings.agent.workspace_path = runtime.settings.agent.workspace / "other"
     other = MemoryService(other_settings)
@@ -1466,13 +1569,15 @@ async def test_context_budget_counts_escaped_evidence_and_bounds_history(
         patch.object(runtime.retrieval, "search", search),
     ):
         for _ in range(3):
-            answer = await runtime.chat.send(conversation.id, MessageInput(content="Shovel"))
+            answer = await runtime.chat.send(
+                conversation.id, MessageInput(content="Shovel", memory_enabled=False)
+            )
             assert answer.citations
         assert all(sum(len(message["content"]) for message in prompt) <= 2000 for prompt in prompts)
         evidence = json.loads(prompts[-1][-2]["content"].split("\n", 1)[1])
         assert answer.citations[0]["text"] == evidence["sources"][0]["text"]
         with pytest.raises(RuntimeFailure, match="上下文预算"):
-            await runtime.chat.send(conversation.id, MessageInput(content="x" * 1900))
+            await runtime.chat.send(conversation.id, MessageInput(content="x" * 1900, memory_enabled=False))
         assert (await runtime.chat.messages(conversation.id))[-1].state == "failed"
 
 
@@ -1525,7 +1630,7 @@ async def test_agent_context_budget_counts_native_tool_results(
     runtime.chat.agent._client = httpx.AsyncClient(transport=httpx.MockTransport(model))
     identifier = (await api.post("/api/v1/conversations", json={})).json()["id"]
     with pytest.raises(RuntimeFailure, match="上下文"):
-        await runtime.chat.send(identifier, MessageInput(content="Use oversized"))
+        await runtime.chat.send(identifier, MessageInput(content="Use oversized", memory_enabled=False))
     assert requests == 1
     assert (await runtime.chat.messages(identifier))[-1].state == "failed"
 
@@ -1536,15 +1641,21 @@ async def test_real_mem0_local_qdrant_recall_persistence_and_forget(
     monkeypatch.setenv("MEM0_TELEMETRY", "false")
     from mem0.utils.factory import EmbedderFactory, LlmFactory
 
+    llm_calls: list[dict[str, Any]] = []
+    recall_embeddings: list[str] = []
+
     class Embedder:
         def embed(self, _text: str, _action: str | None = None) -> list[float]:
+            if _action == "search" and _text == "tea":
+                recall_embeddings.append(_text)
             return [1.0, 0.0, 0.0, 0.0]
 
         def embed_batch(self, texts: list[str], _action: str | None = None) -> list[list[float]]:
             return [self.embed(value) for value in texts]
 
     class Llm:
-        def generate_response(self, **_kwargs: Any) -> str:
+        def generate_response(self, **kwargs: Any) -> str:
+            llm_calls.append(kwargs)
             return json.dumps(
                 {
                     "facts": ["User prefers tea."],
@@ -1565,12 +1676,16 @@ async def test_real_mem0_local_qdrant_recall_persistence_and_forget(
     assert info.created
     assert os.environ["MEM0_TELEMETRY"] == "false"
     await runtime.memory.remember("I prefer tea.", conversation_id="tea-conversation")
+    assert len(llm_calls) == 1
     rows = await runtime.memory.list()
     assert len(rows) == 1
     identifier = rows[0]["id"]
     assert (await runtime.memory.search("tea"))[0]["id"] == identifier
+    before = len(recall_embeddings)
     recalled = await runtime.memory.search("tea", conversation_id="tea-conversation")
     assert len(recalled) == 2
+    assert len(recall_embeddings) == before + 1
+    assert {item["memory"] for item in recalled} == {"I prefer tea.", "User prefers tea."}
     assert len(await runtime.memory.search("tea", conversation_id="another-conversation")) == 1
     await runtime.memory.forget_conversation("tea-conversation")
     assert len(await runtime.memory.search("tea", conversation_id="tea-conversation")) == 1

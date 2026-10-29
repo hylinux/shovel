@@ -102,13 +102,15 @@ class MemoryService:
     async def search(self, query: str, *, conversation_id: str | None = None) -> list[dict[str, Any]]:
         def search() -> list[dict[str, Any]]:
             memory = self._get()
-            rows = self._items(memory.search(query, **self._scope_arguments(memory.search, 5)))
+            arguments = self._scope_arguments(memory.search, 10 if conversation_id is not None else 5)
             if conversation_id is not None:
-                short = self._items(
-                    memory.search(query, **self._scope_arguments(memory.search, 5, conversation_id))
-                )
-                rows = short + rows
-            return rows
+                # One recall embeds the query once, without widening the workspace/session boundary.
+                arguments.pop("agent_id", None)
+                arguments["filters"] = {
+                    "user_id": self.scope()["user_id"],
+                    "OR": [self.scope(), self.scope(conversation_id)],
+                }
+            return self._items(memory.search(query, **arguments))
 
         return await self._call(search)
 
@@ -117,7 +119,8 @@ class MemoryService:
             memory = self._get()
             messages = [{"role": "user", "content": content}]
             if conversation_id is not None:
-                memory.add(messages, **self.scope(conversation_id))
+                # Short-term recall keeps the original user text; only long-term facts need inference.
+                memory.add(messages, infer=False, **self.scope(conversation_id))
             memory.add(messages, **self.scope())
 
         await self._call(add)

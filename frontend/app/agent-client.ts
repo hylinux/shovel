@@ -9,7 +9,7 @@ export type AgentMessageInput = {
 
 export async function runAgentMessage(
   url: string,
-  conversationId: string,
+  sessionId: string,
   input: AgentMessageInput,
   signal: AbortSignal,
   onText: (text: string) => void,
@@ -18,7 +18,7 @@ export async function runAgentMessage(
   const { content, ...forwardedProps } = input;
   const agent = new HttpAgent({
     url,
-    threadId: conversationId,
+    threadId: sessionId,
     initialMessages: [{ id: crypto.randomUUID(), role: "user", content }],
   });
   const abort = () => agent.abortRun();
@@ -34,7 +34,7 @@ export async function runAgentMessage(
       onRunFinishedEvent: () => { finished = true; },
     });
     if (failure) throw new Error(failure);
-    if (!finished) throw new Error("Agent connection ended before completion. Check conversation history before sending again.");
+    if (!finished) throw new Error("Agent connection ended before completion. Check session history before sending again.");
   } finally {
     signal.removeEventListener("abort", abort);
   }

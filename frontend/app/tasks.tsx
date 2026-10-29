@@ -38,7 +38,7 @@ function HistoryMaintenance({ refresh }: { refresh: () => void }) {
     if (receipt) { setConfirm(false); action.setNotice("History maintenance queued. Idempotency receipts and active work are retained."); refresh(); }
   }
   return <details className="inline-panel"><summary>Task history retention</summary>
-    <p>Delete old terminal jobs, their events, retrieval logs, completed cleanup records and unkeyed operations. Conversations, documents, pending cleanup and keyed request receipts are retained. Nothing is deleted automatically.</p>
+    <p>Delete old terminal jobs, their events, retrieval logs, completed cleanup records and unkeyed operations. Sessions, documents, pending cleanup and keyed request receipts are retained. Nothing is deleted automatically.</p>
     <label>Keep latest days<input type="number" min={1} max={36500} required value={days} onChange={(event) => setDays(Number(event.target.value))} /></label>
     <button disabled={action.busy || !Number.isInteger(days) || days < 1 || days > 36500} onClick={() => setConfirm(true)}>Prune old history…</button>
     {confirm && <div role="alert" className="confirmation"><p>Delete up to 1000 records per category older than {days} days? This cannot be undone.</p>

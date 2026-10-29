@@ -1,122 +1,56 @@
 "use client";
 
 import { useState, type FormEvent } from "react";
-import { segment, useAction, useAgentAction, useQuery, type Citation, type Conversation, type Items, type Memory, type MessagePage, type Resource, type Status } from "./api";
+import { segment, useAgentAction, useQuery, type MessagePage, type Status } from "./api";
 import { Empty, Feedback, Sources } from "./ui";
 
-export function Knowledge({ resources, status }: { resources: Resource[]; status?: Status }) {
-  const [tab, setTab] = useState<"chat" | "search">("chat");
-  const [selected, setSelected] = useState<string[]>([]);
-  const [mode, setMode] = useState("auto");
-  const [memory, setMemory] = useState(false);
-  const [memoryOpen, setMemoryOpen] = useState(false);
-  const available = resources.filter((resource) => !["paused", "revoked"].includes(resource.state));
-  const resourceIds = selected.filter((id) => available.some((resource) => resource.id === id));
-  return <section>
-    <div className="subnav" aria-label="Knowledge tools"><button aria-pressed={tab === "chat"} onClick={() => setTab("chat")}>Conversation</button><button aria-pressed={tab === "search"} onClick={() => setTab("search")}>Search documents</button></div>
-    <details className="scope-panel"><summary>Knowledge scope <span>{resourceIds.length ? `${resourceIds.length} selected` : "All accessible resources"} · {mode} search</span></summary><p className="muted">Leave every resource unchecked to search all accessible resources.</p><div className="resource-checks">{available.length ? available.map((resource) => <label className="check" key={resource.id}><input type="checkbox" checked={selected.includes(resource.id)} onChange={(event) => setSelected((current) => event.target.checked ? [...current, resource.id] : current.filter((id) => id !== resource.id))} />{resource.name}</label>) : <p>No accessible resources yet. Add and scan a folder in Resources.</p>}</div><label className="mode-field">Search mode<select value={mode} onChange={(event) => setMode(event.target.value)}><option value="auto">Auto</option><option value="keyword">Keyword</option><option value="vector" disabled={!status?.embedding_configured}>Vector</option><option value="hybrid" disabled={!status?.embedding_configured}>Hybrid</option></select></label></details>
-    {tab === "chat" ? <><div className="memory-choice"><label className="check"><input type="checkbox" checked={memory} disabled={!status?.memory_configured} onChange={(event) => setMemory(event.target.checked)} />Use Memory for messages in this session</label><p>Off by default. When enabled, your statements may be sent to configured mem0 models and persisted as facts.{!status?.memory_configured && " Configure [memory] in settings.toml to enable it."}</p></div><Conversations status={status} resourceIds={resourceIds} mode={mode} memory={memory && Boolean(status?.memory_configured)} /></> : <Search resourceIds={resourceIds} mode={mode} />}
-    <section className="memory-section"><button className="text-button" onClick={() => setMemoryOpen(!memoryOpen)} aria-expanded={memoryOpen}>{memoryOpen ? "Hide" : "Manage"} long-term Memory</button><p className="muted">View or forget long-term facts stored by mem0. Short-term copies remain until their conversation is deleted. Opening this section contacts your configured Memory provider.</p>{memoryOpen && <Memories />}</section>
+export function Knowledge({ status, sessionId, onSessionChanged }: { status?: Status; sessionId: string; onSessionChanged: () => void }) {
+  return <section className="session-content" aria-label="Chat session">{sessionId
+    ? <Chat key={sessionId} sessionId={sessionId} status={status} onActivity={onSessionChanged} />
+    : <Empty title="A session grounded in your documents">Choose New Session or open a session from the sidebar.</Empty>}
   </section>;
 }
 
-function Conversations({ status, resourceIds, mode, memory }: { status?: Status; resourceIds: string[]; mode: string; memory: boolean }) {
-  const [offset, setOffset] = useState(0);
-  const conversations = useQuery<Items<Conversation>>(`/conversations?limit=100&offset=${offset}`);
-  const [selected, setSelected] = useState("");
-  const action = useAction();
-  async function create() {
-    const result = await action.run<Conversation>("/conversations", {});
-    if (result) { conversations.refresh(); setSelected(result.id); }
-  }
-  return <div className="chat-layout"><aside className="conversation-list">
-    <button className="primary" disabled={action.busy} onClick={create}>{action.busy ? "Creating…" : "+ New conversation"}</button>
-    <Feedback error={action.error || conversations.error} retry={conversations.error ? conversations.refresh : undefined} />
-    {conversations.loading ? <p role="status">Loading conversations…</p> : conversations.data?.items.length === 0 ? <p className="muted">No conversations yet.</p> : conversations.data?.items.map((conversation) =>
-      <button key={conversation.id} className="conversation-button" aria-current={selected === conversation.id ? "true" : undefined} onClick={() => setSelected(conversation.id)}>{conversation.title || "Untitled conversation"}</button>)}
-    <div className="button-row"><button disabled={offset === 0} onClick={() => setOffset(Math.max(0, offset - 100))}>Previous</button>
-      <button disabled={(conversations.data?.items.length ?? 0) < 100} onClick={() => setOffset(offset + 100)}>Next</button></div>
-  </aside><div className="conversation-content">{selected ? <>
-    <ConversationMaintenance key={`manage-${selected}`} identifier={selected} refresh={conversations.refresh} deleted={() => { setSelected(""); conversations.refresh(); }} />
-    <Chat key={selected} conversationId={selected} status={status} resourceIds={resourceIds} mode={mode} memory={memory} onSent={conversations.refresh} />
-  </> : <Empty title="A conversation grounded in your documents">Create a conversation to ask a question. Or use Search documents to inspect your index without a chat model.</Empty>}</div></div>;
-}
-
-function ConversationMaintenance({ identifier, refresh, deleted }: { identifier: string; refresh: () => void; deleted: () => void }) {
-  const action = useAction();
-  const [title, setTitle] = useState("");
-  const [confirm, setConfirm] = useState(false);
-  async function rename(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    if (await action.run(`/conversations/${segment(identifier)}`, { title }, "PATCH")) { refresh(); action.setNotice("Conversation renamed."); }
-  }
-  async function remove() {
-    if (await action.run(`/conversations/${segment(identifier)}`, undefined, "DELETE")) deleted();
-  }
-  return <details><summary>Manage conversation</summary><form onSubmit={rename} className="button-row">
-    <label>New title<input required maxLength={200} value={title} onChange={(event) => setTitle(event.target.value)} disabled={action.busy} /></label>
-    <button disabled={action.busy}>Rename</button></form>
-    <button disabled={action.busy} onClick={() => setConfirm(true)}>Delete conversation…</button>
-    {confirm && <div role="alert" className="confirmation"><p>Delete this conversation, its messages and its short-term Memory? Long-term Memory is kept.</p>
-      <button disabled={action.busy} onClick={remove}>Confirm deletion</button><button onClick={() => setConfirm(false)}>Keep conversation</button></div>}
-    <Feedback error={action.error} notice={action.notice} /></details>;
-}
-
-function Chat({ conversationId, status, resourceIds, mode, memory, onSent }: { conversationId: string; status?: Status; resourceIds: string[]; mode: string; memory: boolean; onSent: () => void }) {
+function Chat({ sessionId, status, onActivity }: { sessionId: string; status?: Status; onActivity: () => void }) {
   const [before, setBefore] = useState<number>();
-  const history = useQuery<MessagePage>(`/conversations/${segment(conversationId)}/messages?limit=100${before ? `&before=${before}` : ""}`);
+  const history = useQuery<MessagePage>(`/conversations/${segment(sessionId)}/messages?limit=100${before ? `&before=${before}` : ""}`);
   const [content, setContent] = useState("");
   const [pendingQuestion, setPendingQuestion] = useState("");
   const action = useAgentAction();
+  const sendDisabled = action.busy || !content.trim() || !status?.model_configured || !status?.memory_configured || history.loading || Boolean(history.error);
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (!content.trim() || action.busy) return;
+    if (sendDisabled) return;
     const question = content.trim();
     setPendingQuestion(question);
-    const response = await action.run(conversationId, { content: question, resource_ids: resourceIds, memory_enabled: memory, search_mode: mode });
-    if (response) { setContent(""); setBefore(undefined); onSent(); }
+    const response = await action.run(sessionId, { content: question, resource_ids: [], memory_enabled: true, search_mode: "auto" });
+    if (response) { setContent(""); setBefore(undefined); }
+    onActivity();
     setPendingQuestion("");
     // Failed model calls may still have persisted user and failed assistant messages.
     history.refresh();
   }
-  return <><div className="button-row">
-    <button disabled={!history.data?.next_before || action.busy} onClick={() => setBefore(history.data?.next_before ?? undefined)}>Older messages</button>
-    {before && <button onClick={() => setBefore(undefined)}>Latest messages</button>}
-  </div><div className="messages" aria-label="Conversation messages" aria-busy={history.loading || action.busy}>
+  return <><div className="messages" aria-label="Session messages" aria-busy={history.loading || action.busy}>
+    {(history.data?.next_before || before) && <div className="button-row">
+      {history.data?.next_before && <button disabled={action.busy} onClick={() => setBefore(history.data?.next_before ?? undefined)}>Older messages</button>}
+      {before && <button disabled={action.busy} onClick={() => setBefore(undefined)}>Latest messages</button>}
+    </div>}
     <Feedback error={history.error} retry={history.refresh} />
-    {history.loading ? <p role="status">Loading conversation…</p> : history.data?.items.length === 0 ? <Empty title="What would you like to find out?">Ask a specific question about your indexed documents. Answers include source excerpts when available.</Empty> : history.data?.items.map((message) =>
+    {history.loading ? <p role="status">Loading session…</p> : history.data?.items.length === 0 ? <Empty title="What would you like to find out?">Ask a specific question about your indexed documents. Answers include source excerpts when available.</Empty> : history.data?.items.map((message) =>
       <article className={`message ${message.role}`} key={message.id}><h3>{message.role === "user" ? "You" : "Shovel"}{message.state === "failed" && <span className="badge bad">Failed</span>}</h3>
         <p className="preserve">{message.content || (message.state === "failed" ? "The model could not complete this response." : "")}</p>
         {message.warnings?.map((warning, index) => <p className="warning" key={index}>{warning}</p>)}<Sources items={message.citations || []} /></article>)}
     {action.busy && <div role="status" className="pending-answer"><p className="preserve">{pendingQuestion}</p>{action.text ? <p className="preserve">{action.text}</p> : <span>Shovel is preparing an answer…</span>}{action.tool && <p className="muted">Tool: {action.tool}</p>}</div>}
   </div><form className="composer" onSubmit={submit}>
-    {!status?.model_configured && <p className="warning">Configure <code>[model]</code> in settings.toml for chat. Search documents is available without a model.</p>}
+    {status && (!status.model_configured || !status.memory_configured) && <p className="warning">Configure Chat and Memory in Settings before sending a message.</p>}
     <Feedback error={action.error} /><label htmlFor="question">Message</label>
-    <textarea id="question" value={content} onChange={(event) => setContent(event.target.value)} placeholder="Ask about your documents…" rows={3} required disabled={action.busy || !status?.model_configured} />
-    <div className="composer-footer"><span className="muted">{memory ? "Memory enabled for this message" : "Memory off"} · {resourceIds.length ? `${resourceIds.length} resources` : "All accessible resources"}</span>
-      <button className="primary" disabled={action.busy || !content.trim() || !status?.model_configured || history.loading || Boolean(history.error)}>{action.busy ? "Waiting for model…" : "Send message"}</button></div>
+    <textarea id="question" value={content} onChange={(event) => setContent(event.target.value)} onKeyDown={(event) => {
+      if (event.key === "Enter" && event.ctrlKey && !event.nativeEvent.isComposing) {
+        event.preventDefault();
+        if (!event.repeat && !sendDisabled) event.currentTarget.form?.requestSubmit();
+      }
+    }} placeholder="Ask about your documents…" rows={4} maxLength={16000} required disabled={action.busy} aria-describedby="message-shortcuts" />
+    <div className="composer-footer"><span className="muted" id="message-shortcuts">Ctrl + Enter to send · Enter for a new line</span>
+      <button className="primary" aria-keyshortcuts="Control+Enter" disabled={sendDisabled}>{action.busy ? "Waiting for model…" : "Send Message"}</button></div>
   </form></>;
-}
-
-function Search({ resourceIds, mode }: { resourceIds: string[]; mode: string }) {
-  const [query, setQuery] = useState("");
-  const [result, setResult] = useState<{ mode: string; items: Citation[] }>();
-  const action = useAction();
-  async function submit(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    const response = await action.run<{ mode: string; items: Citation[] }>("/search", { query: query.trim(), resource_ids: resourceIds, mode, limit: 6 });
-    if (response) setResult(response);
-  }
-  return <div className="search-tool"><h2>Search documents</h2><p className="muted">Test retrieval directly. No chat model or Memory is used.</p><form onSubmit={submit} className="search-form"><label className="grow">Search query<input value={query} onChange={(event) => setQuery(event.target.value)} required placeholder="Find a phrase, concept, or document…" disabled={action.busy} /></label><button className="primary" disabled={action.busy || !query.trim()}>{action.busy ? "Searching…" : "Search index"}</button></form><Feedback error={action.error} />{result && <><p className="muted">{result.items.length} results · {result.mode} search</p>{result.items.length ? <Sources items={result.items} /> : <Empty title="No matching passages">Try a different query, expand the resource scope, or check that a scan has completed.</Empty>}</>}</div>;
-}
-
-function Memories() {
-  const memories = useQuery<Items<Memory>>("/memories");
-  const [confirmId, setConfirmId] = useState("");
-  const action = useAction();
-  async function forget(id: string) {
-    const result = await action.run<{ deleted: boolean }>(`/memories/${segment(id)}`, undefined, "DELETE");
-    if (result?.deleted) { setConfirmId(""); memories.refresh(); action.setNotice("Memory forgotten."); }
-  }
-  return <div className="memory-panel"><Feedback error={memories.error} retry={memories.refresh} /><Feedback error={action.error} notice={action.notice} />{memories.loading ? <p role="status">Loading saved Memory…</p> : memories.data?.items.length === 0 ? <Empty title="No saved facts">Memory stays off until you explicitly enable it for chat.</Empty> : memories.data?.items.map((item) => <article className="memory-row" key={item.id}><p className="preserve">{item.memory}</p>{confirmId === item.id ? <div className="confirmation"><p>Forget this saved fact? This cannot be undone.</p><div className="button-row"><button className="danger" disabled={action.busy} onClick={() => forget(item.id)}>Confirm forget</button><button disabled={action.busy} onClick={() => setConfirmId("")}>Keep fact</button></div></div> : <button disabled={action.busy} onClick={() => setConfirmId(item.id)}>Forget…</button>}</article>)}</div>;
 }

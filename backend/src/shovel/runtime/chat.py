@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncIterator
+from collections.abc import AsyncGenerator
 from contextlib import suppress
 from time import perf_counter
 from typing import TYPE_CHECKING
@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING
 import structlog
 from ag_ui.core import BaseEvent, CustomEvent, EventType, RunErrorEvent, RunFinishedEvent, RunStartedEvent
 from agent_framework import Message
+from anyio import CancelScope
 from sqlalchemy import func, select, update
 
 from shovel.db.base import now_ts
@@ -95,7 +96,7 @@ class ChatService:
             with trace_context(conversation_id=identifier):
                 return await self._send(identifier, request, run_id=run_id, on_event=on_event)
 
-    async def stream(self, identifier: str, request: MessageInput, run_id: str) -> AsyncIterator[BaseEvent]:
+    async def stream(self, identifier: str, request: MessageInput, run_id: str) -> AsyncGenerator[BaseEvent]:
         # Backpressure bounds memory while retaining cancellation and durable failure handling.
         queue: asyncio.Queue[BaseEvent | None] = asyncio.Queue(maxsize=32)
 
@@ -130,7 +131,7 @@ class ChatService:
         finally:
             if not task.done():
                 task.cancel()
-            with suppress(asyncio.CancelledError):
+            with CancelScope(shield=True), suppress(asyncio.CancelledError):
                 await task
 
     async def _send(
@@ -213,13 +214,14 @@ class ChatService:
             else:
                 failure_message = f"对话处理失败 ({type(exc).__name__})。"
                 self._log.error("chat.failed", conversation_id=identifier, error_type=type(exc).__name__)
-            async with self.runtime.sessions() as session:
-                await session.execute(
-                    update(ChatMessage)
-                    .where(ChatMessage.id == answer.id)
-                    .values(state="failed", content=self.runtime.redact(failure_message))
-                )
-                await session.commit()
+            with CancelScope(shield=True):
+                async with self.runtime.sessions() as session:
+                    await session.execute(
+                        update(ChatMessage)
+                        .where(ChatMessage.id == answer.id)
+                        .values(state="failed", content=self.runtime.redact(failure_message))
+                    )
+                    await session.commit()
             raise
 
     async def close(self) -> None:

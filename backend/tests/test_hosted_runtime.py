@@ -14,6 +14,7 @@ from typing import Any
 import httpx
 import pytest
 import pytest_asyncio
+from anyio import CancelScope
 from fastapi import FastAPI
 from sqlalchemy import func, select, text, update
 
@@ -28,8 +29,8 @@ from shovel.db.model.runtime import ChatMessage, Conversation, Operation
 from shovel.domain.enums import JobState, ScanMode
 from shovel.pipeline.embedder import build_embedder
 from shovel.pipeline.scan_service import ScanService
-from shovel.runtime.agent import model_endpoint
-from shovel.runtime.api import configure_api
+from shovel.runtime.agent import AgentResult, model_endpoint
+from shovel.runtime.api import _encode_agent_events, configure_api
 from shovel.runtime.client import execute_command
 from shovel.runtime.diagnostics import development_logging, trace, trace_context
 from shovel.runtime.errors import RuntimeFailure
@@ -949,6 +950,79 @@ async def test_agui_stream_uses_framework_and_commits_before_success(
         assert events[-1]["type"] == "RUN_ERROR"
         assert not any(event["type"] == "RUN_FINISHED" for event in events)
         assert history[-1].state == "failed"
+
+
+@pytest.mark.parametrize("valid_response", [True, False])
+async def test_agui_silent_model_keeps_stream_alive_until_terminal_event(
+    runtime: Runtime,
+    api: httpx.AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+    valid_response: bool,
+) -> None:
+    monkeypatch.setattr("shovel.runtime.api._AGENT_HEARTBEAT_SECONDS", 0.01)
+
+    async def model(_request: httpx.Request) -> httpx.Response:
+        await asyncio.sleep(0.06)
+        return streamed_completion("Hello." if valid_response else "Invented [99].")
+
+    runtime.chat.agent._client = httpx.AsyncClient(transport=httpx.MockTransport(model))
+    identifier = (await api.post("/api/v1/conversations", json={})).json()["id"]
+    response = await api.post(
+        "/api/v1/agent",
+        json={
+            "threadId": identifier,
+            "runId": "silent-model",
+            "messages": [{"id": "question", "role": "user", "content": "hi"}],
+            "tools": [],
+            "context": [],
+            "state": {},
+            "forwardedProps": {"search_mode": "keyword"},
+        },
+    )
+    assert response.status_code == 200
+    assert ": keep-alive\n\n" in response.text
+    events = [
+        json.loads(line.removeprefix("data: "))
+        for line in response.text.splitlines()
+        if line.startswith("data: ")
+    ]
+    assert events[0]["type"] == "RUN_STARTED"
+    assert events[-1]["type"] == ("RUN_FINISHED" if valid_response else "RUN_ERROR")
+    history = await runtime.chat.messages(identifier)
+    assert history[-1].state == ("completed" if valid_response else "failed")
+
+
+async def test_agui_disconnect_cancel_scope_preserves_failed_message(
+    runtime: Runtime, api: httpx.AsyncClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("shovel.runtime.api._AGENT_HEARTBEAT_SECONDS", 0.01)
+    started, cancelled = asyncio.Event(), asyncio.Event()
+
+    async def respond(*_args: object, **_kwargs: object) -> AgentResult:
+        started.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            cancelled.set()
+        raise AssertionError("The disconnected Agent must not complete.")
+
+    monkeypatch.setattr(runtime.chat.agent, "respond", respond)
+    identifier = (await api.post("/api/v1/conversations", json={})).json()["id"]
+    stream = _encode_agent_events(
+        runtime.chat.stream(identifier, MessageInput(content="hi"), "disconnect-run")
+    )
+    async with asyncio.timeout(10):
+        assert "RUN_STARTED" in await anext(stream)
+        heartbeat = asyncio.create_task(anext(stream))
+        await started.wait()
+        assert await heartbeat == ": keep-alive\n\n"
+        with CancelScope() as scope:
+            scope.cancel()
+            await stream.aclose()
+    assert cancelled.is_set()
+    history = await runtime.chat.messages(identifier)
+    assert history[-1].state == "failed"
+    await runtime.chat.maintain(identifier, title="Unlocked")
 
 
 async def test_agui_cancellation_fails_pending_message_and_releases_conversation(

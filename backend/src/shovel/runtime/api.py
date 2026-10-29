@@ -1,12 +1,15 @@
 from __future__ import annotations
 
-from collections.abc import AsyncIterator, Callable
+import asyncio
+from collections.abc import AsyncGenerator, AsyncIterator, Callable
+from contextlib import suppress
 from typing import Annotated, Any
 from urllib.parse import urlsplit
 
 import structlog
-from ag_ui.core import RunAgentInput
+from ag_ui.core import BaseEvent, RunAgentInput
 from ag_ui.encoder import EventEncoder
+from anyio import CancelScope
 from fastapi import APIRouter, Depends, FastAPI, Header, Query, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, StreamingResponse
@@ -49,6 +52,36 @@ from shovel.runtime.service import Runtime
 from shovel.services import connector_registry
 from shovel.services.connector_base import ConnectorSpec
 from shovel.services.outlook import OutlookError
+
+_AGENT_HEARTBEAT_SECONDS = 10.0
+
+
+async def _encode_agent_events(events: AsyncGenerator[BaseEvent]) -> AsyncIterator[str]:
+    encoder = EventEncoder()
+    pending: asyncio.Task[BaseEvent | None] | None = None
+    try:
+        while True:
+            pending = asyncio.create_task(anext(events, None))
+            while not pending.done():
+                done, _ = await asyncio.wait((pending,), timeout=_AGENT_HEARTBEAT_SECONDS)
+                if not done:
+                    # Keep proxy sockets alive without cancelling the Agent or emitting protocol events.
+                    yield ": keep-alive\n\n"
+            completed, pending = pending, None
+            event = completed.result()
+            if event is None:
+                return
+            yield encoder.encode(event)
+    finally:
+        # Starlette's disconnect cancel scope must not interrupt durable failure cleanup.
+        with CancelScope(shield=True):
+            try:
+                if pending is not None:
+                    pending.cancel()
+                    with suppress(asyncio.CancelledError):
+                        await pending
+            finally:
+                await events.aclose()
 
 
 def resource_view(resource: Resource) -> dict[str, Any]:
@@ -655,14 +688,9 @@ def configure_api(
         if not isinstance(properties, dict):
             raise RuntimeFailure("AG-UI forwardedProps 必须是对象。")
         request = MessageInput.model_validate({**properties, "content": content})
-        encoder = EventEncoder()
-
-        async def events() -> AsyncIterator[str]:
-            async for event in rt.chat.stream(body.thread_id, request, body.run_id):
-                yield encoder.encode(event)
 
         return StreamingResponse(
-            events(),
+            _encode_agent_events(rt.chat.stream(body.thread_id, request, body.run_id)),
             media_type="text/event-stream",
             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
         )

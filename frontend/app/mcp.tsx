@@ -6,8 +6,8 @@ import { Empty, Feedback } from "./ui";
 
 export function MCPManagement() {
   const query = useQuery<MCPConfiguration>("/agent/mcp");
-  return <section className="mcp-section" aria-labelledby="mcp-management-heading">
-    <h2 id="mcp-management-heading">MCP Server Management</h2>
+  return <section className="settings-card mcp-section" id="settings-mcp" aria-labelledby="mcp-management-heading" tabIndex={-1}>
+    <header className="settings-card-header"><div><p className="settings-kicker">Tools & extensions</p><h2 id="mcp-management-heading">MCP Server Management</h2><p className="muted">Edit workspace servers, save the file, then restart Agent to apply changes.</p></div></header>
     <Feedback error={query.error} retry={query.refresh} />
     {query.loading && <p role="status">Loading MCP configuration...</p>}
     {query.data && <MCPEditor initial={query.data} />}
@@ -48,9 +48,9 @@ function MCPEditor({ initial }: { initial: MCPConfiguration }) {
     <section className="configuration">
       <h3>Workspace MCP configuration</h3>
       <p className="mcp-path"><code>{config.path}</code></p>
-      <p>Saving updates this file only. Restart Agent to close cached MCP connections and reload extensions on the next chat. Active conversations must finish first; sessions and Memory are kept.</p>
-      <p className="muted">Only configure trusted servers. Enabled stdio servers can run commands with your account permissions; HTTP servers receive tool arguments. Prefer <code>{"${ENV_VAR}"}</code> references for credentials. Environment references are resolved when the Agent loads connections; restart the Host after changing its environment.</p>
+      <p className="muted">Only configure trusted servers. Enabled servers can run commands with your account permissions or receive tool arguments.</p>
       <p role="status">{config.agent_state === "restart_failed" ? "Agent restart failed. Retry Restart Agent before chatting." : config.agent_state === "restarting" ? "Agent is restarting." : config.restart_required ? "Saved configuration differs from the Agent cache. Restart required." : config.agent_loaded ? "Agent has loaded this configuration." : "MCP connections have not loaded. The next chat will load the saved file."}</p>
+      <details className="settings-details"><summary>Connection lifecycle & credentials</summary><p>Saving updates this file only. Restart Agent to close cached MCP connections and reload extensions on the next chat. Active conversations must finish first; sessions and Memory are kept.</p><p>Prefer <code>{"${ENV_VAR}"}</code> references for credentials. The editor displays the actual file, including inline secrets. Environment references are resolved when the Agent loads connections; restart the Host after changing its environment.</p></details>
     </section>
     <section aria-labelledby="mcp-servers-heading">
       <h3 id="mcp-servers-heading">Saved servers <span className="count">{config.items.length}</span></h3>
@@ -58,18 +58,18 @@ function MCPEditor({ initial }: { initial: MCPConfiguration }) {
       {config.items.length ? <div className="mcp-servers"><table>
         <caption className="sr-only">Servers in the saved workspace configuration</caption>
         <thead><tr><th scope="col">Server</th><th scope="col">Transport</th><th scope="col">Configuration</th></tr></thead>
-        <tbody>{config.items.map((server) => <tr key={server.name}><th scope="row">{server.name}</th><td>{server.transport === "http" ? "Streamable HTTP" : "stdio"}</td><td>{server.enabled ? "Enabled" : "Disabled"}</td></tr>)}</tbody>
+        <tbody>{config.items.map((server) => <tr key={server.name}><th scope="row">{server.name}</th><td>{server.transport === "http" ? "Streamable HTTP" : "stdio"}</td><td><span className={`badge ${server.enabled ? "good" : ""}`}>{server.enabled ? "Enabled" : "Disabled"}</span></td></tr>)}</tbody>
       </table></div> : !config.validation_error && <Empty title="No MCP servers configured">Add servers in the configuration editor below.</Empty>}
     </section>
     <form onSubmit={save} className="mcp-editor">
-      <label htmlFor="mcp-configuration">mcp.json configuration</label>
+      <div className="mcp-editor-heading"><label htmlFor="mcp-configuration">mcp.json configuration</label>{dirty && <span className="badge">Unsaved changes</span>}</div>
       <p id="mcp-editor-help" className="muted">Edit the mcpServers object to add, change or remove servers. Set disabled to true to disable a server. Each entry needs either command or url, not both. The list above shows the saved file, not unsaved edits.</p>
       <textarea id="mcp-configuration" aria-describedby="mcp-editor-help" spellCheck={false} autoCapitalize="off" autoCorrect="off" rows={18} maxLength={1048576} value={content} disabled={action.busy} onChange={(event) => { setContent(event.target.value); setConfirmReload(false); }} />
       <div className="button-row">
         <button type="submit" className="primary" disabled={action.busy || (!dirty && config.exists)}>Save configuration</button>
         <button type="button" disabled={action.busy || dirty || Boolean(config.validation_error)} onClick={restart}>Restart Agent</button>
         <button type="button" disabled={action.busy} onClick={() => dirty ? setConfirmReload(true) : void reload()}>Reload file</button>
-        {dirty && <span className="muted">Unsaved changes. Save before restarting.</span>}
+        {dirty && <span className="muted">Save before restarting Agent.</span>}
       </div>
       {confirmReload && <div className="confirmation" role="alert"><p>Discard unsaved edits and reload mcp.json from disk?</p><div className="button-row"><button type="button" disabled={action.busy} onClick={reload}>Discard edits and reload</button><button type="button" onClick={() => setConfirmReload(false)}>Keep editing</button></div></div>}
       <Feedback error={action.error} notice={action.notice} />

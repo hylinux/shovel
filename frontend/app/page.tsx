@@ -22,13 +22,13 @@ const descriptions: Record<View, string> = {
 
 export default function Home() {
   const [view, setView] = useState<View>("Resources");
-  const [sessionsOpen, setSessionsOpen] = useState(false);
+  const [sessionsOpen, setSessionsOpen] = useState(true);
   const [selectedSession, setSelectedSession] = useState("");
   const [sessionRevision, refreshSessions] = useReducer((value: number) => value + 1, 0);
   const status = useQuery<Status>("/status", 10000);
   const resourcesNeeded = view === "Resources" || view === "Background tasks" || view === "Search Documents";
   const resources = useQuery<Items<Resource>>(resourcesNeeded ? "/resources" : null, 2000);
-  const showSessions = view === "Chat" && sessionsOpen;
+  const showSessions = sessionsOpen;
   function navigate(item: View) {
     if (item === "Chat") {
       setSessionsOpen(view === "Chat" ? !sessionsOpen : true);
@@ -46,10 +46,10 @@ export default function Home() {
         <Link href="/" className="brand" aria-label="Shovel home"><span className="brand-mark" aria-hidden="true">S</span>Shovel</Link>
         <p className="sidebar-caption">Personal knowledge workbench</p>
         <nav className="main-navigation" aria-label="Main navigation">
-          {views.map((item, index) => <button key={item} aria-current={view === item ? "page" : undefined} aria-expanded={item === "Chat" ? showSessions : undefined} aria-controls={item === "Chat" ? "session-navigation" : undefined} onClick={() => navigate(item)}><span aria-hidden="true" className="nav-symbol">{["▤", "≡", "⌕", "◇"][index]}</span>{item}{item === "Chat" && <span className="nav-chevron" aria-hidden="true">{showSessions ? "−" : "+"}</span>}</button>)}
+          {views.map((item, index) => <button key={item} aria-current={view === item ? "page" : undefined} aria-expanded={item === "Chat" ? showSessions : undefined} aria-controls={item === "Chat" ? "session-navigation" : undefined} onClick={() => navigate(item)}><span aria-hidden="true" className="nav-symbol">{["▤", "≡", "⌕", "◇"][index]}</span>{item}{item === "Chat" && <span className="nav-chevron" aria-hidden="true">{showSessions ? "⌄" : "›"}</span>}</button>)}
         </nav>
-        <section id="session-navigation" className="session-navigation" aria-labelledby="sessions-heading" hidden={!showSessions}>
-          {view === "Chat" && <SessionNavigation selected={selectedSession} revision={sessionRevision} onSelect={selectSession} onDeleted={() => { setSelectedSession(""); refreshSessions(); }} />}
+        <section id="session-navigation" className="session-navigation" aria-label="Chat sessions" hidden={!showSessions}>
+          <SessionNavigation selected={selectedSession} active={view === "Chat"} revision={sessionRevision} onSelect={selectSession} onDeleted={() => { setSelectedSession(""); refreshSessions(); }} />
         </section>
         <div className="sidebar-bottom">
           <nav className="settings-navigation" aria-label="Settings navigation"><button aria-current={view === "Settings" ? "page" : undefined} onClick={() => navigate("Settings")}><span className="nav-symbol" aria-hidden="true">⚙</span>Settings</button></nav>
@@ -71,7 +71,7 @@ export default function Home() {
   );
 }
 
-function SessionNavigation({ selected, revision, onSelect, onDeleted }: { selected: string; revision: number; onSelect: (identifier: string) => void; onDeleted: () => void }) {
+function SessionNavigation({ selected, active, revision, onSelect, onDeleted }: { selected: string; active: boolean; revision: number; onSelect: (identifier: string) => void; onDeleted: () => void }) {
   const history = useSessionHistory(revision);
   const action = useAction();
   async function create() {
@@ -79,17 +79,16 @@ function SessionNavigation({ selected, revision, onSelect, onDeleted }: { select
     if (session) { history.refresh(); onSelect(session.id); }
   }
   return <>
-    <h2 id="sessions-heading" className="sessions-heading">Sessions</h2>
-    <button className="primary new-session" disabled={action.busy} onClick={create}>{action.busy ? "Creating…" : "New Session"}</button>
+    <button className="new-session" disabled={action.busy} onClick={create}><span aria-hidden="true">+</span>{action.busy ? "Creating…" : "New Session"}</button>
     <Feedback error={action.error} />
     <div className="session-history" role="region" aria-label="Session history" tabIndex={0} aria-busy={history.loading}>
       <Feedback error={history.error} retry={history.refresh} />
       {history.loading && <p className="muted" role="status">Loading sessions…</p>}
       {!history.loading && !history.error && history.data.length === 0 && <p className="muted">No sessions yet.</p>}
       <ul className="session-items">{history.data.map((session) => <li key={session.id}>
-        <button className="session-button" aria-current={selected === session.id ? "true" : undefined} onClick={() => onSelect(session.id)} title={session.title || "Untitled session"}>
-          <span className="session-title">{session.title || "Untitled session"}</span>
-          <span className="session-time">{date(session.updated_at)}</span>
+        <button className="session-button" aria-current={active && selected === session.id ? "true" : undefined} onClick={() => onSelect(session.id)} title={session.title || "Untitled session"}>
+          <span className="session-marker" aria-hidden="true" />
+          <span className="session-copy"><span className="session-title">{session.title || "Untitled session"}</span><span className="session-time" title={date(session.updated_at)}>{date(session.updated_at)}</span></span>
         </button>
         {selected === session.id && <SessionMaintenance identifier={session.id} refresh={history.refresh} deleted={onDeleted} />}
       </li>)}</ul>

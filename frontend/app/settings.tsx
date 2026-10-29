@@ -5,27 +5,57 @@ import { segment, useAction, useQuery, type Items, type Memory, type Status } fr
 import { MCPManagement } from "./mcp";
 import { Empty, Feedback } from "./ui";
 
+const warmupNames: Record<string, string> = {
+  index: "Knowledge index",
+  memory_embedding: "Memory embedding",
+  rag_embedding: "RAG embedding",
+  chat_model: "Chat model",
+};
+
 export function Settings({ status }: { status?: Status }) {
   const [memoryOpen, setMemoryOpen] = useState(false);
-  return <section>
-    <section className="configuration"><h2>Runtime configuration</h2>
-      <p>Configure providers in <code>settings.toml</code>, then restart the backend. Credentials stay outside this interface.</p>
-      {status ? <ul>
-        <li><code>[model]</code> — {status.model_configured ? `ready (${status.model_name})` : "required for chat"}</li>
-        <li><code>[embedding]</code> — {status.embedding_configured ? "vector indexing available" : "optional; keyword indexing and search still work"}</li>
-        <li><code>[memory]</code> — {status.memory_configured ? "ready; enabled for every session" : "required for chat; configure a Memory embedder and extraction model"}</li>
-      </ul> : <p className="muted">Waiting for runtime configuration…</p>}
-      <p className="muted">Chat uses Memory by default. Short-term Memory stores user messages without another LLM extraction; long-term Memory extracts and merges user facts through mem0.</p>
-      {status?.warmup && <><h3>Startup warmup</h3><ul>{Object.entries(status.warmup).map(([name, item]) => <li key={name}>{name.replaceAll("_", " ")}: {item.state}{item.elapsed_ms !== undefined && ` (${Math.round(item.elapsed_ms)} ms)`}{item.error_type && ` - ${item.error_type}; check backend logs`}</li>)}</ul><p className="muted">Local model warmup uses a synthetic prompt, not session data. Disabled components still initialize on demand. A ready model may later be unloaded by its provider.</p></>}
-      {status?.chat_capacity && <p className="muted">Chat concurrency: {status.chat_capacity.running}/{status.chat_capacity.limit} running; {status.chat_capacity.waiting} waiting. Background Memory waits for a foreground idle window.</p>}
+  const chatReady = status?.model_configured && status.memory_configured;
+  const providers = [
+    { name: "Chat model", section: "model", ready: status?.model_configured, value: status?.model_configured ? status.model_name : "Required for chat", description: "Generates replies through the main Agent.", optional: false },
+    { name: "Knowledge embedding", section: "embedding", ready: status?.embedding_configured, value: status?.embedding_configured ? "Vector search available" : "Keyword search available", description: "Adds semantic search to your local documents.", optional: true },
+    { name: "Memory", section: "memory", ready: status?.memory_configured, value: status?.memory_configured ? "Enabled for every session" : "Required for chat", description: "Recalls session context and long-term user facts.", optional: false },
+  ];
+  return <div className="settings-content">
+    <nav className="settings-index" aria-label="Settings sections">
+      <a href="#settings-providers">Providers</a><a href="#settings-performance">Performance</a><a href="#settings-memory">Memory</a><a href="#settings-mcp">MCP servers</a>
+    </nav>
+    <section className="settings-card" id="settings-providers" aria-labelledby="settings-providers-heading" tabIndex={-1}>
+      <header className="settings-card-header">
+        <div><p className="settings-kicker">Models & connections</p><h2 id="settings-providers-heading">Runtime configuration</h2><p className="muted">Your configured providers and conversation readiness.</p></div>
+        <span className={`badge ${status ? chatReady ? "good" : "bad" : ""}`}>{status ? chatReady ? "Configured for chat" : "Chat setup incomplete" : "Checking runtime"}</span>
+      </header>
+      {status ? <div className="provider-grid">{providers.map((provider) => <article className="provider-card" key={provider.section}>
+        <div className="provider-card-heading"><h3>{provider.name}</h3><span className={`badge ${provider.ready ? "good" : provider.optional ? "" : "bad"}`}>{provider.ready ? "Configured" : provider.optional ? "Optional" : "Not configured"}</span></div>
+        <code>[{provider.section}]</code><p className="provider-value">{provider.value}</p><p className="muted">{provider.description}</p>
+      </article>)}</div> : <p className="muted" role="status">Waiting for runtime configuration…</p>}
+      <p className="settings-note">To change providers, edit <code>settings.toml</code> and restart the backend. Model credentials are not shown here.</p>
     </section>
-    <section className="memory-section"><h2>Manage long-term Memory</h2>
-      <p className="muted">View or forget long-term facts stored by mem0. Deleting a session clears its short-term Memory, not its long-term facts. Forgetting a fact does not erase its short-term copy. Loading this list contacts your configured Memory provider.</p>
-      <button className="text-button" disabled={!status?.memory_configured} onClick={() => setMemoryOpen(!memoryOpen)} aria-expanded={memoryOpen}>{memoryOpen ? "Hide saved Memory" : "Load saved Memory"}</button>
-      {memoryOpen && <Memories />}
+    <section className="settings-card" id="settings-performance" aria-labelledby="settings-performance-heading" tabIndex={-1}>
+      <header className="settings-card-header"><div><p className="settings-kicker">Response health</p><h2 id="settings-performance-heading">Performance & warmup</h2><p className="muted">See what is initialized before your next conversation.</p></div></header>
+      {status?.chat_capacity && <div className="chat-capacity"><p><strong>{status.chat_capacity.running}</strong> / {status.chat_capacity.limit} conversations running</p><span className="badge">{status.chat_capacity.waiting} waiting</span><p className="muted">Background Memory starts after foreground conversations are idle.</p></div>}
+      {status?.warmup && <><h3>Startup warmup</h3><ul className="warmup-list">{Object.entries(status.warmup).map(([name, item]) => <li key={name}>
+        <div><span className="warmup-name">{warmupNames[name] || name.replaceAll("_", " ")}</span>{item.elapsed_ms !== undefined && <span className="muted">{Math.round(item.elapsed_ms)} ms</span>}</div>
+        <span className={`badge ${item.state === "ready" ? "good" : item.state === "failed" ? "bad" : ""}`}>{item.state}</span>
+        {item.error_type && <p className="warning">{item.error_type} — check backend logs.</p>}
+      </li>)}</ul><p className="muted">Local model warmup uses a synthetic prompt, not session data. Disabled components initialize on demand; ready models may later be unloaded.</p></>}
+      {!status?.warmup && !status?.chat_capacity && <p className="muted">{status ? "Performance metrics are not available from this Host." : "Waiting for runtime status…"}</p>}
+    </section>
+    <section className="settings-card" id="settings-memory" aria-labelledby="settings-memory-heading" tabIndex={-1}>
+      <header className="settings-card-header">
+        <div><p className="settings-kicker">User context</p><h2 id="settings-memory-heading">Manage long-term Memory</h2><p className="muted">Review the facts your Agent remembers across sessions.</p></div>
+        <button disabled={!status?.memory_configured} onClick={() => setMemoryOpen(!memoryOpen)} aria-expanded={memoryOpen} aria-controls="saved-memory">{memoryOpen ? "Hide saved Memory" : "Load saved Memory"}</button>
+      </header>
+      <p className="muted">{status && !status.memory_configured ? "Configure a Memory embedder and extraction model in settings.toml to use these controls." : "Loading saved facts contacts your configured Memory provider."}</p>
+      <details className="settings-details"><summary>How Memory works</summary><p>Short-term Memory keeps original user messages without another LLM extraction. Long-term Memory extracts and merges user facts through mem0.</p><p>Deleting a session clears its short-term Memory, not long-term facts. Forgetting a fact does not erase its short-term copy.</p></details>
+      <div id="saved-memory" hidden={!memoryOpen}>{memoryOpen && <Memories />}</div>
     </section>
     <MCPManagement />
-  </section>;
+  </div>;
 }
 
 function Memories() {

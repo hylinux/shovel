@@ -1,8 +1,7 @@
 # ---------------------------------------------------------------------
 # Zvec collection 的 schema 定义
 #
-# 本模块只覆盖知识库(chunk)。记忆的向量由 mem0 写入本地 Qdrant,
-# schema 由 mem0 自己维护, 我们不在这里声明。
+# 知识与原生记忆使用独立的 collection; 权威文本和生命周期始终在 SQLite。
 #
 # SQLite 是真相之源, Zvec 可丢弃重建。因此这里只声明两类东西:
 #   1. dense 向量本身
@@ -113,6 +112,27 @@ def chunk_collection_schema(
             FieldSchema(TEXT_FIELD, DataType.STRING, nullable=True, index_param=FtsIndexParam()),
         ],
         vectors=_dense(dim, metric, hnsw_m, hnsw_ef_construction),
+    )
+
+
+def memory_collection_schema(name: str = "shovel_memory", *, dim: int = 1024) -> CollectionSchema:
+    return CollectionSchema(
+        name=name,
+        fields=[
+            FieldSchema(field, DataType.STRING, index_param=InvertIndexParam())
+            for field in (
+                "memory_id",
+                "kind",
+                "workspace_id",
+                "user_id",
+                "agent_id",
+                "session_id",
+                "scope_kind",
+                "model_version",
+            )
+        ]
+        + [FieldSchema("revision", DataType.INT64)],
+        vectors=_dense(dim, "cosine", 16, 200),
     )
 
 

@@ -74,12 +74,10 @@ function MemoryTaskStatus({ id }: { id: string }) {
   }
   return <div className="memory-task">
     <p className={operation?.state === "failed" ? "warning" : "muted"} role="status">Long-term Memory: {operation
-      ? memoryTaskPending(operation) ? "updating in background" : operation.state === "succeeded" ? "saved" : operation.state
+      ? memoryTaskPending(operation) ? "updating in background" : operation.state === "succeeded" ? operation.result.memories === 0 ? "no durable facts found" : "saved in SQLite" : operation.state
       : "checking…"}</p>
     {operation?.error && <p className="muted">{operation.error}</p>}
-    {operation?.state === "failed" && (operation.result.write_started
-      ? <p className="muted">A partial write is possible. Check Memory in Settings; automatic replay is disabled.</p>
-      : <button disabled={action.busy} onClick={retry}>{action.busy ? "Retrying…" : "Retry Memory update"}</button>)}
+    {operation?.state === "failed" && <button disabled={action.busy} onClick={retry}>{action.busy ? "Retrying…" : "Retry Memory update"}</button>}
     <Feedback error={task.error || action.error} retry={task.error ? task.refresh : undefined} />
   </div>;
 }

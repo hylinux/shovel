@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import AsyncGenerator, AsyncIterator, Callable
 from contextlib import suppress
+from dataclasses import replace
 from typing import Annotated, Any
 from urllib.parse import urlsplit
 
@@ -41,6 +42,7 @@ from shovel.runtime.schemas import (
     CredentialInput,
     HistoryPruneInput,
     MCPConfigurationInput,
+    MemoryInput,
     MessageInput,
     ProfileInput,
     ReasonInput,
@@ -334,6 +336,7 @@ def configure_api(
             "model_configured": rt.settings.model.is_configured,
             "model_name": rt.settings.model.model_name,
             "memory_configured": rt.memory.configured,
+            "memory": await rt.memory.status(),
             "workspace_id": workspace_id(rt.settings),
             "warmup": rt.warmup.states,
             "chat_capacity": rt.performance.snapshot(),
@@ -743,14 +746,98 @@ def configure_api(
         )
 
     @router.get("/memories")
-    async def memories(rt: RuntimeDependency, limit: int = Query(100, ge=1, le=1000)) -> dict[str, Any]:
-        return {"items": await rt.memory.list(limit)}
+    async def memories(
+        rt: RuntimeDependency,
+        limit: int = Query(100, ge=1, le=1000),
+        include_history: bool = False,
+        conversation_id: str = "",
+    ) -> dict[str, Any]:
+        if conversation_id:
+            await rt.chat.conversation(conversation_id)
+        return {
+            "items": await rt.memory.list(
+                limit, include_history=include_history, conversation_id=conversation_id
+            )
+        }
+
+    @router.post("/memories", status_code=202)
+    async def create_memory(
+        body: MemoryInput,
+        rt: RuntimeDependency,
+        request_key: RequestKey = None,
+    ) -> dict[str, Any]:
+        async with rt.sessions() as session:
+            generation = await rt.memory_tasks.generation(session)
+        operation = await rt.operations.enqueue(
+            "memory.create",
+            {
+                "memory": body.model_dump(mode="json"),
+                "workspace_id": rt.memory.owner.workspace_id,
+                "user_id": rt.memory.owner.user_id,
+                "generation": generation,
+            },
+            request_key=request_key,
+        )
+        rt.memory_wake.set()
+        return operation_view(operation)
+
+    @router.put("/memories/{identifier}", status_code=202)
+    async def update_memory(
+        identifier: str,
+        body: MemoryInput,
+        rt: RuntimeDependency,
+        request_key: RequestKey = None,
+    ) -> dict[str, Any]:
+        current = await rt.memory.repository.get(
+            replace(rt.memory.owner, session_id=body.session_id), identifier
+        )
+        if current.kind.value != body.kind:
+            raise RuntimeFailure("更新不能更改 Memory 类型。")
+        async with rt.sessions() as session:
+            generation = await rt.memory_tasks.generation(session)
+        operation = await rt.operations.enqueue(
+            "memory.update",
+            {
+                "memory": body.model_dump(mode="json"),
+                "workspace_id": rt.memory.owner.workspace_id,
+                "user_id": rt.memory.owner.user_id,
+                "generation": generation,
+                "replace_id": identifier,
+            },
+            request_key=request_key,
+        )
+        rt.memory_wake.set()
+        return operation_view(operation)
+
+    @router.post("/memory/index/rebuild", status_code=202)
+    async def rebuild_memory(rt: RuntimeDependency, request_key: RequestKey = None) -> dict[str, Any]:
+        async with rt.sessions() as session:
+            generation = await rt.memory_tasks.generation(session)
+        operation = await rt.operations.enqueue(
+            "memory.rebuild",
+            {
+                "workspace_id": rt.memory.owner.workspace_id,
+                "user_id": rt.memory.owner.user_id,
+                "generation": generation,
+            },
+            request_key=request_key,
+        )
+        rt.memory_wake.set()
+        return operation_view(operation)
 
     @router.delete("/memories/{identifier}")
-    async def forget(identifier: str, rt: RuntimeDependency) -> dict[str, bool]:
-        await rt.memory.owned(identifier)
+    async def forget(
+        identifier: str,
+        rt: RuntimeDependency,
+        hard: bool = False,
+        conversation_id: str = "",
+    ) -> dict[str, bool]:
+        current = await rt.memory.owned(identifier, conversation_id=conversation_id)
+        if current.state.value == "deleted" and not hard:
+            return {"deleted": True}
         await rt.memory_tasks.invalidate()
-        await rt.memory.delete(identifier)
+        await rt.memory.delete(identifier, hard=hard, conversation_id=conversation_id)
+        rt.memory_wake.set()
         return {"deleted": True}
 
     app.include_router(router)

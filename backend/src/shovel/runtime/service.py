@@ -54,7 +54,7 @@ class Runtime:
         self.performance: RuntimePerformance = RuntimePerformance(settings)
         self.operations: OperationService = OperationService(self)
         self.retrieval: RetrievalService = RetrievalService(self)
-        self.memory: MemoryService = MemoryService(settings)
+        self.memory: MemoryService = MemoryService(settings, sessions)
         self.memory_tasks: MemoryTaskService = MemoryTaskService(self)
         self.chat: ChatService = ChatService(self)
         self.mcp: MCPConfigurationService = MCPConfigurationService(settings.agent.workspace)
@@ -64,9 +64,8 @@ class Runtime:
         keys = (
             self.settings.model.security_key,
             self.settings.embedding.api_key.get_secret_value(),
-            self.settings.memory.llm.api_key,
-            self.settings.memory.embedder.api_key,
-            self.settings.memory.qdrant.api_key,
+            self.settings.memory.llm.security_key,
+            self.settings.memory.embedder.api_key.get_secret_value(),
         )
         for key in keys:
             if key:
@@ -132,6 +131,7 @@ async def create_runtime(
         await upgrade_database(engine)
         runtime = Runtime(settings, sessions, resources)
         try:
+            await runtime.memory.initialize()
             await runtime.operations.recover()
             await runtime.chat.recover()
             trace(

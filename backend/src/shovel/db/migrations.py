@@ -89,6 +89,42 @@ def _upgrade(connection: Connection) -> None:
             insert(SchemaMigration).values(version=5, name="durable_memory_extraction", applied_at=now_ts())
         )
 
+    if 6 not in versions:
+        epoch_columns = {row[1] for row in connection.exec_driver_sql("PRAGMA table_info(memory_epoch)")}
+        for name in ("workspace_id", "user_id"):
+            if name not in epoch_columns:
+                connection.exec_driver_sql(f"ALTER TABLE memory_epoch ADD COLUMN {name} TEXT")
+        connection.exec_driver_sql(
+            "CREATE UNIQUE INDEX IF NOT EXISTS uq_memory_epoch_owner ON memory_epoch(workspace_id,user_id)"
+        )
+        # Development-era placeholder rows had no ownership; never expose them as native facts.
+        for table in ("memory_belief", "memory_episode", "memory_procedure"):
+            columns = {row[1] for row in connection.exec_driver_sql(f"PRAGMA table_info({table})")}
+            additions = {
+                "workspace_id": "TEXT NOT NULL DEFAULT ''",
+                "user_id": "TEXT NOT NULL DEFAULT ''",
+                "scope_kind": "TEXT NOT NULL DEFAULT 'agent'",
+                "fingerprint": "TEXT NOT NULL DEFAULT ''",
+                "provenance": "TEXT NOT NULL DEFAULT '[]'",
+                "agent_id": "TEXT",
+                "session_id": "TEXT",
+                "model_version": "TEXT",
+                "rev": "INTEGER NOT NULL DEFAULT 1",
+                "vector_state": "TEXT NOT NULL DEFAULT 'pending'",
+            }
+            for name, definition in additions.items():
+                if name not in columns:
+                    connection.exec_driver_sql(f"ALTER TABLE {table} ADD COLUMN {name} {definition}")
+        connection.exec_driver_sql("DROP INDEX IF EXISTS uq_belief_active")
+        connection.exec_driver_sql(
+            "CREATE UNIQUE INDEX uq_belief_active ON memory_belief "
+            "(workspace_id,user_id,scope_kind,agent_id,session_id,subject,predicate,object,object_domain) "
+            "WHERE validity_state = 'active'"
+        )
+        connection.execute(
+            insert(SchemaMigration).values(version=6, name="native_memory", applied_at=now_ts())
+        )
+
 
 async def upgrade_database(engine: AsyncEngine) -> None:
     async with engine.begin() as connection:

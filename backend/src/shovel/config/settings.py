@@ -94,8 +94,7 @@ def _to_toml_safe(value: Any) -> Any:
 #:
 #: 这里只丢弃"我们自己曾经写进去过"的键, 因此不会掩盖真正的错别字。
 _REMOVED_KEYS: dict[str | None, set[str]] = {
-    # 记忆改由 mem0 托管, qdrant 的配置搬到了 [memory.qdrant];
-    # redis 整个从项目里移除了, 老配置文件里的 [redis] 段直接丢弃
+    # 历史上的独立向量/缓存配置不再属于 Runtime。
     None: {"qdrant", "redis"},
     # Zvec 只负责知识库了, 记忆的 collection 不再由它管
     "zvec": {"memory_path", "memory_collection"},
@@ -158,7 +157,7 @@ class AppSettings(BaseSettings):
     #: config/embedding_config.py —— 两个向量库的维度各自独立。
     embedding: EmbeddingSettings = Field(default_factory=EmbeddingSettings)
 
-    #: 记忆子系统(mem0 + 本地 Qdrant)。记忆不走 Zvec, 原因见 memory_config.py
+    #: 原生记忆: SQLite 权威数据与独立的可重建 Zvec 索引。
     memory: MemorySettings = Field(default_factory=MemorySettings)
 
     @classmethod

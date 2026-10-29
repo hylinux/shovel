@@ -1,0 +1,56 @@
+from collections.abc import Sequence
+from typing import Protocol
+
+from shovel.memory.domain import (
+    IndexIntent,
+    MemoryCandidate,
+    MemoryRecord,
+    MemoryScope,
+    MemoryState,
+    Provenance,
+    VectorHit,
+)
+
+
+class MemoryExtractor(Protocol):
+    async def extract(
+        self,
+        text: str,
+        related: Sequence[MemoryRecord] = (),
+    ) -> list[MemoryCandidate]: ...
+    async def summarize(self, previous: str, messages: list[dict[str, str]], limit: int) -> str: ...
+    async def close(self) -> None: ...
+
+
+class MemoryRepository(Protocol):
+    async def list_records(
+        self, scope: MemoryScope, *, limit: int = 100, states: Sequence[MemoryState] = (MemoryState.ACTIVE,)
+    ) -> list[MemoryRecord]: ...
+    async def get(self, scope: MemoryScope, identifier: str) -> MemoryRecord: ...
+    async def consolidate(
+        self,
+        scope: MemoryScope,
+        candidates: Sequence[MemoryCandidate],
+        provenance: Provenance,
+        *,
+        operation_id: str | None = None,
+        generation: int | None = None,
+        replace_id: str | None = None,
+    ) -> list[MemoryRecord]: ...
+    async def transition(
+        self, scope: MemoryScope, identifier: str, state: MemoryState, *, hard: bool = False
+    ) -> None: ...
+    async def pending(self, scope: MemoryScope, *, force: bool = False) -> list[IndexIntent]: ...
+    async def acknowledge(self, intent: IndexIntent, model_version: str) -> None: ...
+    async def fail(self, intent: IndexIntent, error_type: str) -> None: ...
+    async def reindex(self, scope: MemoryScope) -> None: ...
+    async def touch(self, scope: MemoryScope, identifiers: Sequence[str]) -> None: ...
+
+
+class MemoryVectorIndex(Protocol):
+    @property
+    def model_version(self) -> str: ...
+    async def search(self, query: str, scope: MemoryScope, limit: int) -> list[VectorHit]: ...
+    async def upsert(self, record: MemoryRecord) -> None: ...
+    async def delete(self, identifier: str, kind: str, revision: int) -> None: ...
+    async def close(self) -> None: ...

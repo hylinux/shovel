@@ -1,9 +1,10 @@
 # Shovel 架构与设计说明文档
 
 > 本文描述长期目标架构，不是当前版本的完成清单。当前产品为单机、单所有者的
-> 知识 Runtime：持久摄取/恢复、Profile 管理、检索、带来源的单 Agent 对话和可选 Memory。
-> Agent 工具、自动调度、多 Agent 与 Workflow 尚未实现；已落地能力及运行契约以
-> 根 README 和 `Documents/scan_pipeline.md` 为准。
+> 知识 Runtime：持久摄取/恢复、Profile 管理、检索、带来源的 MAF 主 Agent 对话和原生 Memory。
+> 主 Agent 已支持 MCP、Skills 及可选 Python 函数/Agent/Workflow 扩展；
+> 自动调度与完整的多 Agent 管理仍属后续目标。下文工程骨架示例不等同于当前目录和 CLI；
+> 已落地能力及运行契约以根 README 和 `Documents/scan_pipeline.md` 为准。
 
 ## 文档信息
 
@@ -15,7 +16,7 @@
 | 作者 | HongWei Guo |
 | 版本 | Draft v1.0 |
 | 目标读者 | 项目开发者、架构设计者、后续维护者 |
-| 更新时间 | 2026/7/31 |
+| 更新时间 | 2026/10/29 |
 | 路径 | `docs/shovel-architecture-design.md` |
 
 ---
@@ -30,7 +31,7 @@ Shovel 的目标不是一个单独的 CLI 工具，也不是一个简单的 Chat
 
 Shovel 的最终定位可以总结为：
 
-> Shovel 是一个采用 Python Generic Host 架构实现的全栈 AI Agent Platform，通过 Typer + Rich 提供 CLI 体验，通过 FastAPI + Next.js 提供 Web 体验，以 Microsoft Agent Framework 为核心 Agent Runtime，并集成 SQLAlchemy、Qdrant、Mem0、Redis 等组件，实现 Agent、Memory、Knowledge、Tools 和 Workflow 的统一管理。
+> Shovel 是一个采用 Python Generic Host 架构实现的全栈 AI Agent Platform，通过 Typer + Rich 提供 CLI 体验，通过 FastAPI + Next.js 提供 Web 体验，以 Microsoft Agent Framework 为核心 Agent Runtime，以 SQLAlchemy/SQLite 保存权威数据，以 Zvec 提供知识与原生记忆的独立向量索引，实现 Agent、Memory、Knowledge、Tools 和 Workflow 的统一管理。
 
 ---
 
@@ -107,9 +108,9 @@ Shovel 不应该只是几个脚本拼接在一起，而应该有清晰的项目�
 需要重点支持：
 
 - SQLite 到 PostgreSQL 的平滑迁移
-- Local Qdrant 到 Cloud Qdrant 的迁移
+- 本地 Zvec 到其他向量索引 Adapter 的扩展
 - Local model 到 Azure OpenAI 或 OpenAI 的迁移
-- Simple memory 到 Mem0 的替换
+- 通过 MemoryRepository、MemoryVectorIndex 等协议扩展存储与 Memory Provider
 - 内置 Tool 到 MCP Tool 的扩展
 - CLI-only 到 Web Console 的扩展
 - Single Agent 到 Multi-Agent Workflow 的扩展
@@ -208,9 +209,9 @@ Shovel 建议采用分层架构：
 │                                              │
 │  SQLAlchemy / Alembic                         │
 │  SQLite / PostgreSQL                          │
-│  Qdrant                                       │
-│  Redis                                        │
-│  Mem0                                         │
+│  Zvec: Knowledge / Memory 独立索引             │
+│  SQLite Outbox / Operations                    │
+│  Native Memory Adapters                       │
 │  Microsoft Agent Framework                    │
 │  OpenTelemetry                                │
 │  Logging                                      │
@@ -233,9 +234,9 @@ Shovel 建议采用分层架构：
 | Dependency Injection | dependency-injector | 管理应用服务、基础设施服务和运行时组件 |
 | ORM | SQLAlchemy 2.0 | 管理关系数据库访问，支持 SQLite 到 PostgreSQL 的演进 |
 | Migration | Alembic | 管理数据库 schema 变更与版本迁移 |
-| Vector Store | Qdrant | 存储 document chunks 和 embedding，支持语义检索 |
-| Memory | Mem0 | 管理长期记忆、用户偏好和 Agent 记忆 |
-| Cache / State | Redis | 缓存、会话状态、临时运行状态、任务状态 |
+| Vector Store | Zvec | 独立的知识与 Memory 派生索引，支持语义检索；SQLite 保存权威文本 |
+| Memory | Shovel Native Memory | 管理提取、合并、生命周期、隔离、排序、上下文预算和索引恢复 |
+| Cache / State | 有界进程内缓存 + SQLite | 缓存成功的查询向量；持久保存会话、Operation、Outbox 和恢复状态 |
 | Observability | OpenTelemetry + Logging | 跟踪 Agent、Tool、API、DB 的调用链和诊断信息 |
 | Packaging | pyproject.toml + uv | 管理依赖、构建、安装和 CLI entry point |
 | Testing | pytest | 单元测试、集成测试和回归测试 |
@@ -400,18 +401,29 @@ AgentSettings
 ├── temperature
 ├── max_tokens
 
-QdrantSettings
-├── url
-├── collection_name
+ZvecSettings
+├── knowledge_path
+├── chunk_collection
+├── dim
 
-RedisSettings
-├── host
-├── port
-├── db
+EmbeddingSettings
+├── provider
+├── model
+├── base_url
+├── api_version
 
 MemorySettings
-├── provider
-├── enabled
+├── index_path
+├── collection
+├── dim
+├── embedder
+├── llm
+├── context_max_chars
+├── max_items
+├── min_similarity
+├── min_confidence
+├── history_messages
+├── summary_max_chars
 
 TelemetrySettings
 ├── enabled
@@ -487,8 +499,8 @@ MemoryService
 ToolService
 ConversationRepository
 AgentRepository
-QdrantClient
-RedisClient
+SQLiteMemoryRepository
+ZvecMemoryIndex
 DatabaseSession
 AgentRuntime
 ```
@@ -1047,7 +1059,7 @@ Chunker
   ↓
 Embedding
   ↓
-Qdrant vector store
+SQLite authoritative records + independent Zvec knowledge index
   ↓
 Retriever
   ↓
@@ -1089,27 +1101,30 @@ shovel/
     └── retriever.py
 ```
 
-### 14.5 Qdrant 存储内容
+### 14.5 Zvec 知识索引
+
+Zvec 保存小块的向量和检索元数据；原文、父块、资源可见性和 revision
+由 SQLite 决定。Memory 使用另一套 collection、路径和 embedding 配置。
 
 ```text
 chunk_id
 document_id
 embedding vector
-source
+resource_id
+revision
 metadata
-created_at
 ```
 
 ### 14.6 Knowledge CLI
 
-推荐命令：
+当前 CLI 通过 Resource 和 Scan 管理摄取，查询使用 Web 的 Knowledge 搜索：
 
-```bash
-shovel kb add ./docs/readme.md
-shovel kb search "how to configure shovel"
-shovel kb list
-shovel kb remove <document-id>
+```powershell
+uv run shovel resource list
+uv run shovel scan list
 ```
+
+添加资源、扫描和恢复的完整命令见根 README；不提供 `shovel kb` 命令。
 
 ---
 
@@ -1119,56 +1134,93 @@ shovel kb remove <document-id>
 
 Message History 是对话记录。
 
-Memory 是从历史中抽取出的长期信息、用户偏好和上下文事实。
+原始用户/助手消息保存在 SQLite；必要的 Tool Interaction 仅保存审计元数据。
+Session Summary 是有水位的会话压缩，不是长期记忆。原生 Memory
+只从直接用户陈述提取有长期价值的信息，不能把 Tool、文档或网页内容自动转成用户事实。
 
 ### 15.2 Memory 类型
 
 | 类型 | 含义 | 示例 |
 |---|---|---|
-| Short-term memory | 当前会话上下文 | 本轮对话中的问题、工具结果、临时上下文 |
-| Long-term memory | 长期事实和偏好 | 用户偏好、项目目标、常用技术栈 |
-| Working memory | 当前任务状态 | workflow 中间结果、待处理任务列表 |
+| Conversation History | 原始会话记录 | 用户/助手消息及必要工具审计元数据 |
+| Session Summary | 会话上下文压缩 | 较早完成消息的有水位摘要 |
+| Semantic Memory | 稳定事实、偏好和约束 | 项目技术选择、用户偏好 |
+| Episodic Memory | 有时间和来源的重要事件 | 用户明确做出的决策或任务结果 |
+| Procedural Memory | 显式维护的可复用流程 | 工作模式；V1 不自动学习 |
 
 ### 15.3 Memory 流程
 
 ```text
 Conversation
   ↓
-Message
+Persist completed turns + enqueue Operation atomically
   ↓
-Memory Extractor
+Structured user-only extraction
   ↓
-Mem0
+Validate / Normalize / Deduplicate / Merge / Supersede
   ↓
-Context Provider
+SQLite facts + Outbox + extraction receipt
   ↓
-Agent Runtime
+Retry embedding / Zvec upsert or delete / flush / acknowledge
 ```
 
-### 15.4 Redis 的定位
-
-Redis 不建议一开始就做复杂。
-
-第一阶段可以用于：
+读取流程独立于写入：
 
 ```text
-cache
-session state
-temporary runtime state
-task status
+Current user query
+  ↓
+Zvec semantic candidates
+  ↓
+SQLite ownership / state / revision / model version / expiry checks
+  ↓
+Relevance gate + ranking + context budget
+  ↓
+MAF Context Provider → Agent
 ```
+
+当前用户输入优先于历史记忆。Memory 是不可信参考上下文，不是本地知识引用。
+
+### 15.4 本地持久化与一致性
+
+SQLite 是 Source of Truth，Zvec 是可重建的 Derived Index，二者不共享原子事务。
+索引失败不回滚已保存的事实；Outbox 保留失败意图并退避重试，Zvec flush 成功后才确认。
+模型版本/维度变化、索引丢失和显式重建通过新 generation 恢复，
+待处理变更完成后切换；旧 generation 目录不会自动清理。
+
+生命周期包含 candidate、active、superseded、expired、deleted、rejected。
+更新以 supersede 保留历史；软删除保留阻止自动重学的指纹，硬删除保留向量清理意图。
+workspace/user 是强制隔离分区，agent/session 进一步限制可见性。
+V1 保持单所有者、loopback-only，不提供多用户认证服务。
+
+复用现有 Generic Host Memory worker 与持久 Operation 队列，不引入独立 Worker Framework。
+摘要与提取在前台空闲后执行；摘要未追上时，尚未覆盖的旧消息暂不在 Agent Context 中。
+Memory 配置使用 `[memory]`、`[memory.embedder]` 和可选 `[memory.llm]`，
+完整示例见根 README。索引重建可能调用付费 embedding 服务。
 
 ### 15.5 Memory 模块结构
 
+当前模块复用既有项目结构，不建立并行的存储或 Host 体系：
+
 ```text
-shovel/
-└── memory/
-    ├── memory.py
-    ├── memory_store.py
-    ├── mem0_store.py
-    ├── extractor.py
-    └── context_provider.py
+backend/src/shovel/
+├── memory/
+│   ├── domain.py                 # 框架无关的实体、Scope 和策略
+│   ├── ports.py                  # Repository / VectorIndex / Extractor 协议
+│   ├── service.py                # 提取校验、合并约束、检索排序与预算
+│   ├── sqlite_repository.py      # SQLite 权威存储、生命周期与 Outbox
+│   ├── zvec_index.py             # 独立索引、模型版本、generation 和重建
+│   └── agent_framework.py        # 工具隔离的 MAF 提取/摘要 Adapter
+├── db/model/memory.py            # ORM、Summary、索引状态和审计元数据
+└── runtime/
+    ├── memory.py                # 装配、索引维护与摘要编排
+    └── memory_tasks.py          # 既有 Memory worker 与取消/恢复
 ```
+
+### 15.6 扩展边界
+
+Domain/Application 不依赖 MAF API；MAF 调用仅在 Integration Adapter 中。
+未来可替换 Repository、VectorIndex 或 Memory Provider，而不是让默认运行依赖外部服务。
+V1 不实现 Graph Memory、自动 Procedural Learning 或自主 Agent 管理记忆。
 
 ---
 
@@ -1270,7 +1322,7 @@ Settings
 | Agents | 创建、查看、启用和运行 Agent |
 | Conversations | 查看历史会话和消息 |
 | Knowledge | 上传文档、查看索引状态、执行检索 |
-| Settings | 管理模型、数据库、Qdrant、Redis、Memory 配置 |
+| Settings | 查看运行状态，管理 MCP，查看/删除原生 Memory 并重建索引；模型和存储配置来自 TOML/环境变量 |
 
 ### 17.4 前端目录结构
 
@@ -1425,9 +1477,9 @@ shovel/
 负责：
 
 - SQLAlchemy
-- Redis
-- Qdrant
-- Mem0
+- SQLite Repository 与 Outbox
+- Zvec 知识/Memory 索引 Adapter
+- 有界进程内向量缓存
 - Agent Framework adapter
 - 外部系统集成
 
@@ -1456,9 +1508,11 @@ shovel/
 负责：
 
 - Memory extraction
-- Memory store
-- Context provider
-- Long-term memory integration
+- SQLite 权威存储、Scope 与生命周期
+- 去重、合并、冲突替代与来源验证
+- 有界检索、排序与上下文组合
+- Zvec 最终一致性、重试与重建
+- MAF Integration Adapter
 
 ### 19.12 tools
 
@@ -1488,7 +1542,7 @@ shovel/
 | V2 | 本地存储 | SQLAlchemy, Alembic, SQLite, Repository | `agent create/list/run` 具备持久化 |
 | V3 | Web API | FastAPI, routes, schemas, WebSocket | 提供 agents/chat/settings API |
 | V4 | Agent Runtime | Microsoft Agent Framework, Tool Adapter, Session | 支持创建并运行 Agent |
-| V5 | Knowledge + Memory | Qdrant, Mem0, Redis | 支持文档索引、检索和记忆注入 |
+| V5 | Knowledge + Native Memory | SQLite, Zvec, Embedder, Outbox | 支持文档检索、隔离的记忆提取/召回及索引恢复 |
 | V6 | Web Console | Next.js, CSS, Tailwind | 支持 Dashboard、Agents、Chat、Settings 页面 |
 | V7 | Workflow | Workflow runtime, multi-agent orchestration | 支持 sequential/router/orchestrator-worker |
 | V8 | Observability | OpenTelemetry, structured logging | 支持运行链路追踪和诊断 |
@@ -1522,8 +1576,8 @@ shovel/
 7. Microsoft Agent Framework  
    完成 Agent Runtime。
 
-8. Qdrant + Mem0 + Redis  
-   完成 Knowledge 和 Memory。
+8. SQLite + Zvec + Native Memory
+   完成 Knowledge、记忆生命周期与可重建索引。
 
 9. Next.js + CSS  
    完成 Web Console。
@@ -1552,7 +1606,7 @@ Logging
 
 ### 22.2 再扩展 Agent 能力
 
-Agent Framework、Qdrant、Mem0、Redis、Workflow 都应该在基础架构稳定后再接入。
+Agent Framework、Zvec、原生 Memory 和 Workflow 都应该在基础架构稳定后再接入。
 
 ### 22.3 CLI 和 Web 共用业务逻辑
 
@@ -1576,9 +1630,9 @@ Application Service
 
 ```text
 SQLite -> PostgreSQL
-Local Qdrant -> Cloud Qdrant
+ZvecMemoryIndex -> Other MemoryVectorIndex adapters
 Local model -> Azure OpenAI
-Simple memory -> Mem0
+SQLiteMemoryRepository -> Other MemoryRepository adapters
 ```
 
 因此要避免业务逻辑直接依赖具体实现。
@@ -1603,8 +1657,8 @@ FastAPI
 SQLAlchemy
 Typer
 Rich
-Qdrant client
-Redis client
+Zvec SDK
+Embedding SDK
 Agent Framework SDK
 ```
 
@@ -1777,8 +1831,7 @@ persistence span
 ```text
 OpenAI API Key
 Azure OpenAI Key
-Redis password
-Qdrant API Key
+Embedding API Key
 Database password
 ```
 
@@ -1955,7 +2008,8 @@ Logging
 6. shovel commands: init, doctor, start, version
 ```
 
-完成这些后，Shovel 的主干架构会稳定下来。后续接入 SQLAlchemy、FastAPI、Agent Framework、Qdrant、Mem0 和 Next.js 会更加自然，也不容易导致目录结构和依赖关系混乱。
+这些阶段顺序用于理解工程骨架；当前已接入 SQLAlchemy、FastAPI、Agent Framework、
+Zvec、原生 Memory 和 Next.js。扩展时应复用现有模块，而不是重新搭建平行架构。
 
 ---
 

@@ -42,11 +42,7 @@ async def test_context_reads_start_together_and_preserve_budgeted_response(
         await memory_started.wait()
         return {"items": []}
 
-    async def remember(*_args: Any, **_kwargs: Any) -> None:
-        pass
-
     monkeypatch.setattr(runtime.memory, "search", memory)
-    monkeypatch.setattr(runtime.memory, "remember", remember)
     monkeypatch.setattr(runtime.retrieval, "search", retrieval)
 
     def respond(request: httpx.Request) -> httpx.Response:
@@ -210,6 +206,7 @@ async def test_warmup_uses_owned_resources_and_reports_failures_without_secrets(
     runtime.settings.embedding.provider = "ollama"
     runtime.settings.embedding.model = "embedding"
     runtime.settings.memory.embedder.model = "memory"
+    runtime.settings.memory.embedder.provider = "ollama"
     calls: list[str] = []
 
     async def index() -> object:

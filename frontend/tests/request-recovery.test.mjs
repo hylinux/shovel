@@ -26,6 +26,9 @@ test("recovery receipts survive reload, match backend IDs and stay workspace sco
     ["/resources/notes/profiles/text", "PUT"],
     ["/resources/notes/profiles/text", "DELETE"],
     ["/history/prune", "POST"],
+    ["/memory/index/rebuild", "POST"],
+    ["/memories", "POST"],
+    ["/memories/native-fact", "PUT"],
   ]) {
     const stored = await makePendingRequest("workspace-a", path, method, "{}");
     savePendingRequest(stored);

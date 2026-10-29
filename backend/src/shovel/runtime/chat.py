@@ -102,8 +102,7 @@ class ChatService:
                 raise NotFound("对话", identifier)
             if title is None:
                 await self.runtime.memory_tasks.invalidate(conversation_id=identifier)
-                if conversation.has_short_memory:
-                    await self.runtime.memory.forget_conversation(identifier)
+                await self.runtime.memory.forget_conversation(identifier)
                 await session.delete(conversation)
             else:
                 conversation.title = title
@@ -214,7 +213,7 @@ class ChatService:
                     select(ChatMessage)
                     .where(ChatMessage.conversation_id == identifier, ChatMessage.state == "completed")
                     .order_by(ChatMessage.sequence.desc())
-                    .limit(20)
+                    .limit(self.runtime.settings.memory.history_messages)
                 )
             )
             sequence = int(
@@ -267,12 +266,16 @@ class ChatService:
                     saved.memory_operation_id = await self.runtime.memory_tasks.enqueue(
                         session, user, generation=generation, run_id=run_id
                     )
+                if sequence >= self.runtime.settings.memory.history_messages:
+                    await self.runtime.memory_tasks.enqueue(
+                        session, user, generation=generation, run_id=run_id, kind="memory.summarize"
+                    )
                 await session.execute(
                     update(Conversation).where(Conversation.id == identifier).values(updated_at=now_ts())
                 )
                 await session.commit()
+                self.runtime.memory_wake.set()
                 if saved.memory_operation_id:
-                    self.runtime.memory_wake.set()
                     trace("memory.extraction.queued", operation_id=saved.memory_operation_id)
                 trace(
                     "chat.answer.persisted",

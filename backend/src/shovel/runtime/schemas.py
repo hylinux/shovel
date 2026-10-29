@@ -32,6 +32,42 @@ class InputModel(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
 
 
+class MemoryInput(InputModel):
+    text: str = Field(min_length=8, max_length=1500)
+    kind: Literal["semantic", "episodic", "procedural"] = "semantic"
+    scope: Literal["user", "workspace", "agent", "session"] = "agent"
+    session_id: str = Field(default="", max_length=200)
+    subject: str = Field(default="user", min_length=1, max_length=200)
+    predicate: Literal[
+        "prefers",
+        "dislikes",
+        "uses",
+        "works_at",
+        "has_role",
+        "has_timezone",
+        "has_language",
+        "has_goal",
+        "has_constraint",
+        "decides",
+        "knows_about",
+    ] = "prefers"
+    object: str = Field(default="", max_length=1000)
+    topic: str = Field(default="", max_length=200)
+    importance: float = Field(default=0.5, ge=0, le=1)
+    expires_at: int | None = Field(default=None, ge=0)
+    occurred_at: int | None = Field(default=None, ge=0)
+
+    @model_validator(mode="after")
+    def explicit_scope(self) -> MemoryInput:
+        from shovel.memory.domain import _SECRET
+
+        if (self.scope == "session") != bool(self.session_id):
+            raise ValueError("只有 session Scope 需要且必须提供 session_id。")
+        if _SECRET.search(self.text + self.object + self.topic + self.subject):
+            raise ValueError("不能将凭据保存到 Memory。")
+        return self
+
+
 class MCPConfigurationInput(BaseModel):
     model_config = ConfigDict(extra="forbid")
     content: str = Field(max_length=1_048_576)

@@ -1,7 +1,7 @@
 "use client";
 
 import { useState } from "react";
-import { segment, useAction, useQuery, type Items, type Memory, type Status } from "./api";
+import { segment, useAction, useQuery, type Items, type Memory, type Operation, type Status } from "./api";
 import { MCPManagement } from "./mcp";
 import { Empty, Feedback } from "./ui";
 
@@ -18,7 +18,7 @@ export function Settings({ status }: { status?: Status }) {
   const providers = [
     { name: "Chat model", section: "model", ready: status?.model_configured, value: status?.model_configured ? status.model_name : "Required for chat", description: "Generates replies through the main Agent.", optional: false },
     { name: "Knowledge embedding", section: "embedding", ready: status?.embedding_configured, value: status?.embedding_configured ? "Vector search available" : "Keyword search available", description: "Adds semantic search to your local documents.", optional: true },
-    { name: "Memory", section: "memory", ready: status?.memory_configured, value: status?.memory_configured ? "Enabled for every session" : "Required for chat", description: "Recalls session context and long-term user facts.", optional: false },
+    { name: "Native Memory", section: "memory", ready: status?.memory_configured, value: status?.memory_configured ? "SQLite · local source of truth" : "Unavailable", description: "Long-term facts with a separate, rebuildable Zvec semantic index.", optional: false },
   ];
   return <div className="settings-content">
     <nav className="settings-index" aria-label="Settings sections">
@@ -50,21 +50,26 @@ export function Settings({ status }: { status?: Status }) {
         <div><p className="settings-kicker">User context</p><h2 id="settings-memory-heading">Manage long-term Memory</h2><p className="muted">Review the facts your Agent remembers across sessions.</p></div>
         <button disabled={!status?.memory_configured} onClick={() => setMemoryOpen(!memoryOpen)} aria-expanded={memoryOpen} aria-controls="saved-memory">{memoryOpen ? "Hide saved Memory" : "Load saved Memory"}</button>
       </header>
-      <p className="muted">{status && !status.memory_configured ? "Configure a Memory embedder and extraction model in settings.toml to use these controls." : "Loading saved facts contacts your configured Memory provider."}</p>
-      <details className="settings-details"><summary>How Memory works</summary><p>Short-term Memory keeps original user messages without another LLM extraction. Long-term Memory extracts and merges user facts through mem0.</p><p>Deleting a session clears its short-term Memory, not long-term facts. Forgetting a fact does not erase its short-term copy.</p></details>
-      <div id="saved-memory" hidden={!memoryOpen}>{memoryOpen && <Memories />}</div>
+      <p className="muted">Saved facts are read locally from SQLite. Semantic recall uses your configured <code>[memory.embedder]</code>; extraction uses <code>[memory.llm]</code> or the main model.</p>
+      {status?.memory && <p role="status">Semantic index: <strong>{status.memory.index_state}</strong> · {status.memory.pending_index_operations} pending{status.memory.last_error && <span className="warning"> · {status.memory.last_error}</span>}</p>}
+      <details className="settings-details"><summary>How Memory works</summary><p>Conversation history and session summaries are separate from long-term facts. Native Memory extracts durable user assertions, consolidates duplicates and preserves superseded facts.</p><p>Deleting a session removes its summary and session-scoped Memory, not cross-session facts. Forgetting a fact hides it immediately; vector cleanup is retried in the background. This does not erase source messages or backups.</p></details>
+      <div id="saved-memory" hidden={!memoryOpen}>{memoryOpen && <Memories indexEnabled={status?.memory?.index_state !== "disabled"} />}</div>
     </section>
     <MCPManagement />
   </div>;
 }
 
-function Memories() {
+function Memories({ indexEnabled }: { indexEnabled: boolean }) {
   const memories = useQuery<Items<Memory>>("/memories");
   const [confirmId, setConfirmId] = useState("");
   const action = useAction();
+  async function rebuild() {
+    const result = await action.run<Operation>("/memory/index/rebuild");
+    if (result) action.setNotice(`Index rebuild queued: ${result.id}. Track it in Background tasks.`);
+  }
   async function forget(id: string) {
     const result = await action.run<{ deleted: boolean }>(`/memories/${segment(id)}`, undefined, "DELETE");
     if (result?.deleted) { setConfirmId(""); memories.refresh(); action.setNotice("Memory forgotten."); }
   }
-  return <div className="memory-panel"><Feedback error={memories.error} retry={memories.refresh} /><Feedback error={action.error} notice={action.notice} />{memories.loading ? <p role="status">Loading saved Memory…</p> : memories.data?.items.length === 0 ? <Empty title="No saved facts">Long-term facts extracted from your messages will appear here.</Empty> : memories.data?.items.map((item) => <article className="memory-row" key={item.id}><p className="preserve">{item.memory}</p>{confirmId === item.id ? <div className="confirmation"><p>Forget this saved fact? This cannot be undone.</p><div className="button-row"><button className="danger" disabled={action.busy} onClick={() => forget(item.id)}>Confirm forget</button><button disabled={action.busy} onClick={() => setConfirmId("")}>Keep fact</button></div></div> : <button disabled={action.busy} onClick={() => setConfirmId(item.id)}>Forget…</button>}</article>)}</div>;
+  return <div className="memory-panel"><button disabled={action.busy || !indexEnabled} onClick={rebuild}>Rebuild semantic index</button><Feedback error={memories.error} retry={memories.refresh} /><Feedback error={action.error} notice={action.notice} />{memories.loading ? <p role="status">Loading saved Memory…</p> : memories.data?.items.length === 0 ? <Empty title="No saved facts">Long-term facts extracted from your messages will appear here.</Empty> : memories.data?.items.map((item) => <article className="memory-row" key={item.id}><div><p className="preserve">{item.memory}</p><p className="muted">{[item.kind, item.scope, item.state].filter(Boolean).join(" · ")}</p></div>{confirmId === item.id ? <div className="confirmation"><p>Forget this saved fact? Its vector will also be cleaned up.</p><div className="button-row"><button className="danger" disabled={action.busy} onClick={() => forget(item.id)}>Confirm forget</button><button disabled={action.busy} onClick={() => setConfirmId("")}>Keep fact</button></div></div> : <button disabled={action.busy} onClick={() => setConfirmId(item.id)}>Forget…</button>}</article>)}</div>;
 }

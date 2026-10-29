@@ -19,8 +19,7 @@ class ZvecSettings(BaseModel):
     环境变量由 AppSettings 通过 env_nested_delimiter 统一处理
     (SHOVEL_ZVEC__DIM -> zvec.dim)。
 
-    记忆不在这里: 记忆交给 mem0 托管, 而 mem0 不支持 Zvec, 因此记忆
-    的向量落在本地 Qdrant, 配置见 :mod:`shovel.config.memory_config`。
+    原生记忆使用独立的 Zvec 配置, 见 :mod:`shovel.config.memory_config`。
     两者分开存放的好处仍然成立 —— "删掉知识库重建"不会碰到记忆。
     """
 

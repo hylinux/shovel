@@ -109,7 +109,7 @@ def open_collection(path: Path | str, *, read_only: bool = False) -> Collection:
 def init_vector_store(settings: ZvecSettings) -> list[CollectionInfo]:
     """按配置初始化 Zvec 运行时与知识库 collection。
 
-    记忆不在此处: 它由 mem0 写入本地 Qdrant, 见 :mod:`shovel.memory`。
+    原生记忆的 collection 由 Memory Adapter 按索引 generation 管理。
 
     返回每个 collection 的初始化结果, 由调用方(CLI)决定怎么展示。
     """

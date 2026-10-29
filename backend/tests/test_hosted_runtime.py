@@ -5,7 +5,6 @@ import json
 import os
 import socket
 import sys
-import threading
 from collections.abc import AsyncIterator
 from contextlib import nullcontext
 from pathlib import Path
@@ -51,6 +50,7 @@ def settings_at(path: Path) -> AppSettings:
             "database": {"url": f"sqlite+aiosqlite:///{(path / 'runtime.db').as_posix()}"},
             "zvec": {"knowledge_path": str(path / "vectors"), "dim": 4, "log_dir": str(path / "logs")},
             "agent": {"workspace_path": str(path / "workspace")},
+            "memory": {"index_path": str(path / "memory-vectors"), "dim": 4},
             "model": {
                 "model_provider_type": "openai",
                 "base_endpoint": "http://model.invalid/v1",
@@ -319,8 +319,6 @@ async def test_dev_diagnostics_trace_runtime_without_logging_payloads(
     directory.mkdir()
     (directory / "note.txt").write_text("Shovel private-document-body", encoding="utf-8")
     runtime.settings.log_level = "ERROR" if development else "DEBUG"
-    runtime.settings.memory.embedder.model = "test-memory"
-    runtime.memory._memory = FakeMemory(runtime.memory.scope())
     runtime.chat.agent._client = httpx.AsyncClient(
         transport=httpx.MockTransport(
             lambda _request: httpx.Response(
@@ -382,7 +380,7 @@ async def test_dev_diagnostics_trace_runtime_without_logging_payloads(
         "scan.completed",
         "retrieval.completed",
         "model.completed",
-        "memory.completed",
+        "memory.recall.completed",
         "chat.completed",
     )
     if development:
@@ -645,7 +643,7 @@ async def test_legacy_operation_migration_preserves_rows_and_is_repeatable(tmp_p
         async with create_async_session_factory(engine)() as session:
             row = await session.get(Operation, "legacy")
             assert row is not None and row.result == {"completed": 1} and row.request_key is None
-            assert list(await session.scalars(select(SchemaMigration.version))) == [1, 2, 3, 4, 5]
+            assert list(await session.scalars(select(SchemaMigration.version))) == [1, 2, 3, 4, 5, 6]
     finally:
         await context.aclose()
 
@@ -1121,7 +1119,6 @@ async def test_agui_stream_uses_framework_and_commits_before_success(
 
     runtime.chat.agent._client = httpx.AsyncClient(transport=httpx.MockTransport(model))
     runtime.settings.memory.embedder.model = "test-memory"
-    runtime.memory._memory = FakeMemory(runtime.memory.scope())
     app = FastAPI()
     configure_api(app, lambda: runtime, runtime.settings, development=development)
     with development_logging() if development else nullcontext():
@@ -1165,8 +1162,6 @@ async def test_agui_stream_uses_framework_and_commits_before_success(
     milestones += (
         [
             "agent.response.validated",
-            "memory.short_term.started",
-            "memory.short_term.completed",
             "memory.long_term.deferred",
             "memory.extraction.queued",
             "chat.answer.persisted",
@@ -1364,54 +1359,6 @@ async def test_agui_pre_run_failure_has_valid_terminal_events(
     assert await runtime.chat.messages(identifier) == []
 
 
-class FakeMemory:
-    def __init__(self, scope: dict[str, str]) -> None:
-        self.scope = scope
-        self.rows = [{"id": "owned", "memory": "User prefers Chinese", **scope}]
-        self.messages: list[dict[str, str]] = []
-        self.searches: list[dict[str, Any]] = []
-        self.threads: set[int] = set()
-        self.closed = False
-        self.vector_store = SimpleNamespace(client=SimpleNamespace(close=lambda: None))
-
-    def search(self, query: str, *, filters: dict[str, Any], top_k: int) -> dict[str, Any]:
-        self.threads.add(threading.get_ident())
-        assert filters["user_id"] == self.scope["user_id"]
-        self.searches.append(filters)
-
-        def matches(row: dict[str, Any], conditions: dict[str, Any]) -> bool:
-            return all(
-                any(matches(row, branch) for branch in value) if key == "OR" else row.get(key) == value
-                for key, value in conditions.items()
-            )
-
-        return {"results": [row for row in self.rows if matches(row, filters)][:top_k]}
-
-    def get_all(self, *, filters: dict[str, str], top_k: int) -> dict[str, Any]:
-        self.threads.add(threading.get_ident())
-        assert filters["agent_id"] == self.scope["agent_id"]
-        return {
-            "results": [row for row in self.rows if all(row.get(k) == v for k, v in filters.items())][:top_k]
-        }
-
-    def add(self, messages: list[dict[str, str]], *, infer: bool = True, **scope: str) -> None:
-        self.threads.add(threading.get_ident())
-        self.messages = messages
-        assert scope["user_id"] == "local-user"
-
-    def get(self, identifier: str) -> dict[str, Any] | None:
-        return next((row for row in self.rows if row["id"] == identifier), None)
-
-    def delete(self, identifier: str) -> None:
-        self.rows = [row for row in self.rows if row["id"] != identifier]
-
-    def delete_all(self, **scope: str) -> None:
-        self.rows = [row for row in self.rows if not all(row.get(k) == v for k, v in scope.items())]
-
-    def close(self) -> None:
-        self.closed = True
-
-
 @pytest.mark.parametrize(
     ("content", "history", "mode", "resource_ids", "fast_path"),
     [
@@ -1428,7 +1375,7 @@ class FakeMemory:
         ("Hi", [], "auto", ["selected-resource"], False),
     ],
 )
-async def test_independent_greetings_keep_recall_and_short_memory_without_fact_extraction(
+async def test_independent_greetings_keep_recall_without_unnecessary_fact_extraction(
     runtime: Runtime,
     api: httpx.AsyncClient,
     monkeypatch: pytest.MonkeyPatch,
@@ -1439,23 +1386,25 @@ async def test_independent_greetings_keep_recall_and_short_memory_without_fact_e
     resource_ids: list[str],
     fast_path: bool,
 ) -> None:
-    runtime.settings.memory.embedder.model = "test"
-    fake = FakeMemory(runtime.memory.scope())
-    runtime.memory._memory = fake
     searches: list[SearchInput] = []
-    writes: list[tuple[dict[str, str], bool]] = []
+    recalls: list[str] = []
+    writes: list[str] = []
 
     async def search(request: SearchInput) -> dict[str, Any]:
         searches.append(request)
         return {"items": []}
 
-    def add(messages: list[dict[str, str]], *, infer: bool = True, **scope: str) -> None:
-        assert messages == [{"role": "user", "content": content.strip()}]
-        scope.pop("metadata", None)
-        writes.append((scope, infer))
+    async def recall(query: str, **_kwargs: Any) -> list[dict[str, Any]]:
+        recalls.append(query)
+        return []
+
+    async def extract(text: str) -> list[Any]:
+        writes.append(text)
+        return []
 
     monkeypatch.setattr(runtime.retrieval, "search", search)
-    monkeypatch.setattr(fake, "add", add)
+    monkeypatch.setattr(runtime.memory, "search", recall)
+    monkeypatch.setattr(runtime.memory.extractor, "extract", extract)
     runtime.chat.agent._client = httpx.AsyncClient(
         transport=httpx.MockTransport(lambda _request: streamed_completion("Hello!"))
     )
@@ -1488,17 +1437,15 @@ async def test_independent_greetings_keep_recall_and_short_memory_without_fact_e
         )
     assert '"RUN_FINISHED"' in response.text, response.text
     assert len(searches) == (0 if fast_path else 1)
-    assert len(fake.searches) == 1
-    expected = [(runtime.memory.scope(identifier), False)]
-    assert writes == expected
+    assert recalls == [content.strip()]
+    assert writes == []
     saved = (await runtime.chat.messages(identifier))[-1]
     assert bool(saved.memory_operation_id) is not fast_path
     if not fast_path:
         assert await runtime.memory_tasks.run_once()
-        expected.append((runtime.memory.scope(), True))
-    assert writes == expected
+    assert writes == ([] if fast_path else [content.strip()])
     assert saved.state == "completed" and saved.content == "Hello!"
-    assert bool(saved.warnings) is not fast_path
+    assert any("本地资料" in warning for warning in saved.warnings) is not fast_path
     assert (await runtime.chat.conversation(identifier)).has_short_memory
     output = capsys.readouterr().out
     assert ("retrieval.skipped" in output) is fast_path
@@ -1507,13 +1454,22 @@ async def test_independent_greetings_keep_recall_and_short_memory_without_fact_e
 
 
 @pytest.mark.parametrize("protocol", ["rest", "agui"])
-async def test_default_memory_requires_configuration(
+async def test_native_memory_without_embedding_keeps_chat_available(
     runtime: Runtime, api: httpx.AsyncClient, protocol: str
 ) -> None:
     identifier = (await api.post("/api/v1/conversations", json={})).json()["id"]
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        if json.loads(request.content).get("stream"):
+            return streamed_completion("Hello!")
+        return httpx.Response(
+            200, json={"created": 1, "choices": [{"message": {"role": "assistant", "content": "Hello!"}}]}
+        )
+
+    runtime.chat.agent._client = httpx.AsyncClient(transport=httpx.MockTransport(respond))
     if protocol == "rest":
         response = await api.post(f"/api/v1/conversations/{identifier}/messages", json={"content": "Hello"})
-        assert response.status_code == 503
+        assert response.status_code == 200
     else:
         response = await api.post(
             "/api/v1/agent",
@@ -1527,10 +1483,10 @@ async def test_default_memory_requires_configuration(
                 "forwardedProps": {},
             },
         )
-        assert '"RUN_ERROR"' in response.text
-        assert '"RUN_FINISHED"' not in response.text
-    assert "Memory" in response.text
-    assert await runtime.chat.messages(identifier) == []
+        assert '"RUN_ERROR"' not in response.text
+        assert '"RUN_FINISHED"' in response.text
+    saved = (await runtime.chat.messages(identifier))[-1]
+    assert saved.state == "completed" and any("Memory" in warning for warning in saved.warnings)
 
 
 @pytest.mark.parametrize("protocol", ["rest", "agui"])
@@ -1541,9 +1497,19 @@ async def test_memory_enabled_by_default_recall_write_list_forget(
     protocol: str,
 ) -> None:
     identifier = await index_notes(runtime, tmp_path / "notes")
-    fake = FakeMemory(runtime.memory.scope())
-    runtime.settings.memory.embedder.model = "memory-test"
-    runtime.memory._memory = fake
+    from shovel.memory.domain import MemoryCandidate, Provenance
+    from test_native_memory import vectors
+
+    vectors(runtime, tmp_path)
+    fact = (
+        await runtime.memory.repository.consolidate(
+            runtime.memory.owner,
+            [MemoryCandidate("User prefers Chinese", object="Chinese", topic="language")],
+            Provenance("manual"),
+        )
+    )[0]
+    while await runtime.memory.maintain():
+        pass
     prompts: list[dict[str, Any]] = []
 
     def response(request: httpx.Request) -> httpx.Response:
@@ -1579,31 +1545,23 @@ async def test_memory_enabled_by_default_recall_write_list_forget(
         assert '"RUN_FINISHED"' in response.text
     assert response.status_code == 200, response.text
     assert "User prefers Chinese" in prompts[0]["messages"][-2]["content"]
-    assert fake.messages == [{"role": "user", "content": "Tell me about Shovel"}]
-    assert len(fake.threads) == 1
-    assert len(fake.searches) == 1
     assert (await runtime.chat.conversation(conversation["id"])).has_short_memory
-    assert (await api.get("/api/v1/memories")).json()["items"][0]["id"] == "owned"
-    assert (await api.delete("/api/v1/memories/owned")).json()["deleted"]
+    assert (await api.get("/api/v1/memories")).json()["items"][0]["id"] == fact.id
+    assert (await api.delete(f"/api/v1/memories/{fact.id}")).json()["deleted"]
     assert (await api.get("/api/v1/memories")).json()["items"] == []
-    fake.rows = [{"id": "foreign", "memory": "other", "user_id": "other", "agent_id": "shovel"}]
     assert (await api.delete("/api/v1/memories/foreign")).status_code == 404
 
 
 async def test_long_memory_failure_keeps_answer_and_reports_durable_task_failure(
     runtime: Runtime, api: httpx.AsyncClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    fake = FakeMemory(runtime.memory.scope())
-    runtime.settings.memory.embedder.model = "test"
-    runtime.memory._memory = fake
-    writes: list[tuple[list[dict[str, str]], bool]] = []
+    writes: list[str] = []
 
-    def add(messages: list[dict[str, str]], *, infer: bool = True, **scope: str) -> None:
-        writes.append((messages, infer))
-        if infer:
-            raise RuntimeError("Extraction unavailable")
+    async def extract(text: str) -> list[Any]:
+        writes.append(text)
+        raise RuntimeError("Extraction unavailable")
 
-    monkeypatch.setattr(fake, "add", add)
+    monkeypatch.setattr(runtime.memory.extractor, "extract", extract)
     runtime.chat.agent._client = httpx.AsyncClient(
         transport=httpx.MockTransport(
             lambda _request: httpx.Response(
@@ -1623,7 +1581,7 @@ async def test_long_memory_failure_keeps_answer_and_reports_durable_task_failure
     saved = (await runtime.chat.messages(identifier))[-1]
     assert saved.state == "completed" and saved.content == "Answer remains available."
     assert not any("记忆写入失败" in warning for warning in saved.warnings)
-    assert writes == [([{"role": "user", "content": "I prefer tea."}], False)]
+    assert writes == []
     for _ in range(3):
         async with runtime.sessions() as session:
             operation = await session.get(Operation, saved.memory_operation_id)
@@ -1633,48 +1591,33 @@ async def test_long_memory_failure_keeps_answer_and_reports_durable_task_failure
         assert await runtime.memory_tasks.run_once()
     operation = await runtime.operations.get(saved.memory_operation_id)
     assert operation.state == "failed" and operation.attempts == 3 and operation.error
-    assert writes == [
-        ([{"role": "user", "content": "I prefer tea."}], False),
-        *[([{"role": "user", "content": "I prefer tea."}], True)] * 3,
-    ]
+    assert writes == ["I prefer tea."] * 3
 
 
-async def test_mem0_short_term_isolation_dual_write_and_conversation_cleanup(
+async def test_native_session_memory_cleanup_preserves_cross_session_facts(
     runtime: Runtime, api: httpx.AsyncClient
 ) -> None:
-    fake = FakeMemory(runtime.memory.scope())
-    fake.rows.extend(
-        [
-            {"id": "short-a", "memory": "Only in a", **runtime.memory.scope("a")},
-            {"id": "short-b", "memory": "Only in b", **runtime.memory.scope("b")},
-            {"id": "foreign", "memory": "Other workspace", **fake.scope, "agent_id": "foreign"},
-            {"id": "foreign-user", "memory": "Other user", **fake.scope, "user_id": "foreign"},
-        ]
-    )
-    runtime.settings.memory.embedder.model = "test"
-    runtime.memory._memory = fake
-    recalled = await runtime.memory.search("context", conversation_id="a")
-    assert {row["id"] for row in recalled} == {"owned", "short-a"}
-    assert len(fake.searches) == 1
-    writes: list[tuple[dict[str, str], bool]] = []
+    from dataclasses import replace
 
-    def add(messages: list[dict[str, str]], *, infer: bool = True, **scope: str) -> None:
-        assert messages == [{"role": "user", "content": "Remember my preference"}]
-        writes.append((scope, infer))
+    from shovel.memory.domain import MemoryCandidate, MemoryState, Provenance, ScopeKind
 
-    fake.add = add  # type: ignore[method-assign]
-    await runtime.memory.remember("Remember my preference", conversation_id="a")
-    assert writes == [(runtime.memory.scope("a"), False), (runtime.memory.scope(), True)]
+    owner, repo = runtime.memory.owner, runtime.memory.repository
+    candidate = MemoryCandidate("User prefers Chinese", object="Chinese", topic="language")
+    shared = (await repo.consolidate(owner, [candidate], Provenance("manual")))[0]
+    scopes = [replace(owner, kind=ScopeKind.SESSION, session_id=identifier) for identifier in ("a", "b")]
+    private = [(await repo.consolidate(scope, [candidate], Provenance("manual")))[0] for scope in scopes]
     async with runtime.sessions() as session:
         session.add(Conversation(id="a", has_short_memory=True))
         await session.commit()
     assert (await api.delete("/api/v1/conversations/a")).status_code == 200
-    assert {row["id"] for row in fake.rows} == {"owned", "short-b", "foreign", "foreign-user"}
+    assert (await repo.get(scopes[0], private[0].id)).state == MemoryState.DELETED
+    assert (await repo.get(scopes[1], private[1].id)).state == MemoryState.ACTIVE
+    assert (await repo.get(owner, shared.id)).state == MemoryState.ACTIVE
     other_settings = runtime.settings.model_copy(deep=True)
     other_settings.agent.workspace_path = runtime.settings.agent.workspace / "other"
-    other = MemoryService(other_settings)
+    other = MemoryService(other_settings, runtime.sessions)
     try:
-        assert other.scope()["agent_id"] != runtime.memory.scope()["agent_id"]
+        assert other.owner.workspace_id != runtime.memory.owner.workspace_id
     finally:
         await other.close()
 
@@ -1758,7 +1701,7 @@ async def test_existing_database_upgrade_and_fts_backfill(tmp_path: Path) -> Non
         await upgrade_database(engine)
         await upgrade_database(engine)
         async with create_async_session_factory(engine)() as session:
-            assert list(await session.scalars(select(SchemaMigration.version))) == [1, 2, 3, 4, 5]
+            assert list(await session.scalars(select(SchemaMigration.version))) == [1, 2, 3, 4, 5, 6]
             assert await session.scalar(text("SELECT count(*) FROM chunk_search")) == 1
             assert (
                 await session.scalar(
@@ -2056,88 +1999,60 @@ async def test_tool_diagnostics_preserve_results_and_exceptions_without_payloads
     assert "private-" not in output
 
 
-async def test_real_mem0_local_qdrant_recall_persistence_and_forget(
+async def test_native_extractor_uses_tool_free_maf_and_validates_json(
     runtime: Runtime,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    monkeypatch.setenv("MEM0_TELEMETRY", "false")
-    from mem0.utils.factory import EmbedderFactory, LlmFactory
+    from shovel.memory.agent_framework import AgentFrameworkMemoryExtractor
 
-    llm_calls: list[dict[str, Any]] = []
-    recall_embeddings: list[str] = []
-    fail_llm = False
-
-    class Embedder:
-        def embed(self, _text: str, _action: str | None = None) -> list[float]:
-            if _action == "search" and _text == "tea":
-                recall_embeddings.append(_text)
-            return [1.0, 0.0, 0.0, 0.0]
-
-        def embed_batch(self, texts: list[str], _action: str | None = None) -> list[list[float]]:
-            return [self.embed(value) for value in texts]
-
-    class Llm:
-        def generate_response(self, **kwargs: Any) -> str:
-            llm_calls.append(kwargs)
-            if fail_llm:
-                raise ValueError("private-provider-error")
-            return json.dumps(
+    calls: list[dict[str, Any]] = []
+    answer = json.dumps(
+        {
+            "candidates": [
                 {
-                    "facts": ["User prefers tea."],
-                    "memory": [{"id": "0", "text": "User prefers tea.", "event": "ADD"}],
+                    "text": "User prefers green tea.",
+                    "kind": "semantic",
+                    "subject": "user",
+                    "predicate": "prefers",
+                    "object": "green tea",
+                    "topic": "drink",
+                    "confidence": 0.95,
+                    "importance": 0.5,
+                    "evidence": "I prefer green tea.",
+                    "replaces": False,
                 }
-            )
+            ]
+        }
+    )
 
-    monkeypatch.setattr(EmbedderFactory, "create", lambda *_args, **_kwargs: Embedder())
-    monkeypatch.setattr(LlmFactory, "create", lambda *_args, **_kwargs: Llm())
-    runtime.settings.memory.dim = 4
-    runtime.settings.memory.embedder.model = "test-memory"
-    runtime.settings.memory.qdrant.path = str(tmp_path / "memory")
-    runtime.settings.memory.history_db_path = str(tmp_path / "history.db")
-    from shovel.memory.store import init_memory_store
+    def respond(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        calls.append(body)
+        assert not body.get("tools")
+        return httpx.Response(
+            200, json={"created": 1, "choices": [{"message": {"role": "assistant", "content": answer}}]}
+        )
 
-    monkeypatch.delenv("MEM0_TELEMETRY", raising=False)
-    info = await asyncio.to_thread(init_memory_store, runtime.settings.memory)
-    assert info.created
-    assert os.environ["MEM0_TELEMETRY"] == "false"
-    with development_logging(), trace_context(run_id="mem0-phases"):
-        await runtime.memory.remember("I prefer tea.", conversation_id="tea-conversation")
-    output = capsys.readouterr().out
-    for event in (
-        "memory.llm.started",
-        "memory.llm.completed",
-        "memory.embedding.completed",
-        "memory.vector.completed",
-    ):
-        line = next(line for line in output.splitlines() if f"{event} " in line)
-        assert "run_id=mem0-phases" in line
-    assert "I prefer tea" not in output and "User prefers tea" not in output
-    assert len(llm_calls) == 1
-    rows = await runtime.memory.list()
-    assert len(rows) == 1
-    identifier = rows[0]["id"]
-    assert (await runtime.memory.search("tea"))[0]["id"] == identifier
-    before = len(recall_embeddings)
-    recalled = await runtime.memory.search("tea", conversation_id="tea-conversation")
-    assert len(recalled) == 2
-    assert before == 1 and len(recall_embeddings) == before
-    assert {item["memory"] for item in recalled} == {"I prefer tea.", "User prefers tea."}
-    assert len(await runtime.memory.search("tea", conversation_id="another-conversation")) == 1
-    await runtime.memory.forget_conversation("tea-conversation")
-    assert len(await runtime.memory.search("tea", conversation_id="tea-conversation")) == 1
-    await runtime.memory.close()
-    runtime.memory = MemoryService(runtime.settings)
-    assert (await runtime.memory.list())[0]["id"] == identifier
-    await runtime.memory.delete(identifier)
+    extractor = AgentFrameworkMemoryExtractor(runtime.settings.model)
+    http = httpx.AsyncClient(transport=httpx.MockTransport(respond))
+    from shovel.runtime.agent import create_framework_client
+
+    extractor._http = http
+    extractor._sdk, extractor._framework = create_framework_client(
+        runtime.settings.model, http, max_iterations=1
+    )
+    try:
+        candidates = await extractor.extract("I prefer green tea.")
+        assert candidates[0].object == "green tea"
+        assert calls[0]["response_format"]["type"] == "json_schema"
+        answer = "not-json"
+        with pytest.raises(ValueError):
+            await extractor.extract("private-invalid-source")
+    finally:
+        await extractor.close()
     assert await runtime.memory.list() == []
-    fail_llm = True
-    with development_logging(), pytest.raises(RuntimeFailure, match="Memory"):
-        await runtime.memory.remember("private-failure-input")
-    output = capsys.readouterr().out
-    assert "memory.llm.failed" in output and "error_type=ValueError" in output
-    assert "private-provider-error" not in output and "private-failure-input" not in output
 
 
 @pytest.mark.parametrize("development", [False, True])

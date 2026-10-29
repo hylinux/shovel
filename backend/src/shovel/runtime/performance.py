@@ -90,8 +90,8 @@ class RuntimeWarmup:
             )
 
         local_memory = local_ollama(
-            settings.memory.embedder.provider or settings.model.model_provider_type,
-            settings.memory.embedder.base_url or settings.model.base_endpoint,
+            settings.memory.embedder.provider,
+            settings.memory.embedder.base_url,
             settings.memory.embedder.model,
         )
         self.states: dict[str, dict[str, Any]] = {

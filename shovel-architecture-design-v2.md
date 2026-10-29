@@ -1,5 +1,11 @@
 # Shovel 架构与设计说明文档
 
+> 本文是 Studio 产品的长期设计，不是当前功能清单。
+> 当前运行契约见根 README；原生 Memory 已采用 SQLite 权威存储与独立 Zvec 索引，
+> 默认不需要外部 Memory Framework、数据库或缓存服务。
+> 下文 Resource Studio、Memory Studio、Trigger 和发布管理等是产品演进目标，
+> 不能视为已提供的 CLI、API 或配置项。
+
 ## 文档信息
 
 | 项目 | 内容 |
@@ -10,7 +16,7 @@
 | 作者 | HongWei Guo |
 | 版本 | Draft v2.0 |
 | 推荐路径 | `docs/shovel-architecture-design.md` |
-| 更新时间 | 2026/7/31 |
+| 更新时间 | 2026/10/29 |
 | 目标读者 | 项目开发者、架构设计者、后续维护者 |
 
 ---
@@ -227,8 +233,8 @@ Shovel 第一阶段应该以本地个人使用为主：
 Local SQLite
 Local Settings
 Local Runtime
-Local Qdrant
-Local Redis
+Local Zvec: independent Knowledge / Memory indexes
+Native Memory: SQLite + Outbox
 Local Knowledge
 Local Agent
 ```
@@ -350,9 +356,9 @@ Shared Skill Library
 ├──────────────────────────────────────────────┤
 │ SQLAlchemy / Alembic                          │
 │ SQLite / PostgreSQL                           │
-│ Qdrant                                        │
-│ Redis                                         │
-│ Mem0                                          │
+│ Zvec: independent Knowledge / Memory indexes  │
+│ SQLite Outbox / Operations                     │
+│ Native Memory Adapters                        │
 │ Microsoft Agent Framework                     │
 │ OpenTelemetry                                 │
 │ Dependency Injector                           │
@@ -487,8 +493,8 @@ Search Engine
 Azure OpenAI
 OpenAI
 Ollama
-Qdrant
-Redis
+Zvec Knowledge Index
+Native Memory Index
 SQLite
 PostgreSQL
 Cosmos DB
@@ -939,25 +945,27 @@ Memory Store 用于管理 Agent 的长期记忆。
 #### Memory 类型
 
 ```text
-Short-term Memory
-Long-term Memory
-Working Memory
-User Memory
-Agent Memory
-Workflow Memory
+Conversation History: raw turns and tool audit metadata
+Session Summary: compressed session context, not long-term facts
+Semantic / Episodic / Procedural Memory: long-term records
+Scope: workspace / user / agent / session
 ```
 
 #### Memory Store 实现
 
 ```text
-Mem0
-Redis
-Vector Memory
-Graph Memory
-SQL Memory
+MemoryRepository → SQLite / SQLAlchemy
+MemoryVectorIndex → independent Zvec index
+MemoryExtractor → tool-free MAF adapter
+MemoryService → validation / consolidation / retrieval / lifecycle
 ```
 
+Graph Memory 和其他远程 Provider 仅作为未来扩展，不属于 V1 默认能力。
+
 #### Memory Store 定义
+
+下述是未来 Studio 的资源描述草案，不是当前新增的表或配置段。
+V1 使用现有 `[memory]` 配置和 Shovel 原生服务，字段与行为以根 README 为准。
 
 ```text
 MemoryStore
@@ -1335,7 +1343,7 @@ status
 ✓ Settings file found.
 ✓ SQLite database ready.
 ✓ Runtime dependencies ready.
-⚠ Qdrant is not configured.
+⚠ Memory semantic recall unavailable: configure [memory.embedder].
 ✗ Failed to connect to model provider.
 ```
 
@@ -1539,7 +1547,7 @@ Knowledge Source 不直接持有底层连接。
 Knowledge Source: My Docs
     source_resource: Local File System
     embedding_resource: Azure OpenAI Embedding
-    vector_store_resource: Qdrant
+    vector_store_resource: Zvec Knowledge Index
 ```
 
 ---
@@ -1548,43 +1556,65 @@ Knowledge Source: My Docs
 
 ### 13.1 Memory 目标
 
-Memory 模块负责管理 Agent 的长期上下文和历史经验。
+Memory 模块负责长期记忆的提取、合并、生命周期、隔离、检索和上下文预算。
+SQLite 保存权威记录，Zvec 只保存可重建的语义索引；
+Microsoft Agent Framework 通过适配层参与提取/摘要和 Agent Context 集成。
 
 ### 13.2 Memory 类型
 
 | 类型 | 含义 |
 |---|---|
-| Short-term Memory | 当前会话上下文 |
-| Long-term Memory | 长期用户偏好和事实 |
-| Working Memory | 当前任务执行状态 |
-| Agent Memory | 특정 Agent 的历史记忆 |
-| Workflow Memory | Workflow 执行中的状态记忆 |
+| Conversation History | 原始用户/助手消息与必要工具审计元数据 |
+| Session Summary | 有水位的会话压缩，不是长期事实 |
+| Semantic Memory | 稳定事实、偏好、约束与技术决策 |
+| Episodic Memory | 有时间和来源的重要事件 |
+| Procedural Memory | 显式维护的可复用流程，V1 不自动学习 |
+
+Memory 类型与 Scope 是两个维度：workspace/user 是强制分区，
+agent/session 是进一步的可见性限制。工作流中间状态不自动成为长期记忆。
 
 ### 13.3 Memory Runtime
 
 ```text
-Message
+Persist user/assistant turns + enqueue Operation
   ↓
-Memory Extractor
+Structured extraction from direct user assertions
   ↓
-Memory Store
+Validation / deduplication / merge / supersede
   ↓
-Memory Retriever
+SQLite facts + Outbox + extraction receipt
   ↓
-Agent Context Provider
+Embedding → Zvec → flush → acknowledge
 ```
+
+召回为独立流程：
+
+```text
+Current query → Zvec candidates → SQLite authority checks
+  → relevance/ranking → bounded context → MAF Agent
+```
+
+Tool、文档和网页内容不能自动成为用户事实；当前用户输入优先于历史记忆。
 
 ### 13.4 Memory Store
 
-支持：
+V1 默认实现：
 
 ```text
-Mem0
-Redis
-Vector Store
-SQL Store
-Graph Store
+SQLiteMemoryRepository
+ZvecMemoryIndex
+Durable Memory Operations / Index Outbox
+MAF extraction / summary adapter
 ```
+
+SQLite 与 Zvec 最终一致：索引失败不丢失已保存事实，失败意图持久重试；
+索引丢失或模型版本变化后从 SQLite 重建。生命周期支持 supersede、expire、
+软删除与硬删除，已失效记录不会通过残留向量进入上下文。
+
+通过 Repository/VectorIndex 等协议预留其他存储和 Provider 的扩展点，
+但不引入默认外部服务，也不在 V1 实现 Graph Memory 或自主 Agent 管理记忆。
+配置与恢复说明见 [Native Memory](README.md#native-memory)，
+当前模块结构见 [Memory 架构](shovel-architecture-design.md#15-memory-system-设计)。
 
 ---
 
@@ -1642,7 +1672,7 @@ Create Chunks
     ↓
 Generate Embeddings
     ↓
-Store in Qdrant
+Persist authoritative chunks in SQLite and vectors in Zvec
     ↓
 Update Knowledge Index
 ```
@@ -1868,9 +1898,9 @@ Azure OpenAI Chat Model
 Azure OpenAI Embedding Model
 OpenAI Model
 Ollama Local Model
-Qdrant Local
-Qdrant Cloud
-Redis Local
+Zvec Knowledge Index
+Native Memory Index
+Future Remote Vector Provider
 SQLite
 PostgreSQL
 Local File System
@@ -2033,8 +2063,8 @@ DatabaseSettings
 WebSettings
 RuntimeSettings
 ModelSettings
-QdrantSettings
-RedisSettings
+ZvecSettings
+EmbeddingSettings
 MemorySettings
 TelemetrySettings
 ```
@@ -2286,9 +2316,10 @@ Trigger Runtime
 ```text
 Knowledge Studio
 Memory Studio
-Qdrant
-Mem0
-Redis
+SQLite authoritative records
+Independent Zvec indexes
+Native Memory lifecycle / scopes / extraction / recall
+Outbox retry / index rebuild / bounded query cache
 ```
 
 ### 25.8 V8: Observability and Publishing
@@ -2320,9 +2351,9 @@ Export and Import
 | ORM | SQLAlchemy |
 | Migration | Alembic |
 | Local DB | SQLite |
-| Vector DB | Qdrant |
-| Memory | Mem0 |
-| Cache / State | Redis |
+| Vector Index | Zvec，知识与 Memory 独立配置 |
+| Memory | Shovel Native Memory，SQLite 权威存储 |
+| Cache / State | 有界进程内向量缓存 + SQLite 持久状态/Outbox |
 | Agent Runtime | Microsoft Agent Framework |
 | Observability | OpenTelemetry |
 | Packaging | uv / pyproject.toml |

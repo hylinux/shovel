@@ -378,8 +378,10 @@ runtime            Resource     工作队列、检索、对话、Memory 与惰�
 
 Runtime 持有一个惰性打开的 Zvec sink, 不为每次请求重复打开 collection。
 原生向量读写经过互斥与取消保护; Host 停止后统一释放连接。每次扫描创建
-独立 embedder 并在 finally 中关闭。Memory 在自己的单线程执行器上创建、
-调用、释放, 不与知识向量库共享客户端。
+独立 embedder 并在 finally 中关闭。原生 Memory 使用独立 embedding 配置、
+Zvec collection 和异步 MAF 提取/摘要客户端，不与知识向量库共享连接。
+其原生索引 I/O 通过互斥与取消保护的 `asyncio.to_thread` 执行，
+由现有 Memory worker 处理持久 Operation、Outbox 重试与索引重建。
 
 ---
 

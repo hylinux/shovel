@@ -22,6 +22,8 @@ class RuntimeLock:
     def __init__(self, settings: AppSettings) -> None:
         vector_path = Path(settings.zvec.knowledge_path).expanduser().resolve()
         paths = {vector_path.with_name(vector_path.name + ".runtime.lock")}
+        memory_path = settings.memory.index_path.expanduser().resolve()
+        paths.add(memory_path.with_name(memory_path.name + ".runtime.lock"))
         database = make_url(settings.database.url).database
         if database and database != ":memory:":
             paths.add(Path(database).expanduser().resolve().with_suffix(".runtime.lock"))

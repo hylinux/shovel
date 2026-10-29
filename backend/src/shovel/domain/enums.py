@@ -451,11 +451,14 @@ class MemoryKind(StrEnum):
 
 
 class MemoryValidityState(StrEnum):
+    CANDIDATE = "candidate"
     ACTIVE = "active"
     SUPERSEDED = "superseded"
     EXPIRED = "expired"
     RETRACTED = "retracted"
     ARCHIVED = "archived"
+    DELETED = "deleted"
+    REJECTED = "rejected"
 
 
 class MemorySource(StrEnum):

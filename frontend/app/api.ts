@@ -7,7 +7,7 @@ import { mergeSessionHistory } from "./session-history";
 import { startQueryPolling } from "./query-polling";
 import { invalidateReads, sharedRead } from "./read-requests";
 
-export type Status = { service: string; workspace_id: string; embedding_configured: boolean; model_configured: boolean; model_name: string; memory_configured: boolean; warmup?: Record<string, { state: string; elapsed_ms?: number; error_type?: string }>; chat_capacity?: { limit: number; running: number; waiting: number } };
+export type Status = { service: string; workspace_id: string; embedding_configured: boolean; model_configured: boolean; model_name: string; memory_configured: boolean; memory?: { provider: string; index_state: string; pending_index_operations: number; last_error: string | null }; warmup?: Record<string, { state: string; elapsed_ms?: number; error_type?: string }>; chat_capacity?: { limit: number; running: number; waiting: number } };
 export type UnixSeconds = number;
 export type Resource = { id: string; name: string; connector_kind: string; state: string; config: { root_path?: string; store_id?: string; folder_ids?: string[]; include_subfolders?: boolean }; description?: string; authority?: string; sensitivity?: string; state_reason?: string; last_verified_at?: UnixSeconds | null };
 export type OutlookStore = { id: string; name: string };
@@ -19,7 +19,7 @@ export type JobEvent = { id: string; logged_at: UnixSeconds; level: string; stag
 export type Session = { id: string; title: string; created_at: UnixSeconds; updated_at: UnixSeconds };
 export type Citation = { index?: number; chunk_id: string; resource_id: string; resource_name: string; doc_uri: string; title: string; text: string; score: number; email?: { sender?: string; to?: string; sent_at?: UnixSeconds | null; received_at?: UnixSeconds | null; folder_path?: string } };
 export type Message = { id: string; conversation_id: string; role: "user" | "assistant"; content: string; state: string; citations: Citation[]; warnings: string[]; created_at: UnixSeconds; memory_operation_id?: string | null };
-export type Memory = { id: string; memory: string; created_at?: UnixSeconds | null };
+export type Memory = { id: string; memory: string; kind?: string; state?: string; scope?: string; revision?: number; created_at?: UnixSeconds | null; provenance?: { source_kind: string; conversation_id: string; message_id: string }[] };
 export type Items<T> = { items: T[] };
 export type Profile = { id: string; name: string; scan_mode: string; is_enabled: boolean; include: string[]; exclude: string[]; max_file_bytes: number; time_window_days: number | null; pipeline: Record<string, unknown> };
 export type MessagePage = { items: (Message & { sequence: number })[]; next_before: number | null };
@@ -134,7 +134,8 @@ export function useAction() {
     controller.current = request;
     setBusy(true); setError(""); setNotice("");
     const serialized = body === undefined ? undefined : JSON.stringify(body);
-    const durable = path.startsWith("/resources") || path === "/index/cleanup" || path === "/history/prune";
+    const durable = path.startsWith("/resources") || path === "/index/cleanup" || path === "/history/prune"
+      || path === "/memory/index/rebuild" || (path.startsWith("/memories") && method !== "DELETE");
     let submitted = false;
     try {
       if (durable) {

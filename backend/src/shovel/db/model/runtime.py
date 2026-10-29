@@ -66,3 +66,7 @@ class MemoryEpoch(Base):
 
     id: Mapped[int] = mapped_column(sa.Integer, primary_key=True)
     generation: Mapped[int] = mapped_column(sa.Integer, nullable=False, default=0)
+    workspace_id: Mapped[str | None] = mapped_column(sa.Text)
+    user_id: Mapped[str | None] = mapped_column(sa.Text)
+
+    __table_args__ = (sa.Index("uq_memory_epoch_owner", "workspace_id", "user_id", unique=True),)

@@ -1,520 +1,432 @@
+"""Composition and runtime ownership of the native memory application."""
+
 from __future__ import annotations
 
 import asyncio
 import hashlib
-import inspect
 import json
-import threading
-from collections.abc import Callable
-from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
-from contextvars import ContextVar, copy_context
-from functools import partial, wraps
+from dataclasses import replace
 from time import perf_counter
 from typing import Any
 
-from anyio import CancelScope
+import structlog
+from sqlalchemy import func, select, text
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from shovel.config.settings import AppSettings
-from shovel.memory.config import build_memory_config, memory_paths
-from shovel.memory.store import open_memory
-from shovel.pipeline.embedding_cache import EmbeddingCache
+from shovel.db.base import now_ts
+from shovel.db.model.memory import MemoryIndexOutbox, MemoryIndexState, SessionSummary
+from shovel.db.model.runtime import ChatMessage, Conversation, MemoryEpoch, Operation
+from shovel.exceptions.pipeline import EmbeddingError, VectorSinkError
+from shovel.memory.agent_framework import AgentFrameworkMemoryExtractor
+from shovel.memory.domain import (
+    ExtractionCancelled,
+    MemoryCandidate,
+    MemoryRecord,
+    MemoryScope,
+    MemoryState,
+    Provenance,
+    ScopeKind,
+)
+from shovel.memory.service import MemoryService as NativeMemoryService
+from shovel.memory.service import view
+from shovel.memory.sqlite_repository import SQLiteMemoryRepository
+from shovel.memory.zvec_index import ZvecMemoryIndex
+from shovel.pipeline.embedder import build_embedder
 from shovel.runtime.diagnostics import trace
 from shovel.runtime.errors import NotFound, RuntimeFailure
 
-
-class ExtractionCancelled(RuntimeFailure):
-    def __init__(self) -> None:
-        super().__init__("长期记忆任务已失效或取消。", status=409)
-
-
-class ExtractionGuard:
-    def __init__(self, before_write: Callable[[], None], validate: Callable[[], None] | None) -> None:
-        self.cancelled = threading.Event()
-        self.before_write = before_write
-        self.validate = validate
-        self.failure: BaseException | None = None
-
-    def check(self) -> None:
-        if self.cancelled.is_set():
-            raise ExtractionCancelled()
-        if self.failure is not None:
-            raise RuntimeFailure("长期记忆存储写入失败,任务可能已部分执行。", status=502) from self.failure
-
-
-_extraction: ContextVar[ExtractionGuard | None] = ContextVar("memory_extraction", default=None)
-_WRITES = frozenset(
-    {
-        "insert",
-        "update",
-        "delete",
-        "delete_all",
-        "delete_col",
-        "reset",
-        "add_history",
-        "batch_add_history",
-        "save_messages",
-    }
-)
-_worker_llm: tuple[str, Any] | None = None
-
-
-def _generate_memory_response(config: dict[str, Any], args: tuple[Any, ...], kwargs: dict[str, Any]) -> Any:
-    from mem0.utils.factory import LlmFactory
-
-    global _worker_llm
-    try:
-        fingerprint = hashlib.sha256(json.dumps(config, sort_keys=True).encode()).hexdigest()
-        if _worker_llm is None or _worker_llm[0] != fingerprint:
-            _worker_llm = (fingerprint, LlmFactory.create(config["provider"], config["config"]))
-        model = _worker_llm[1]
-        return model.generate_response(*args, **kwargs)
-    except Exception as exc:
-        raise RuntimeError(f"Memory provider failed ({type(exc).__name__})") from None
-
-
-class _OwnedStorage:
-    def __init__(self, target: Any, owner: Callable[[Callable[[], Any]], Any]) -> None:
-        self._target, self._owner = target, owner
-
-    def __getattr__(self, name: str) -> Any:
-        value = self._owner(lambda: getattr(self._target, name))
-        if not callable(value):
-            return value
-
-        @wraps(value)
-        def call(*args: Any, **kwargs: Any) -> Any:
-            def invoke() -> Any:
-                guard = _extraction.get()
-                if guard is not None:
-                    guard.check()
-                    if name in _WRITES:
-                        guard.before_write()
-                        guard.check()
-                try:
-                    return value(*args, **kwargs)
-                except BaseException as exc:
-                    if guard is not None and name in _WRITES:
-                        guard.failure = exc
-                        raise RuntimeFailure(
-                            f"长期记忆存储写入失败 ({type(exc).__name__})。", status=502
-                        ) from None
-                    raise
-
-            return self._owner(invoke)
-
-        return call
-
-
-class _BackgroundLlm:
-    def __init__(self, target: Any, generate: Callable[..., Any]) -> None:
-        self._target, self._generate = target, generate
-
-    def __getattr__(self, name: str) -> Any:
-        return getattr(self._target, name)
-
-    def generate_response(self, *args: Any, **kwargs: Any) -> Any:
-        if _extraction.get() is not None:
-            from mem0.memory.utils import extract_json, remove_code_blocks
-
-            response = self._generate(*args, **kwargs)
-            try:
-                cleaned = remove_code_blocks(response)
-                try:
-                    parsed = json.loads(cleaned, strict=False)
-                except json.JSONDecodeError:
-                    parsed = json.loads(extract_json(cleaned), strict=False)
-                facts = parsed.get("memory") if isinstance(parsed, dict) else None
-                if not isinstance(facts, list) or any(
-                    not isinstance(fact, dict)
-                    or not isinstance(fact.get("text"), str)
-                    or not fact["text"].strip()
-                    for fact in facts
-                ):
-                    raise ValueError("Invalid memory extraction schema")
-            except (TypeError, ValueError, AttributeError) as exc:
-                raise RuntimeFailure("长期记忆模型返回的提取结果无效。", status=502) from exc
-            return response
-        return self._target.generate_response(*args, **kwargs)
-
-
-class _TimedMemoryComponent:
-    def __init__(
-        self,
-        target: Any,
-        phase: str,
-        methods: set[str],
-        cache: EmbeddingCache | None = None,
-        metadata: dict[str, str] | None = None,
-    ) -> None:
-        self._target, self._phase, self._methods = target, phase, methods
-        self._cache = cache
-        self._metadata = metadata or {}
-        self._calls = 0
-        self._counter_lock = threading.Lock()
-
-    def __getattr__(self, name: str) -> Any:
-        value = getattr(self._target, name)
-        if name not in self._methods or not callable(value):
-            return value
-
-        @wraps(value)
-        def call(*args: Any, **kwargs: Any) -> Any:
-            key = None
-            if self._cache is not None and name == "embed":
-                try:
-                    key = self._cache.key(args, kwargs)
-                except TypeError:
-                    trace("memory.embedding.cache_bypassed", reason="non_json_arguments")
-                if key is not None:
-                    cached = self._cache.get(key)
-                    if cached is not None:
-                        trace("memory.embedding.cached", action=name)
-                        return cached
-            started = perf_counter()
-            with self._counter_lock:
-                first_call = self._calls == 0
-                self._calls += 1
-            trace(f"memory.{self._phase}.started", action=name, first_call=first_call, **self._metadata)
-            try:
-                result = value(*args, **kwargs)
-            except BaseException as exc:
-                guard = _extraction.get()
-                if guard is not None and self._phase == "embedding" and name == "embed":
-                    guard.failure = exc
-                trace(
-                    f"memory.{self._phase}.failed",
-                    action=name,
-                    error_type=type(exc).__name__,
-                    elapsed_ms=round((perf_counter() - started) * 1000, 2),
-                )
-                raise
-            if (
-                key is not None
-                and isinstance(result, list)
-                and all(isinstance(item, (int, float)) for item in result)
-            ):
-                assert self._cache is not None
-                self._cache.put(key, result)
-            trace(
-                f"memory.{self._phase}.completed",
-                action=name,
-                elapsed_ms=round((perf_counter() - started) * 1000, 2),
-            )
-            return result
-
-        return call
+__all__ = ["ExtractionCancelled", "MemoryService"]
+_INDEX_ERRORS = (EmbeddingError, VectorSinkError, OSError, RuntimeError, ValueError)
 
 
 class MemoryService:
-    """One lazy mem0 client; Qdrant/history access stays on one owning thread."""
-
-    def __init__(self, settings: AppSettings) -> None:
-        self.settings = settings
-        self._memory: Any = None
-        self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="shovel-memory")
-        self._inference = ThreadPoolExecutor(max_workers=1, thread_name_prefix="shovel-extraction")
-        self._owner_thread: int | None = None
-        self._llm_pool: ProcessPoolExecutor | None = None
-        self._pool_lock = threading.Lock()
-        self._guard: ExtractionGuard | None = None
-
-    def _storage(self, action: Callable[[], Any]) -> Any:
-        if threading.get_ident() == self._owner_thread:
-            return action()
-        return self._executor.submit(copy_context().run, action).result()
-
-    def _entity_store(self, get: Callable[[], Any]) -> Any:
-        return _OwnedStorage(self._storage(get), self._storage)
-
-    def _generate(self, *args: Any, **kwargs: Any) -> Any:
-        guard = _extraction.get()
-        assert guard is not None
-        guard.check()
-        try:
-            with self._pool_lock:
-                guard.check()
-                if self._llm_pool is None:
-                    self._llm_pool = ProcessPoolExecutor(max_workers=1)
-                pool = self._llm_pool
-                config = build_memory_config(self.settings.memory, self.settings.model)["llm"]
-                future = pool.submit(_generate_memory_response, config, args, kwargs)
-            return future.result(timeout=self.settings.memory.llm.timeout_seconds)
-        except TimeoutError as exc:
-            self._terminate_llm()
-            raise RuntimeFailure("长期记忆模型请求超时。", status=504) from exc
-        except Exception as exc:
-            self._terminate_llm()
-            guard.check()
-            raise RuntimeFailure(f"长期记忆模型调用失败 ({type(exc).__name__})。", status=502) from exc
-
-    def _terminate_llm(self) -> None:
-        with self._pool_lock:
-            pool, self._llm_pool = self._llm_pool, None
-        if pool is not None:
-            pool.terminate_workers()
-
-    def cancel_extraction(self) -> None:
-        if self._guard is not None:
-            self._guard.cancelled.set()
-        self._terminate_llm()
-
-    async def extract(
-        self,
-        content: str,
-        *,
-        operation_id: str,
-        before_write: Callable[[], None],
-        validate: Callable[[], None] | None = None,
-    ) -> None:
-        memory = await self._call(self._get)
-        guard = ExtractionGuard(before_write, validate)
-        self._guard = guard
-
-        def infer() -> None:
-            token = _extraction.set(guard)
-            try:
-                guard.check()
-                if guard.validate is not None:
-                    guard.validate()
-                guard.check()
-                memory.add(
-                    [{"role": "user", "content": content}],
-                    metadata={"shovel_operation_id": operation_id},
-                    **self.scope(),
-                )
-                guard.check()
-            finally:
-                _extraction.reset(token)
-
-        future = asyncio.get_running_loop().run_in_executor(self._inference, copy_context().run, infer)
-        try:
-            await asyncio.shield(future)
-        except asyncio.CancelledError:
-            self.cancel_extraction()
-            with CancelScope(shield=True):
-                try:
-                    await asyncio.shield(future)
-                except Exception:
-                    trace("memory.extraction.cancelled")
-            raise
-        finally:
-            self._guard = None
-
-    def scope(self, conversation_id: str | None = None) -> dict[str, str]:
-        from pathlib import Path
-
-        workspace = self.settings.agent.workspace
-        default = (Path.home() / ".shovel" / "workspaces" / "default").resolve()
-        # Preserve ownership of memories created before configurable workspaces.
-        agent_id = (
-            "shovel"
-            if workspace == default
-            else f"shovel:{hashlib.sha256(str(workspace).encode()).hexdigest()}"
+    def __init__(self, settings: AppSettings, sessions: async_sessionmaker[AsyncSession]) -> None:
+        self.settings, self.sessions = settings, sessions
+        workspace = hashlib.sha256(str(settings.agent.workspace.resolve()).encode()).hexdigest()[:24]
+        self.owner = MemoryScope(workspace)
+        self.repository = SQLiteMemoryRepository(sessions)
+        model = settings.memory.llm if settings.memory.llm.is_configured else settings.model
+        self.extractor = AgentFrameworkMemoryExtractor(model)
+        self.index = (
+            ZvecMemoryIndex(
+                settings.memory,
+                self.owner,
+                self.repository,
+                build_embedder(settings.memory.embedder, expected_dimension=settings.memory.dim),
+                cache_entries=settings.performance.embedding_cache_entries,
+                cache_seconds=settings.performance.embedding_cache_seconds,
+            )
+            if settings.memory.embedder.is_configured
+            else None
         )
-        result = {"user_id": "local-user", "agent_id": agent_id}
-        if conversation_id is not None:
-            result.update(agent_id=f"{agent_id}:short", run_id=conversation_id)
-        return result
+        self.application = NativeMemoryService(
+            self.repository,
+            self.index,
+            self.extractor,
+            self.owner,
+            min_similarity=settings.memory.min_similarity,
+            min_confidence=settings.memory.min_confidence,
+            max_chars=settings.memory.context_max_chars,
+            max_items=settings.memory.max_items,
+        )
+        self._active: asyncio.Task[Any] | None = None
+        self._index_error: str | None = None
+        self._maintenance_lock = asyncio.Lock()
+        self._log = structlog.get_logger("shovel.memory")
 
     @property
     def configured(self) -> bool:
-        return bool(
-            self.settings.memory.embedder.model
-            and (self.settings.model.is_configured or self.settings.memory.llm.model)
-        )
+        return True
 
-    def _get(self) -> Any:
-        if not self.configured:
-            raise RuntimeFailure(
-                "Memory 尚未配置。",
-                status=503,
-                hint="配置 [memory.embedder] 的模型和 [model] 或 [memory.llm];未启用记忆的对话不受影响。",
+    async def initialize(self) -> None:
+        async with self.sessions() as session:
+            await session.execute(text("BEGIN IMMEDIATE"))
+            previous = await session.scalar(
+                select(MemoryEpoch).where(
+                    MemoryEpoch.workspace_id == self.owner.workspace_id,
+                    MemoryEpoch.user_id == self.owner.user_id,
+                )
             )
-        if self._memory is None:
-            self._owner_thread = threading.get_ident()
-            started = perf_counter()
-            trace("memory.client.started")
-            for path in memory_paths(self.settings.memory):
-                path.mkdir(parents=True, exist_ok=True)
-            self._memory = open_memory(
-                self.settings.memory, self.settings.model, entity_store=self._entity_store
-            )
-            for name in ("vector_store", "db"):
-                component = getattr(self._memory, name, None)
-                if component is not None:
-                    setattr(self._memory, name, _OwnedStorage(component, self._storage))
-            self._memory.llm = _BackgroundLlm(self._memory.llm, self._generate)
-            provider_config = build_memory_config(self.settings.memory, self.settings.model)
-            for name, phase, methods in (
-                ("llm", "llm", {"generate_response"}),
-                ("embedding_model", "embedding", {"embed", "embed_batch"}),
-                ("vector_store", "vector", {"search", "insert", "update", "delete", "get"}),
-            ):
-                component = getattr(self._memory, name, None)
-                if component is not None:
-                    cache = None
-                    if phase == "embedding":
-                        performance = self.settings.performance
-                        cache = EmbeddingCache(
-                            performance.embedding_cache_entries,
-                            performance.embedding_cache_seconds,
-                            dimension=self.settings.memory.dim,
-                        )
-                    metadata = {}
-                    if phase in {"embedding", "llm"}:
-                        section = provider_config["embedder" if phase == "embedding" else "llm"]
-                        metadata = {
-                            "provider": section["provider"],
-                            "model": section["config"].get("model", ""),
-                        }
-                    setattr(
-                        self._memory, name, _TimedMemoryComponent(component, phase, methods, cache, metadata)
+            if previous is None:
+                session.add(
+                    MemoryEpoch(
+                        workspace_id=self.owner.workspace_id, user_id=self.owner.user_id, generation=0
                     )
-            trace("memory.client.ready", elapsed_ms=round((perf_counter() - started) * 1000, 2))
-        return self._memory
+                )
+            await session.commit()
 
-    async def warmup(self) -> None:
-        def warm() -> None:
-            self._get().embedding_model.embed("Shovel warmup", "search")
+    async def warnings(self) -> list[str]:
+        state = await self.status()
+        if self.index is None:
+            return ["Memory 已保存于 SQLite;未配置 [memory.embedder],当前不提供语义回忆。"]
+        if state["index_state"] != "ready":
+            return ["Memory 语义索引尚未就绪或正在恢复;SQLite 中的记忆不受影响。"]
+        return []
 
-        await self._call(warm)
-
-    async def _call[T](self, action: Callable[[], T]) -> T:
-        started = perf_counter()
-        trace("memory.started", action=action.__name__)
-        try:
-            result = await asyncio.get_running_loop().run_in_executor(
-                self._executor, copy_context().run, action
+    async def status(self) -> dict[str, Any]:
+        async with self.sessions() as session:
+            state = await session.get(MemoryIndexState, (self.owner.workspace_id, self.owner.user_id))
+            pending = await session.scalar(
+                select(func.count())
+                .select_from(MemoryIndexOutbox)
+                .where(
+                    MemoryIndexOutbox.workspace_id == self.owner.workspace_id,
+                    MemoryIndexOutbox.user_id == self.owner.user_id,
+                    MemoryIndexOutbox.done_at.is_(None),
+                )
             )
+        return {
+            "provider": "native",
+            "source_of_truth": "sqlite",
+            "index_state": "disabled"
+            if self.index is None
+            else (
+                "failed"
+                if self._index_error or (state and state.last_error)
+                else "pending"
+                if pending
+                else state.state
+                if state
+                else "pending"
+            ),
+            "pending_index_operations": int(pending or 0),
+            "last_error": self._index_error or (state.last_error if state else None),
+        }
+
+    async def search(self, query: str, *, conversation_id: str = "") -> list[dict[str, Any]]:
+        started = perf_counter()
+        try:
+            result = await self.application.retrieve(query, conversation_id)
+            self._index_error = None
             trace(
-                "memory.completed",
-                action=action.__name__,
+                "memory.recall.completed",
+                count=len(result),
                 elapsed_ms=round((perf_counter() - started) * 1000, 2),
             )
             return result
-        except RuntimeFailure as exc:
-            trace("memory.failed", action=action.__name__, error_type=type(exc).__name__)
-            raise
-        except Exception as exc:
-            trace("memory.failed", action=action.__name__, error_type=type(exc).__name__)
-            raise RuntimeFailure(
-                f"Memory 操作失败 ({type(exc).__name__})。",
-                status=502,
-                hint="检查 Memory 的模型、向量维度和 Qdrant 配置;本次操作未报告成功。",
-            ) from exc
+        except _INDEX_ERRORS as exc:
+            self._index_error = type(exc).__name__
+            self._log.warning("memory.retrieval.unavailable", error_type=self._index_error)
+            return []
 
-    def _scope_arguments(
-        self, method: Callable[..., Any], limit: int, conversation_id: str | None = None
-    ) -> dict[str, Any]:
-        parameters = inspect.signature(method).parameters
-        # mem0 2.x moved entity arguments into filters and renamed limit to top_k.
-        scope = self.scope(conversation_id)
-        result: dict[str, Any] = scope if "user_id" in parameters else {"filters": scope}
-        result["top_k" if "top_k" in parameters else "limit"] = limit
-        return result
+    async def list(
+        self,
+        limit: int = 100,
+        *,
+        include_history: bool = False,
+        conversation_id: str = "",
+    ) -> list[dict[str, Any]]:
+        states = tuple(MemoryState) if include_history else (MemoryState.ACTIVE,)
+        scope = replace(self.owner, session_id=conversation_id)
+        return [view(r) for r in await self.repository.list_records(scope, limit=limit, states=states)]
 
-    @staticmethod
-    def _items(response: Any) -> list[dict[str, Any]]:
-        rows = response.get("results") if isinstance(response, dict) else response
-        if not isinstance(rows, list) or any(not isinstance(item, dict) for item in rows):
-            raise RuntimeFailure("Memory 返回了不支持的数据格式。", status=502)
-        return rows
+    async def owned(self, identifier: str, *, conversation_id: str = "") -> MemoryRecord:
+        return await self.repository.get(replace(self.owner, session_id=conversation_id), identifier)
 
-    async def search(self, query: str, *, conversation_id: str | None = None) -> list[dict[str, Any]]:
-        def search() -> list[dict[str, Any]]:
-            memory = self._get()
-            arguments = self._scope_arguments(memory.search, 10 if conversation_id is not None else 5)
-            if conversation_id is not None:
-                # One recall embeds the query once, without widening the workspace/session boundary.
-                arguments.pop("agent_id", None)
-                arguments["filters"] = {
-                    "user_id": self.scope()["user_id"],
-                    "OR": [self.scope(), self.scope(conversation_id)],
-                }
-            rows = self._items(memory.search(query, **arguments))
-            trace("memory.recall.completed", items=len(rows), short_term=conversation_id is not None)
-            return rows
+    async def delete(self, identifier: str, *, hard: bool = False, conversation_id: str = "") -> None:
+        await self.repository.transition(
+            replace(self.owner, session_id=conversation_id), identifier, MemoryState.DELETED, hard=hard
+        )
 
-        return await self._call(search)
+    async def forget_conversation(self, identifier: str) -> None:
+        scope = replace(self.owner, session_id=identifier)
+        for row in await self.repository.list_records(scope, limit=10000, states=tuple(MemoryState)):
+            if row.scope.kind == ScopeKind.SESSION:
+                await self.repository.transition(scope, row.id, MemoryState.DELETED)
 
-    async def remember(
-        self, content: str, *, conversation_id: str | None = None, extract_long_term: bool = True
+    async def write(self, operation: Operation) -> None:
+        from shovel.memory.domain import _SECRET, MemoryType
+        from shovel.runtime.schemas import MemoryInput
+
+        payload = MemoryInput.model_validate(operation.payload["memory"])
+        if _SECRET.search(payload.text + payload.object + payload.topic):
+            raise RuntimeFailure("不能将凭据保存到 Memory。")
+        scope = replace(
+            self.owner,
+            kind=ScopeKind(payload.scope),
+            session_id=payload.session_id,
+        )
+        if scope.kind == ScopeKind.SESSION:
+            async with self.sessions() as session:
+                if await session.get(Conversation, scope.session_id) is None:
+                    raise NotFound("对话", scope.session_id)
+        candidate = MemoryCandidate(
+            text=payload.text,
+            kind=MemoryType(payload.kind),
+            subject=payload.subject,
+            predicate=payload.predicate,
+            object=payload.object,
+            topic=payload.topic,
+            confidence=1,
+            importance=payload.importance,
+            expires_at=payload.expires_at,
+            occurred_at=payload.occurred_at,
+        )
+        await self.repository.consolidate(
+            scope,
+            [candidate],
+            Provenance("manual"),
+            operation_id=operation.id,
+            generation=operation.payload["generation"],
+            replace_id=operation.payload.get("replace_id"),
+        )
+
+    def cancel_extraction(self) -> None:
+        if self._active is not None:
+            self._active.cancel()
+
+    async def extract(
+        self,
+        source: str,
+        *,
+        operation_id: str,
+        generation: int,
+        message_id: str,
+        conversation_id: str,
     ) -> None:
-        def add() -> None:
-            memory = self._get()
-            messages = [{"role": "user", "content": content}]
-            if conversation_id is not None:
-                started = perf_counter()
-                trace("memory.short_term.started", inference=False)
-                # Short-term recall keeps the original user text; only long-term facts need inference.
-                memory.add(messages, infer=False, **self.scope(conversation_id))
-                trace("memory.short_term.completed", elapsed_ms=round((perf_counter() - started) * 1000, 2))
-            if not extract_long_term:
-                trace("memory.long_term.deferred")
+        self._active = asyncio.current_task()
+        try:
+            try:
+                related = await self.application.related(source)
+            except _INDEX_ERRORS as exc:
+                related = []
+                self._index_error = type(exc).__name__
+                self._log.warning("memory.consolidation.index_unavailable", error_type=self._index_error)
+            await self.application.extract(
+                source,
+                Provenance("user_message", conversation_id, message_id),
+                operation_id=operation_id,
+                generation=generation,
+                related=related,
+            )
+        finally:
+            self._active = None
+
+    async def warmup(self) -> None:
+        if self.index is not None:
+            await self.index.embedder.embed(["Shovel memory warmup"])
+
+    async def maintain(self) -> bool:
+        expired = await self.repository.expire_due(self.owner)
+        if self.index is None:
+            return bool(expired)
+        async with self._maintenance_lock:
+            try:
+                await self.index.initialize()
+                intents = await self.repository.pending(self.owner)
+                for intent in intents:
+                    try:
+                        # Index maintenance may cover all agents in this owned workspace partition.
+                        from shovel.memory.sqlite_repository import _TABLES, record
+
+                        async with self.sessions() as session:
+                            row = await session.get(_TABLES[intent.kind], intent.memory_id)
+                            item = (
+                                record(row, intent.kind)
+                                if (
+                                    row is not None
+                                    and row.workspace_id == self.owner.workspace_id
+                                    and row.user_id == self.owner.user_id
+                                )
+                                else None
+                            )
+                        if (
+                            intent.action == "upsert"
+                            and item is not None
+                            and item.revision == intent.revision
+                            and item.state == MemoryState.ACTIVE
+                            and (item.expires_at is None or item.expires_at > now_ts())
+                        ):
+                            await self.index.upsert(item)
+                        else:
+                            await self.index.delete(intent.memory_id, intent.kind, intent.revision)
+                        await self.repository.acknowledge(intent, self.index.model_version)
+                    except _INDEX_ERRORS as exc:
+                        self._index_error = type(exc).__name__
+                        await self.repository.fail(intent, self._index_error)
+                        self._log.warning("memory.index.retry", error_type=self._index_error)
+                if not await self.repository.pending(self.owner, force=True):
+                    await self.index.finish_rebuild()
+                    self._index_error = None
+                return bool(intents)
+            except _INDEX_ERRORS as exc:
+                self._index_error = type(exc).__name__
+                self._log.error("memory.index.unavailable", error_type=self._index_error)
+                return False
+
+    async def rebuild(self) -> None:
+        if self.index is None:
+            raise RuntimeFailure("重建 Memory 索引需要配置 [memory.embedder]。", status=503)
+        async with self._maintenance_lock:
+            await self.index.start_rebuild()
+        while await self.maintain():
+            pass
+        pending = await self.repository.pending(self.owner, force=True)
+        if pending or self._index_error:
+            raise RuntimeFailure("Memory 索引重建尚未完成,待处理项已保留供后台重试。", status=503)
+
+    async def summary(self, conversation_id: str) -> str:
+        async with self.sessions() as session:
+            row = await session.get(SessionSummary, conversation_id)
+            if row is None:
+                return ""
+            if (row.workspace_id, row.user_id, row.agent_id) != (
+                self.owner.workspace_id,
+                self.owner.user_id,
+                self.owner.agent_id,
+            ):
+                return ""
+            return row.content
+
+    async def summarize(self, conversation_id: str, operation_id: str, generation: int) -> None:
+        async with self.sessions() as session:
+            previous = await session.get(SessionSummary, conversation_id)
+            if previous is not None and (previous.workspace_id, previous.user_id, previous.agent_id) != (
+                self.owner.workspace_id,
+                self.owner.user_id,
+                self.owner.agent_id,
+            ):
+                raise RuntimeFailure("Session Summary 属于其他 Memory Scope。", status=409)
+            through = previous.through_sequence if previous else 0
+            latest = list(
+                await session.scalars(
+                    select(ChatMessage.sequence)
+                    .where(
+                        ChatMessage.conversation_id == conversation_id,
+                        ChatMessage.state == "completed",
+                    )
+                    .order_by(ChatMessage.sequence.desc())
+                    .limit(self.settings.memory.history_messages)
+                )
+            )
+            if len(latest) < self.settings.memory.history_messages:
                 return
-            started = perf_counter()
-            trace("memory.long_term.started", inference=True)
-            memory.add(messages, **self.scope())
-            trace("memory.long_term.completed", elapsed_ms=round((perf_counter() - started) * 1000, 2))
+            rows = list(
+                await session.scalars(
+                    select(ChatMessage)
+                    .where(
+                        ChatMessage.conversation_id == conversation_id,
+                        ChatMessage.state == "completed",
+                        ChatMessage.sequence > through,
+                        ChatMessage.sequence < min(latest),
+                    )
+                    .order_by(ChatMessage.sequence)
+                    .limit(40)
+                )
+            )
+            if not rows:
+                return
+            messages = [{"role": r.role, "content": r.content} for r in rows]
+            old_text = previous.content if previous else ""
+        self._active = asyncio.current_task()
+        try:
+            # Keep source text out of summaries when it might contain credentials or quoted instructions.
+            from shovel.memory.domain import _SECRET
 
-        await self._call(add)
-
-    async def forget_conversation(self, conversation_id: str) -> None:
-        def forget() -> None:
-            self._get().delete_all(**self.scope(conversation_id))
-
-        await self._call(forget)
-
-    async def list(self, limit: int = 100) -> list[dict[str, Any]]:
-        def list_memories() -> list[dict[str, Any]]:
-            memory = self._get()
-            return self._items(memory.get_all(**self._scope_arguments(memory.get_all, limit)))
-
-        return await self._call(list_memories)
-
-    async def owned(self, identifier: str) -> None:
-        def verify() -> None:
-            item = self._get().get(identifier)
-            if not isinstance(item, dict) or any(
-                item.get(key) != value for key, value in self.scope().items()
-            ):
-                raise NotFound("记忆", identifier)
-
-        await self._call(verify)
-
-    async def delete(self, identifier: str) -> None:
-        def remove() -> None:
-            memory = self._get()
-            item = memory.get(identifier)
-            if not isinstance(item, dict) or any(
-                item.get(key) != value for key, value in self.scope().items()
-            ):
-                raise NotFound("记忆", identifier)
-            memory.delete(identifier)
-
-        await self._call(remove)
+            messages = [
+                {**m, "content": "[sensitive message omitted]"} if _SECRET.search(m["content"]) else m
+                for m in messages
+            ]
+            selected = []
+            budget = self.extractor.settings.max_input_chars - len(old_text) - 1500
+            for message in messages:
+                used = len(json.dumps(message, ensure_ascii=False)) + 2
+                if used > budget:
+                    break
+                selected.append(message)
+                budget -= used
+            if not selected:
+                raise ValueError("A source message exceeds the summarizer input budget.")
+            content = await self.extractor.summarize(
+                old_text, selected, self.settings.memory.summary_max_chars
+            )
+            if _SECRET.search(content):
+                raise ValueError("Session summary may contain sensitive content.")
+            async with self.sessions() as session:
+                await session.execute(text("BEGIN IMMEDIATE"))
+                epoch = await session.scalar(
+                    select(MemoryEpoch).where(
+                        MemoryEpoch.workspace_id == self.owner.workspace_id,
+                        MemoryEpoch.user_id == self.owner.user_id,
+                    )
+                )
+                operation = await session.get(Operation, operation_id)
+                current = await session.get(SessionSummary, conversation_id)
+                if (
+                    epoch is None
+                    or epoch.generation != generation
+                    or operation is None
+                    or operation.state != "running"
+                    or await session.get(Conversation, conversation_id) is None
+                    or (current.through_sequence if current else 0) != through
+                ):
+                    raise ExtractionCancelled()
+                if current is None:
+                    current = SessionSummary(
+                        conversation_id=conversation_id,
+                        workspace_id=self.owner.workspace_id,
+                        user_id=self.owner.user_id,
+                        agent_id=self.owner.agent_id,
+                        content=content,
+                        through_sequence=rows[len(selected) - 1].sequence,
+                    )
+                    session.add(current)
+                else:
+                    current.content, current.through_sequence = content, rows[len(selected) - 1].sequence
+                    current.updated_at = now_ts()
+                more = current.through_sequence < min(latest) - 1
+                operation.state = "queued" if more else "succeeded"
+                operation.finished_at = None if more else now_ts()
+                operation.result = {"through_sequence": current.through_sequence}
+                await session.commit()
+        finally:
+            self._active = None
 
     async def close(self) -> None:
         self.cancel_extraction()
-        await asyncio.to_thread(partial(self._inference.shutdown, wait=True))
-
-        def close() -> None:
-            if self._memory is None:
-                return
-            memory, self._memory = self._memory, None
-            try:
-                close_method = getattr(memory, "close", None)
-                if callable(close_method):
-                    close_method()
-                elif getattr(memory, "db", None) is not None:
-                    memory.db.close()
-            finally:
-                vector_store = getattr(memory, "vector_store", None)
-                client = getattr(vector_store, "client", None)
-                if client is not None:
-                    client.close()
-
         try:
-            await self._call(close)
+            await self.extractor.close()
         finally:
-            await asyncio.to_thread(partial(self._executor.shutdown, wait=True))
+            if self.index is not None:
+                await self.index.close()

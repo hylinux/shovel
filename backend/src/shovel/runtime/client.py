@@ -29,6 +29,7 @@ def workspace_id(settings: AppSettings) -> str:
         [
             settings.database.url,
             str(Path(settings.zvec.knowledge_path).expanduser().resolve()),
+            str(settings.agent.workspace.resolve()),
         ]
     )
     return hashlib.sha256(identity.encode()).hexdigest()

@@ -11,7 +11,6 @@ from shovel.cli.decorators import command_handler
 from shovel.cli.ui.console import console
 from shovel.config.settings import load_settings
 from shovel.db.database import init_database
-from shovel.memory import init_memory_store
 from shovel.services.health import HealthResult, HealthStatus, check_model
 from shovel.vector import init_vector_store
 
@@ -165,28 +164,8 @@ def init() -> None:
         else:
             console.success(f"Zvec collection '{info.name}' is exists at {info.path}.")
 
-    # 初始化记忆: mem0 + 本地 Qdrant。
-    # 记忆不走 Zvec, 因为记忆的写入/冲突/失效逻辑交给了 mem0, 而 mem0
-    # 不支持 Zvec —— 详见 shovel/config/memory_config.py。
-    #
-    # 这一步只建 collection, 不实例化 LLM 与 embedder:
-    # init 必须能在用户还没填 API Key 的时候跑完。
-    with console.status(
-        "[cyan]Initial the memory store (mem0 + Qdrant) ......",
-    ):
-        time.sleep(_STEP_PAUSE_SECONDS)
-
-    memory_info = init_memory_store(settings.memory)
-
-    if memory_info.created:
-        console.success(
-            f"Qdrant collection '{memory_info.collection}' was created at "
-            f"{memory_info.location} (mode={memory_info.mode}, dim={memory_info.dim})."
-        )
-    else:
-        console.success(f"Qdrant collection '{memory_info.collection}' is exists at {memory_info.location}.")
-
-    console.success(f"mem0 history database is ready at {memory_info.history_db}.")
+    settings.memory.index_path.expanduser().mkdir(parents=True, exist_ok=True)
+    console.success("Native Memory is ready in SQLite; its Zvec index initializes on demand.")
 
     # 检查默认大模型的连接。未配置时只是提示, 不算失败 —— 见 services/health.py
     with console.status(

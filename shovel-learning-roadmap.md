@@ -1,8 +1,8 @@
 # Shovel 学习路线规划
 
 > 这是面向长期 Agent Platform 的学习路线，不代表这些模块均已实现。
-> 当前交付边界、开发命令和验收入口见根 README；调度、Agent 工具及 Workflow
-> 仍属后续阶段。
+> 当前交付边界、开发命令和验收入口见根 README。MAF 主 Agent、工具扩展及原生 Memory
+> 已实现；自动调度与完整的多 Agent 管理仍属后续目标。
 
 ## 文档信息
 
@@ -12,7 +12,7 @@
 | 项目名称 | Shovel AI Agent Platform |
 | 作者 | HongWei Guo |
 | 版本 | v1.0 |
-| 更新时间 | 2026/7/31 |
+| 更新时间 | 2026/10/29 |
 | 路径 | docs/shovel-learning-roadmap.md |
 
 ---
@@ -164,13 +164,13 @@ FastAPI
 Microsoft Agent Framework
 
 阶段 10
-Qdrant
+Zvec + SQLite Knowledge Index
 
 阶段 11
-Mem0
+Shovel Native Memory
 
 阶段 12
-Redis
+Outbox + Recovery + Bounded Cache
 
 阶段 13
 Next.js
@@ -779,13 +779,13 @@ shovel agent run
 
 ---
 
-# 阶段 10：Qdrant
+# 阶段 10：Zvec + SQLite Knowledge Index
 
 ---
 
 ## 学习目标
 
-实现 Knowledge Base。
+理解 SQLite 权威文本与 Zvec 派生向量组成的 Knowledge Base。
 
 ---
 
@@ -799,43 +799,54 @@ shovel agent run
 
 ### Metadata
 
+### SQLite revision / visibility validation
+
+### Independent knowledge and Memory embeddings
+
 ---
 
 ## Shovel 输出
 
 实现：
 
-```bash
-shovel kb add
-
-shovel kb search
+```powershell
+uv run shovel resource list
+uv run shovel scan list
 ```
+
+按根 README 添加资源、扫描并在 Web 中检索；当前 CLI 不提供 `shovel kb`。
 
 ---
 
 ## 验收标准
 
-支持文档检索。
+支持 keyword/vector/hybrid 检索；向量命中仍须通过 SQLite 可见性和 revision 校验。
 
 ---
 
-# 阶段 11：Mem0
+# 阶段 11：Shovel Native Memory
 
 ---
 
 ## 学习目标
 
-实现长期记忆。
+理解并扩展原生长期记忆，不把 Conversation History 或 Session Summary 当成长期事实。
 
 ---
 
 ## 学习内容
 
-### Extract Memory
+### Structured extraction from direct user assertions
 
-### Store Memory
+### Validation / normalization / deduplication / consolidation
 
-### Retrieve Memory
+### SQLite lifecycle / provenance / scope isolation
+
+### Zvec retrieval / SQLite revalidation / ranking / context budget
+
+### MAF integration adapter
+
+### Supersede / expire / soft delete / hard delete
 
 ---
 
@@ -844,42 +855,49 @@ shovel kb search
 支持：
 
 ```text
-长期记忆
+User assertion → structured candidates → validation/consolidation → SQLite + Outbox
+Current query → Zvec → SQLite checks → bounded Memory context → MAF Agent
 ```
+
+阅读 `backend/src/shovel/memory/`、`runtime/memory.py`、
+`runtime/memory_tasks.py` 和根 README 的 Native Memory 章节。
 
 ---
 
 ## 验收标准
 
-用户信息能够自动记住并回忆。
+有效用户事实可以跨会话回忆；临时闲聊、凭据和外部来源不自动变成用户事实。
+隔离错误、删除、过期、旧 revision 和无关向量不得进入 Context。
+当前输入优先于历史记忆；Procedural Memory 仅显式维护，V1 不自动学习。
 
 ---
 
-# 阶段 12：Redis
+# 阶段 12：Outbox、恢复与有界缓存
 
 ---
 
 ## 学习目标
 
-实现缓存和状态管理。
+理解 SQLite 与 Zvec 的最终一致性、持久任务恢复，以及不缓存权限和事实的查询向量缓存。
 
 ---
 
 ## 使用场景
 
 ```text
-Session
-
-Cache
-
-Runtime State
+SQLite: Operation / SessionSummary / MemoryIndexOutbox / MemoryIndexState
+Zvec: generation / embedding version / flush / rebuild
+Process-local: bounded TTL query embedding cache
 ```
 
 ---
 
 ## 验收标准
 
-Agent Session 支持 Redis。
+索引失败不丢失 SQLite 事实；失败任务与 Outbox 可重试。
+索引丢失、模型变化和重建后可恢复召回，删除与重建竞争不能复活已删除事实。
+取消和 Scope generation 阻止过时提取写入。
+默认不需要独立数据库、缓存或 Memory Server；云端 embedding 重建可能产生费用。
 
 ---
 
@@ -1094,13 +1112,15 @@ Workflow
 
 - https://learn.microsoft.com/agent-framework/
 
-## Qdrant
+## SQLite
 
-- https://qdrant.tech/documentation/
+- https://www.sqlite.org/docs.html
 
-## Mem0
+## Zvec 与 Shovel Native Memory
 
-- https://docs.mem0.ai/
+- https://zvec.org/
+- [原生 Memory 配置、恢复与管理](README.md#native-memory)
+- [Memory 架构与模块](shovel-architecture-design.md#15-memory-system-设计)
 
 ## Next.js
 

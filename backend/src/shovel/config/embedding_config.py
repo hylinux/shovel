@@ -7,7 +7,7 @@
 """``[embedding]`` 段: 知识库用哪个模型做向量化。
 
 为什么它不复用 ``[memory.embedder]``: 那是记忆子系统的 embedding, 由
-mem0 托管、写进 Qdrant、维度由 ``memory.dim`` 决定。知识库的 embedding
+原生记忆单独管理、写进独立 Zvec 索引、维度由 ``memory.dim`` 决定。知识库的 embedding
 写进 Zvec、维度由 ``zvec.dim`` 决定。两套向量互不相通, 用同一份配置
 只会让"改一个维度炸掉另一个库"成为常态。
 
@@ -24,8 +24,7 @@ from pydantic import BaseModel, Field, SecretStr, model_validator
 class EmbeddingSettings(BaseModel):
     """知识库向量化配置。
 
-    provider 取值与 mem0 的命名保持一致 (openai / azure_openai / ollama),
-    这样用户在两个配置段之间不需要记两套词汇。
+    知识与记忆使用相同 provider 命名 (openai / azure_openai / ollama)。
     """
 
     #: 留空表示"未配置"。此时带 embed 的扫描会明确报错而不是静默跳过 ——

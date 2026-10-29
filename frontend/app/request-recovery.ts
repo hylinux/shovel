@@ -24,7 +24,8 @@ function isPendingRequest(value: unknown): value is PendingRequest {
     && "id" in value && typeof value.id === "string"
     && "workspace" in value && typeof value.workspace === "string"
     && "path" in value && typeof value.path === "string"
-    && (/^\/resources(?:\/|$)/.test(value.path) || value.path === "/index/cleanup" || value.path === "/history/prune")
+    && (/^\/resources(?:\/|$)/.test(value.path) || value.path === "/index/cleanup" || value.path === "/history/prune"
+      || /^\/memories(?:\/|$)/.test(value.path) || value.path === "/memory/index/rebuild")
     && "method" in value && typeof value.method === "string" && ["POST", "PUT", "PATCH", "DELETE"].includes(value.method)
     && (!("body" in value) || typeof value.body === "string");
 }

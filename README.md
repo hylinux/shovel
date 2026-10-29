@@ -81,8 +81,8 @@ Chat submissions additionally carry one AG-UI `run_id` from the browser through
 the backend. `[shovel.chat]` browser logs show submission, HTTP status/request ID,
 first text, tool activity, persistence confirmation and terminal outcome.
 Backend logs share that `run_id` and report history/persistence, extensions,
-context/RAG, individual model calls, tools, Memory recall, and separate short-
-and long-term Memory writes, including counts and timings. SSE heartbeats show
+context/RAG, individual model calls, tools, Memory recall, background extraction,
+session summaries, and index updates, including counts and timings. SSE heartbeats show
 that a quiet request is still open; they do not mean the model has completed.
 `model.call.*` timings cover individual model calls; the existing `model.completed`
 duration covers the whole Agent run, including context and Memory work.
@@ -202,8 +202,8 @@ timeout_seconds = 120
 Shovel does not install Ollama, download models, or manage GPU drivers. The
 character budget bounds history, retrieved evidence, and recalled Memory;
 it is not a tokenizer-based context-window guarantee. Lower it for small models.
-OpenAI-compatible services use Chat Completions with `max_tokens`; models requiring
-a different API or token-limit parameter are not interchangeable without an adapter.
+MAF uses Chat Completions with provider-adapted output limits; Ollama also receives
+`max_tokens` explicitly. Models requiring a different API need a matching adapter.
 
 Supported chat adapters include OpenAI, DeepSeek, Qianwen, Kimi, Ollama, and Azure
 OpenAI-compatible deployments. OpenAI-compatible `base_endpoint` includes `/v1`
@@ -241,10 +241,11 @@ compatibility endpoint, backed by the same MAF Agent.
 The main Agent uses MAF's `Agent`, Chat Completions client, tool-calling loop,
 `AgentSession`, context-provider hooks, native sliding-window compaction, and
 `SkillsProvider`. A Shovel context provider supplies bounded SQLite conversation
-history, existing RAG evidence, and default-on scoped mem0 recall; its after-run
-hook validates citations and writes user-only memories. Tool transcripts and
-loaded Skill instructions are run-local; SQLite retains user/assistant turns and
-cited excerpts across restarts. This is not a custom HTTP model execution loop.
+history, existing RAG evidence, session summaries, and bounded native Memory
+recall. Its after-run hook validates citations; successful answers queue durable
+user-only fact extraction. SQLite retains turns, cited excerpts, and tool audit
+metadata, not complete tool payloads. Loaded Skill instructions remain run-local.
+This is not a custom HTTP model execution loop.
 `model.max_input_chars` bounds text context, not tool schemas or exact tokens.
 Oversized Skill/tool context fails explicitly instead of silently exceeding it.
 
@@ -405,12 +406,12 @@ contention matters; Shovel does not download/change models or hardware settings.
 
 Only successful, valid embedding vectors are cached in bounded, expiring,
 process-local caches. Memory and RAG caches are separate; Memory keys include
-all embedding arguments (including search/add action), while RAG includes model
-version. No prompt text is retained as a cache key or logged. Search results,
+query text and model version for both indexes. No prompt text is retained as a
+cache key or logged. Search results,
 permissions, revision checks and Memory facts are not cached: deletion/forget
 and resource visibility still take effect. Set entries to zero to disable.
 The RAG HTTP client is owned/closed by Runtime rather than recreated per query;
-the extraction subprocess also reuses its configured LLM client until reset.
+the background extractor owns and reuses a separate async MAF model client.
 
 Development logs split index thread scheduling/import/runtime/collection-open,
 query embedding, chat admission, first model text and completion. Model logs
@@ -421,110 +422,119 @@ The existing outer `model.completed` includes context/hooks; use
 `model.call.completed` for the individual model request. No speedup is promised
 without a cold/warm benchmark on the configured model and hardware.
 
-## Memory
+## Native Memory
 
-Memory is enabled by default for every chat request. It requires an
-explicit `[memory.embedder]` model and either `[model]` or `[memory.llm]`.
-Unconfigured Memory is an explicit error, not a silent fallback to a memory-free
-chat. The Web interface has no per-message toggle; API clients can explicitly set
-`memory_enabled = false` for memory-free requests.
-Memory uses mem0 and its own Qdrant collection, independent of the Zvec knowledge
-index; its embedding dimension must match `memory.dim`.
+SQLite is the source of truth. Zvec is a separate, rebuildable semantic index;
+the shared Embedder produces its vectors. No external database, cache service,
+Memory Framework, or separate Memory Server is required.
 
-For fully local Memory, explicitly set `memory.embedder.provider = "ollama"` and
-its `model`/`base_url`; set `[memory.llm]` similarly or inherit the Ollama chat
-model. When changing Memory dimensions, select a new collection and initialize
-it instead of overwriting the existing collection.
+Conversation History, Session Summary and long-term Memory are distinct:
 
-When enabled, Memory recalls user background before answering and extracts
-memories from **only the user's message**, never retrieved documents or generated
-answers. Recalled Memory is not a local-document citation. The workbench exposes
-list/forget controls. A short-term write failure keeps the generated answer
-with a persisted warning; long-term failures appear on the saved message and
-in Background tasks.
+- SQLite stores original user/assistant turns and necessary tool audit metadata.
+- Background summaries compress older completed turns and retain a sequence watermark.
+  Summaries are session context, not extracted user facts or a vectorized message copy.
+  Until background summarization catches up, uncovered older turns are not in Agent context.
+- Semantic facts and episodic outcomes are extracted only from direct user assertions.
+  Procedural records can be explicitly maintained; automatic procedural learning is disabled.
 
-Enabled requests use **both** Session-scoped short-term mem0
-messages and workspace-scoped long-term mem0 facts. Short-term Memory stores
-the original user message with `infer=False`, avoiding a duplicate LLM
-extraction; long-term Memory still extracts and merges facts. Recall combines
-the current Session and workspace scopes in one filtered mem0 search, embedding
-the query once. Short-term messages are isolated by Session ID and removed when
-that Session is deleted; long-term facts survive and are managed through
-Settings. There is no TTL or automatic promotion. Both writes use only the
-user's message. With Memory explicitly disabled through the API, neither
-scope is read or written; ordinary SQLite conversation history still works.
+The existing Generic Host Memory worker runs durable `memory.extract` and
+`memory.summarize` Operations after foreground idle. Answer persistence and task
+enqueue share one SQLite transaction. Structured MAF extraction has no tools and
+cannot directly mutate storage. Evidence, confidence and source attribution are
+validated before consolidation. Exact/canonical duplicates merge provenance;
+semantic matches require an explicit equivalence decision, not similarity alone.
+Explicit corrections supersede earlier facts without overwriting their history.
+Unsupported, low-confidence, credential-containing and ambiguously quoted inputs
+are conservatively excluded. These controls are not a guarantee against every
+form of prompt injection; configure trusted models and review saved facts.
 
-For narrowly recognized standalone greetings (such as `Hi` or `你好`), the Agent
-keeps Memory recall and the short-term write, but skips automatic RAG and
-long-term fact extraction. This applies only to automatic retrieval without an
-explicit resource selection, in a new Session or recognized greeting-only
-history. Contextual answers (for example a nickname), other short messages and
-explicit searches retain the normal path. Model-invoked search tools remain
-available. Intentional greeting-only replies do not get a missing-source warning.
+Active facts are recalled before the main Agent call, alongside independent RAG.
+Vector results must pass SQLite ownership, lifecycle, revision, embedding-version
+and expiry checks. Relevance is a gate before importance, confidence, recency and
+access-history ranking. Only selected facts enter the configured character/item
+budget. Current user input takes precedence over historical Memory. Memory never
+becomes a local-document citation.
 
-These optimizations reduce model calls, not the cost of the remaining model
-inference. For CPU-only Ollama, a smaller tool-capable chat model and a smaller
-dedicated `memory.llm` model can help further. Use development diagnostics
-(`memory.llm.*`, `memory.embedding.*`, `memory.vector.*`, and `model.call.*`,
-elapsed milliseconds) to distinguish extraction inference, embedding, Qdrant
-access and chat inference without logging message bodies. Changing only the Memory LLM does
-not require rebuilding vectors; changing the embedder can require a new
-collection and matching dimensions.
+Workspace and user are mandatory partitions; agent and session scopes further
+restrict visibility. V1 retains the loopback-only, single local owner
+(`local-user`), not a multi-user authentication server. Scope IDs come from the
+Host, not extraction output or arbitrary browser ownership fields.
 
-Long-term extraction is a durable background `memory.extract` Operation. Saving
-the answer and enqueueing its extraction share one SQLite transaction; AG-UI
-`RUN_FINISHED` confirms this commit, not completed long-term Memory. The queue
-contains source-message references, not copied text or credentials. A dedicated
-FIFO worker runs independently of scans. Slow LLM inference uses an isolated
-process; embedded Qdrant and mem0 history stay on their single owning thread, so
-the next recall or short-term write does not wait behind that inference.
-Short-term Memory remains immediately available; new long-term facts are
-eventually consistent and may not be available in another Session immediately.
-Shared local model servers can still serialize inference or compete for CPU/GPU.
+### Configuration
 
-The worker retries failures before any possible storage write up to three
-attempts. Interrupted pre-write tasks resume after restart. Once a write might
-have started, failure/interruption requires review in Settings and cannot be
-blindly replayed: SQLite and Qdrant do not share an atomic transaction. A safe
-failed task can be retried from its message or Background tasks, unless a newer
-task has already written facts. Session deletion cancels its pending extraction;
-forgetting a fact invalidates all older pending extraction and fences late
-writes. Existing long-term facts survive Session deletion. Forgetting does not
-erase short-term copies or prevent future user messages from introducing facts.
-Queued/running message statuses poll only while the browser tab is visible and
-stop at a terminal state. Background diagnostics retain the originating run ID.
+Memory works locally in SQLite without a configured embedder. Chat remains
+available, but explicitly warns that semantic recall is unavailable. Configure
+an independent Memory embedding model to enable vector recall:
 
-For example, after separately installing and checking a suitable small Ollama
-model, configure it independently of the main Agent:
+```toml
+[memory]
+dim = 1024
+context_max_chars = 2000
+max_items = 10
+min_similarity = 0.55
+min_confidence = 0.8
+history_messages = 20
+summary_max_chars = 2000
+# index_path defaults to ~/.shovel/memory/zvec
+
+[memory.embedder]
+provider = "azure_openai"
+model = "YOUR_EMBEDDING_DEPLOYMENT"
+base_url = "https://YOUR_RESOURCE.openai.azure.com"
+api_version = "2024-02-01"
+# Set SHOVEL_MEMORY__EMBEDDER__API_KEY through the environment.
+```
+
+`memory.dim` must match the embedding deployment's actual output dimension.
+The Memory and knowledge embedding configurations are independent. The input
+budget is in **characters, not tokens**, including serialized Memory metadata.
+
+Extraction and summaries follow `[model]` by default. To use a dedicated model,
+`[memory.llm]` uses the same keys as `[model]`, including Azure `api_version`:
 
 ```toml
 [memory.llm]
-provider = "ollama"
-base_url = "http://127.0.0.1:11434"
-model = "qwen2.5:3b"
-temperature = 0.1
-max_tokens = 512
+model_provider_type = "ollama"
+model_name = "YOUR_INSTALLED_STRUCTURED_OUTPUT_MODEL"
+base_endpoint = "http://127.0.0.1:11434"
+max_output_tokens = 2048
 timeout_seconds = 120
 ```
 
-This is a tuning example, not a new default or an automatic model download.
-Check JSON extraction quality with both short inputs and multiple facts before
-adopting the output budget; increase it if results truncate. No existing model
-configuration, embedding model or stored vectors are changed by these optimizations.
-`memory.llm.timeout_seconds` bounds each background LLM call (including worker
-startup); timeout terminates its isolated process. It is not a timeout for
-embedding/vector I/O, and cancelling a remote request does not guarantee that the
-provider stops server-side computation.
+No model is installed or downloaded automatically. Local-first storage does not
+make cloud inference local: configured cloud embedders/extractors receive the
+relevant user text. Cancelling a request does not guarantee server-side inference
+stops. Recognized standalone greetings skip automatic RAG and fact extraction;
+normal SQLite history still persists.
 
-The owner is `local-user`; the default workspace preserves the existing `shovel`
-long-term scope, while other workspace paths use separate hashed Agent scopes.
-Short-term scopes additionally use mem0's `run_id`. There is no multi-user
-identity system. If short-term cleanup fails, conversation deletion fails and can
-be retried rather than claiming that memories were erased. Deleting a long-term
-Memory item removes that mem0 record, not a short-term copy or the source
-message from persisted conversation history or storage backups. Configured remote
-Memory LLMs/embedders receive user text; Qdrant can be local, server, or cloud as
-configured.
+### Consistency, recovery and management
+
+Facts, supersession, index Outbox entries and extraction receipts commit
+atomically in SQLite. An indexing failure does not undo a saved fact. The worker
+retries persisted upserts/deletions with bounded backoff and acknowledges them
+only after Zvec flushes. Index status and pending counts are exposed in Settings.
+Extraction errors are retried up to three attempts and remain visible in
+Background tasks. The extraction receipt and saved facts cannot commit separately.
+
+Changing the embedding identity/dimension or losing an index queues a rebuild
+from SQLite. Explicit rebuilds write a new generation and switch after pending
+mutations have drained; previous derived directories are not automatically
+deleted. Rebuild uses the configured embedding service and may incur its cost.
+
+Settings loads saved facts only on request, supports confirmed soft deletion
+and semantic-index rebuild. Soft-deleted fingerprints prevent automatic
+relearning from older assertions. Forgetting invalidates older pending Memory
+tasks only in this workspace/user partition and fences late extraction writes.
+Session deletion removes its summary and session-scoped Memory, not cross-session
+facts. Neither operation erases source messages in other sessions or backups.
+
+`GET /api/v1/memories?include_history=true` includes lifecycle history.
+`POST /memories`, `PUT /memories/{id}`, and `POST /memory/index/rebuild` under
+`/api/v1` return durable HTTP 202 Operations and support `Idempotency-Key`.
+Explicit management supports semantic, episodic and procedural records,
+`expires_at`, and user/workspace/agent/session scope (`session_id` is required
+only for session scope). `DELETE /memories/{id}?hard=true` removes the SQLite
+record while retaining its vector-cleanup intent; normal deletion is soft.
 
 ## REST surface
 

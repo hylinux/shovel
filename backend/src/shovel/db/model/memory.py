@@ -1,43 +1,11 @@
-"""Domain G — the memory subsystem.
-
-Memory vs. knowledge base
--------------------------
-They are NOT the same store with different content; they differ mechanically:
-
-=============  ================================  ================================
-               Knowledge base                    Memory
-=============  ================================  ================================
-source         documents, mail, files            conversation, corrections, behaviour
-truth          objective (the file says so)      subjective (we concluded so)
-update         re-index when the file changes    supersede when contradicted
-delete         source gone -> delete             (almost) never hard-deleted
-scale          10^5 - 10^6                       10^2 - 10^4
-injection      retrieve a handful                semantic layer is near-fully injected
-=============  ================================  ================================
-
-The last row is the load-bearing consequence: because semantic memory is tiny,
-it can go into the system prompt wholesale, which is far more reliable than
-retrieving it. Episodic memory is large enough to need vector recall.
-
-The four tables map to the four memory kinds:
-
-* :class:`MemoryWorking`   — this task only; overflows, so it must be compacted
-* :class:`MemoryEpisode`   — what happened; vectorised; decays
-* :class:`MemoryBelief`      — what the user is like; superseded, never deleted
-* :class:`MemoryProcedure` — how to do things for this user
-
-:class:`MemoryLink` is the seam to the knowledge base: a memory about "Shovel"
-points at the same ``entity.id`` the documents point at. Without that shared
-key, "what did we say about Shovel" and "what do the docs say about Shovel"
-can never be answered in one breath.
-"""
+"""Authoritative native memory records. Vector indexes contain derived data only."""
 
 from __future__ import annotations
 
 from typing import Any
 
 import sqlalchemy as sa
-from sqlalchemy import CheckConstraint, Index, UniqueConstraint, text
+from sqlalchemy import CheckConstraint, Index, text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from ...domain.enums import (
@@ -115,10 +83,34 @@ class MemoryWorking(Base):
         return self.slot not in (WorkingSlot.GOAL, WorkingSlot.PLAN, WorkingSlot.ERROR)
 
 
+class MemoryOwnership:
+    workspace_id: Mapped[str] = mapped_column(sa.Text, nullable=False, index=True)
+    user_id: Mapped[str] = mapped_column(sa.Text, nullable=False)
+    scope_kind: Mapped[str] = mapped_column(sa.Text, default="agent", nullable=False)
+    fingerprint: Mapped[str] = mapped_column(sa.Text, nullable=False, index=True)
+    provenance: Mapped[list[dict[str, str]]] = mapped_column(JSONList, default=list, nullable=False)
+
+
+class NativeMemory(Base, ValidityMixin, SalienceMixin, MemoryOwnership):
+    __abstract__ = True
+
+    id: Mapped[str] = mapped_column(sa.Text, primary_key=True)
+    agent_id: Mapped[str | None] = mapped_column(sa.Text)
+    session_id: Mapped[str | None] = mapped_column(sa.Text)
+    vector_state: Mapped[VectorState] = mapped_column(
+        Enum(VectorState), default=VectorState.PENDING, nullable=False
+    )
+    model_version: Mapped[str | None] = mapped_column(sa.Text)
+    rev: Mapped[int] = mapped_column(sa.Integer, default=1, nullable=False)
+    validity_state: Mapped[MemoryValidityState] = mapped_column(
+        Enum(MemoryValidityState), default=MemoryValidityState.ACTIVE, nullable=False
+    )
+
+
 # --------------------------------------------------------------------------- #
 # 2. EPISODIC MEMORY — what happened
 # --------------------------------------------------------------------------- #
-class MemoryEpisode(Base, ValidityMixin, SalienceMixin):
+class MemoryEpisode(NativeMemory):
     """A recorded episode: a conversation, a decision, a piece of work.
 
     Vectorised into the ``shovel_memory`` collection so it can be recalled
@@ -174,7 +166,7 @@ class MemoryEpisode(Base, ValidityMixin, SalienceMixin):
 # --------------------------------------------------------------------------- #
 # 3. SEMANTIC MEMORY — what the user is like
 # --------------------------------------------------------------------------- #
-class MemoryBelief(Base, ValidityMixin, SalienceMixin):
+class MemoryBelief(NativeMemory):
     """A (subject, predicate, object) belief about the user or an entity.
 
     The triple shape is what makes contradiction *detectable*: two facts
@@ -191,6 +183,13 @@ class MemoryBelief(Base, ValidityMixin, SalienceMixin):
     __tablename__ = "memory_belief"
 
     id: Mapped[str] = mapped_column(sa.Text, primary_key=True, default=lambda: new_id("fact"))
+    agent_id: Mapped[str | None] = mapped_column(sa.Text)
+    session_id: Mapped[str | None] = mapped_column(sa.Text)
+    vector_state: Mapped[VectorState] = mapped_column(
+        Enum(VectorState), default=VectorState.PENDING, nullable=False
+    )
+    model_version: Mapped[str | None] = mapped_column(sa.Text)
+    rev: Mapped[int] = mapped_column(sa.Integer, default=1, nullable=False)
     #: 'user' or an entity.id — memories may be about other people too
     subject: Mapped[str] = mapped_column(sa.Text, nullable=False, default="user")
     predicate: Mapped[MemoryPredicate] = mapped_column(Enum(MemoryPredicate), nullable=False)
@@ -219,6 +218,11 @@ class MemoryBelief(Base, ValidityMixin, SalienceMixin):
         # the table and must be allowed to duplicate the active row's key.
         Index(
             "uq_belief_active",
+            "workspace_id",
+            "user_id",
+            "scope_kind",
+            "agent_id",
+            "session_id",
             "subject",
             "predicate",
             "object",
@@ -250,7 +254,7 @@ class MemoryBelief(Base, ValidityMixin, SalienceMixin):
 # --------------------------------------------------------------------------- #
 # 4. PROCEDURAL MEMORY — how to do things for this user
 # --------------------------------------------------------------------------- #
-class MemoryProcedure(Base, ValidityMixin, SalienceMixin):
+class MemoryProcedure(NativeMemory):
     """A learned behavioural rule: "when X, do Y".
 
     v1 should populate this ONLY from explicit user corrections. Auto-inferred
@@ -262,10 +266,14 @@ class MemoryProcedure(Base, ValidityMixin, SalienceMixin):
     __tablename__ = "memory_procedure"
 
     id: Mapped[str] = mapped_column(sa.Text, primary_key=True, default=lambda: new_id("proc"))
+    agent_id: Mapped[str | None] = mapped_column(sa.Text)
+    session_id: Mapped[str | None] = mapped_column(sa.Text)
+    model_version: Mapped[str | None] = mapped_column(sa.Text)
+    rev: Mapped[int] = mapped_column(sa.Integer, default=1, nullable=False)
     name: Mapped[str] = mapped_column(sa.Text, nullable=False)
     #: when this applies — natural language, matched semantically
     trigger_pattern: Mapped[str] = mapped_column(sa.Text, nullable=False)
-    #: what to do — injected verbatim into the prompt when it fires
+    #: Advisory workflow text, subject to the same untrusted context budget.
     instruction: Mapped[str] = mapped_column(sa.Text, nullable=False)
     #: optional narrowing: only for this resource / doc_class / tool
     scope: Mapped[dict[str, Any]] = mapped_column("scope_json", JSONDict, default=dict, nullable=False)
@@ -290,7 +298,17 @@ class MemoryProcedure(Base, ValidityMixin, SalienceMixin):
     )
 
     __table_args__ = (
-        UniqueConstraint("name", name="uq_procedure_name"),
+        Index(
+            "uq_procedure_name",
+            "workspace_id",
+            "user_id",
+            "scope_kind",
+            "agent_id",
+            "session_id",
+            "name",
+            unique=True,
+            sqlite_where=text("validity_state = 'active'"),
+        ),
         Index("idx_proc_active", "validity_state", sqlite_where=text("validity_state = 'active'")),
     )
 
@@ -298,6 +316,66 @@ class MemoryProcedure(Base, ValidityMixin, SalienceMixin):
     def success_rate(self) -> float | None:
         total = self.success_count + self.failure_count
         return None if total == 0 else self.success_count / total
+
+
+class SessionSummary(Base):
+    __tablename__ = "session_summary"
+
+    conversation_id: Mapped[str] = mapped_column(
+        sa.ForeignKey("conversation.id", ondelete="CASCADE"), primary_key=True
+    )
+    workspace_id: Mapped[str] = mapped_column(sa.Text, nullable=False)
+    user_id: Mapped[str] = mapped_column(sa.Text, nullable=False)
+    agent_id: Mapped[str] = mapped_column(sa.Text, nullable=False)
+    content: Mapped[str] = mapped_column(sa.Text, nullable=False)
+    through_sequence: Mapped[int] = mapped_column(sa.Integer, nullable=False)
+    updated_at: Mapped[int] = mapped_column(sa.Integer, default=now_ts, nullable=False)
+
+
+class ChatToolInteraction(Base):
+    """Audit metadata only; tool payloads never become implicit user facts."""
+
+    __tablename__ = "chat_tool_interaction"
+
+    id: Mapped[str] = mapped_column(sa.Text, primary_key=True, default=lambda: new_id("tool"))
+    conversation_id: Mapped[str] = mapped_column(
+        sa.ForeignKey("conversation.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    run_id: Mapped[str | None] = mapped_column(sa.Text)
+    tool_name: Mapped[str] = mapped_column(sa.Text, nullable=False)
+    state: Mapped[str] = mapped_column(sa.Text, nullable=False)
+    result_type: Mapped[str] = mapped_column(sa.Text, nullable=False)
+    created_at: Mapped[int] = mapped_column(sa.Integer, default=now_ts, nullable=False)
+
+
+class MemoryIndexOutbox(Base):
+    __tablename__ = "memory_index_outbox"
+
+    id: Mapped[str] = mapped_column(sa.Text, primary_key=True, default=lambda: new_id("midx"))
+    workspace_id: Mapped[str] = mapped_column(sa.Text, nullable=False, index=True)
+    user_id: Mapped[str] = mapped_column(sa.Text, nullable=False)
+    memory_id: Mapped[str] = mapped_column(sa.Text, nullable=False)
+    kind: Mapped[str] = mapped_column(sa.Text, nullable=False)
+    revision: Mapped[int] = mapped_column(sa.Integer, nullable=False)
+    action: Mapped[str] = mapped_column(sa.Text, nullable=False)
+    attempts: Mapped[int] = mapped_column(sa.Integer, default=0, nullable=False)
+    retry_at: Mapped[int] = mapped_column(sa.Integer, default=0, nullable=False)
+    last_error: Mapped[str | None] = mapped_column(sa.Text)
+    done_at: Mapped[int | None] = mapped_column(sa.Integer)
+    created_at: Mapped[int] = mapped_column(sa.Integer, default=now_ts, nullable=False)
+
+
+class MemoryIndexState(Base):
+    __tablename__ = "memory_index_state"
+
+    workspace_id: Mapped[str] = mapped_column(sa.Text, primary_key=True)
+    user_id: Mapped[str] = mapped_column(sa.Text, primary_key=True)
+    generation: Mapped[str] = mapped_column(sa.Text, nullable=False)
+    model_version: Mapped[str] = mapped_column(sa.Text, nullable=False)
+    building_generation: Mapped[str | None] = mapped_column(sa.Text)
+    building_model_version: Mapped[str | None] = mapped_column(sa.Text)
+    state: Mapped[str] = mapped_column(sa.Text, default="pending", nullable=False)
+    last_error: Mapped[str | None] = mapped_column(sa.Text)
 
 
 # --------------------------------------------------------------------------- #

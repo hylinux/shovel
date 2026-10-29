@@ -29,6 +29,39 @@ class ChatService:
         self.agent = ShovelAgent(runtime)
         self._locks: dict[str, asyncio.Lock] = {}
         self._log = structlog.get_logger("shovel.chat")
+        self._active_runs = 0
+        self._restarting = False
+        self._restart_failed = False
+
+    @property
+    def agent_state(self) -> str:
+        if self._restarting:
+            return "restarting"
+        if self._restart_failed:
+            return "restart_failed"
+        return "loaded" if self.agent.extensions.mcp_revision is not None else "not_loaded"
+
+    async def restart_agent(self) -> None:
+        if self.runtime.stopping.is_set():
+            raise RuntimeFailure("Host 正在停止。", status=503)
+        if self._active_runs or self._restarting:
+            raise RuntimeFailure("Agent 正在处理会话或重启,请完成后重试。", status=409)
+        # Admission and the run counter change without awaits on the Host event loop.
+        self._restarting = self._restart_failed = True
+        trace("agent.restart.started")
+        try:
+            await self.agent.close()
+            self.agent = ShovelAgent(self.runtime)
+            self._restart_failed = False
+            trace("agent.restart.completed")
+        except Exception as exc:
+            self._log.error("agent.restart.failed", error_type=type(exc).__name__)
+            raise RuntimeFailure(
+                "Agent 重启失败,请重试;如果仍失败请重启 Host。",
+                status=503,
+            ) from exc
+        finally:
+            self._restarting = False
 
     async def recover(self) -> None:
         async with self.runtime.sessions() as session:
@@ -94,8 +127,14 @@ class ChatService:
         if lock.locked():
             raise RuntimeFailure("此对话正在生成回答,请等待完成后再发送。", status=409)
         async with lock:
-            with trace_context(conversation_id=identifier, run_id=run_id):
-                return await self._send(identifier, request, run_id=run_id, on_event=on_event)
+            if self._restarting or self._restart_failed:
+                raise RuntimeFailure("Agent 正在重启或重启失败,请稍后重试重启。", status=503)
+            self._active_runs += 1
+            try:
+                with trace_context(conversation_id=identifier, run_id=run_id):
+                    return await self._send(identifier, request, run_id=run_id, on_event=on_event)
+            finally:
+                self._active_runs -= 1
 
     async def stream(self, identifier: str, request: MessageInput, run_id: str) -> AsyncGenerator[BaseEvent]:
         # Backpressure bounds memory while retaining cancellation and durable failure handling.

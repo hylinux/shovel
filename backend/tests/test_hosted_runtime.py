@@ -4,6 +4,7 @@ import asyncio
 import json
 import os
 import socket
+import sys
 import threading
 from collections.abc import AsyncIterator
 from contextlib import nullcontext
@@ -82,6 +83,202 @@ async def api(runtime: Runtime) -> AsyncIterator[httpx.AsyncClient]:
         transport=httpx.ASGITransport(app=app), base_url="http://127.0.0.1:9999"
     ) as client:
         yield client
+
+
+async def test_mcp_configuration_roundtrip_conflicts_and_validation(
+    runtime: Runtime, api: httpx.AsyncClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("SHOVEL_TEST_MANAGEMENT_MCP_URL", raising=False)
+    original = await api.get("/api/v1/agent/mcp")
+    assert original.status_code == 200
+    assert original.headers["cache-control"] == "no-store"
+    initial = original.json()
+    assert initial["items"] == []
+    assert initial["exists"] is False
+    assert not runtime.mcp.path.exists()
+    content = (
+        json.dumps(
+            {
+                "mcpServers": {
+                    "example": {
+                        "url": "${SHOVEL_TEST_MANAGEMENT_MCP_URL}",
+                        "headers": {"Authorization": "private-mcp-token"},
+                    }
+                }
+            },
+            indent=2,
+        )
+        + "\n"
+    )
+    saved = await api.put("/api/v1/agent/mcp", json={"content": content, "revision": initial["revision"]})
+    assert saved.status_code == 200
+    assert saved.json()["items"] == [{"name": "example", "transport": "http", "enabled": True}]
+    assert saved.json()["agent_loaded"] is False
+    assert runtime.chat.agent.extensions.tools == []
+    assert runtime.mcp.path.read_bytes() == content.encode("utf-8")
+    assert (await api.get("/api/v1/agent/mcp")).json()["content"] == content
+    invalid = await api.put(
+        "/api/v1/agent/mcp",
+        json={
+            "content": '{"mcpServers":{"bad":{"url":"private-invalid-secret"}}}',
+            "revision": saved.json()["revision"],
+        },
+    )
+    assert invalid.status_code == 422
+    assert "private-invalid-secret" not in invalid.text
+    assert runtime.mcp.path.read_bytes() == content.encode("utf-8")
+    candidates = ['{"mcpServers":{}}\n', '{"mcpServers":{}}\n\n']
+    results = await asyncio.gather(
+        *(
+            api.put("/api/v1/agent/mcp", json={"content": candidate, "revision": saved.json()["revision"]})
+            for candidate in candidates
+        )
+    )
+    assert sorted(result.status_code for result in results) == [200, 409]
+    winner = next(result.json() for result in results if result.status_code == 200)
+    assert runtime.mcp.path.read_text(encoding="utf-8") == winner["content"]
+    assert not list(runtime.mcp.path.parent.glob(".mcp-*.tmp"))
+    denied = await api.post("/api/v1/agent/restart", headers={"Origin": "https://untrusted.invalid"})
+    assert denied.status_code == 403
+
+
+async def test_mcp_invalid_file_is_editable_and_failed_save_preserves_original(
+    runtime: Runtime, api: httpx.AsyncClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runtime.mcp.path.parent.mkdir(parents=True, exist_ok=True)
+    runtime.mcp.path.write_text("{", encoding="utf-8")
+    initial = (await api.get("/api/v1/agent/mcp")).json()
+    assert initial["content"] == "{"
+    assert initial["validation_error"]
+    repaired = await api.put(
+        "/api/v1/agent/mcp",
+        json={"content": '{"mcpServers":{}}', "revision": initial["revision"]},
+    )
+    assert repaired.status_code == 200
+    assert repaired.json()["validation_error"] is None
+    before = runtime.mcp.path.read_bytes()
+
+    def fail_replace(_source: Path, _destination: Path) -> None:
+        raise PermissionError("private-file-error")
+
+    monkeypatch.setattr("shovel.runtime.mcp_config.os.replace", fail_replace)
+    failed = await api.put(
+        "/api/v1/agent/mcp",
+        json={"content": '{"mcpServers":{}}\n', "revision": repaired.json()["revision"]},
+    )
+    assert failed.status_code == 503
+    assert "private-file-error" not in failed.text
+    assert runtime.mcp.path.read_bytes() == before
+    assert not list(runtime.mcp.path.parent.glob(".mcp-*.tmp"))
+
+
+async def test_mcp_restart_closes_real_connection_and_loads_new_config_without_losing_sessions(
+    runtime: Runtime, api: httpx.AsyncClient, tmp_path: Path
+) -> None:
+    script = tmp_path / "mcp_server.py"
+    script.write_text(
+        "from mcp.server.fastmcp import FastMCP\n"
+        "server = FastMCP('management-test')\n"
+        "@server.tool()\n"
+        "def echo(value: str) -> str:\n"
+        "    return value\n"
+        "server.run(transport='stdio')\n",
+        encoding="utf-8",
+    )
+    runtime.mcp.path.parent.mkdir(parents=True, exist_ok=True)
+    runtime.mcp.path.write_text(
+        json.dumps({"mcpServers": {"test": {"command": sys.executable, "args": [str(script)]}}}),
+        encoding="utf-8",
+    )
+    conversation = (await api.post("/api/v1/conversations", json={"title": "Keep this session"})).json()
+    original_agent = runtime.chat.agent
+    original_memory = runtime.memory
+    await original_agent.extensions.load(original_agent.client())
+    assert len(original_agent.extensions.tools) == 1
+    initial = (await api.get("/api/v1/agent/mcp")).json()
+    assert initial["agent_loaded"] is True
+    assert initial["restart_required"] is False
+    saved = await api.put(
+        "/api/v1/agent/mcp", json={"content": '{"mcpServers":{}}', "revision": initial["revision"]}
+    )
+    assert saved.json()["restart_required"] is True
+    assert len(original_agent.extensions.tools) == 1
+    restarted = await api.post("/api/v1/agent/restart")
+    assert restarted.status_code == 200
+    assert restarted.json()["agent_loaded"] is False
+    assert restarted.json()["restart_required"] is False
+    assert original_agent.extensions._stack is None
+    assert original_agent._client is not None and original_agent._client.is_closed
+    assert runtime.chat.agent is not original_agent
+    assert runtime.memory is original_memory
+    assert (await runtime.chat.conversation(conversation["id"])).title == "Keep this session"
+    await runtime.chat.agent.extensions.load(runtime.chat.agent.client())
+    assert runtime.chat.agent.extensions.tools == []
+    assert (await api.get("/api/v1/agent/mcp")).json()["restart_required"] is False
+
+
+async def test_agent_restart_blocks_on_all_active_sessions_and_releases_cancelled_runs(
+    runtime: Runtime, api: httpx.AsyncClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    conversations = [(await api.post("/api/v1/conversations", json={})).json()["id"] for _ in range(2)]
+    started: asyncio.Queue[None] = asyncio.Queue()
+    release = asyncio.Event()
+
+    async def blocked_send(identifier: str, _request: MessageInput, **_kwargs: Any) -> ChatMessage:
+        await started.put(None)
+        await release.wait()
+        return ChatMessage(conversation_id=identifier, role="assistant", content="ok", sequence=2)
+
+    monkeypatch.setattr(runtime.chat, "_send", blocked_send)
+    tasks = [
+        asyncio.create_task(runtime.chat.send(identifier, MessageInput(content="test", memory_enabled=False)))
+        for identifier in conversations
+    ]
+    await asyncio.wait_for(started.get(), timeout=5)
+    await asyncio.wait_for(started.get(), timeout=5)
+    try:
+        assert (await api.post("/api/v1/agent/restart")).status_code == 409
+        tasks[0].cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await tasks[0]
+        assert (await api.post("/api/v1/agent/restart")).status_code == 409
+    finally:
+        release.set()
+        await asyncio.gather(*tasks, return_exceptions=True)
+    assert (await api.post("/api/v1/agent/restart")).status_code == 200
+
+
+async def test_agent_restart_rejects_new_runs_and_surfaces_close_failures(
+    runtime: Runtime, api: httpx.AsyncClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    identifier = (await api.post("/api/v1/conversations", json={})).json()["id"]
+    original_close = runtime.chat.agent.close
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def blocked_close() -> None:
+        started.set()
+        await release.wait()
+        raise RuntimeError("private-close-error")
+
+    monkeypatch.setattr(runtime.chat.agent, "close", blocked_close)
+    restart = asyncio.create_task(api.post("/api/v1/agent/restart"))
+    await asyncio.wait_for(started.wait(), timeout=5)
+    try:
+        assert (await api.post("/api/v1/agent/restart")).status_code == 409
+        with pytest.raises(RuntimeFailure) as unavailable:
+            await runtime.chat.send(identifier, MessageInput(content="test", memory_enabled=False))
+        assert unavailable.value.status == 503
+    finally:
+        release.set()
+        failed = await restart
+        monkeypatch.setattr(runtime.chat.agent, "close", original_close)
+    assert failed.status_code == 503
+    assert "private-close-error" not in failed.text
+    with pytest.raises(RuntimeFailure) as unavailable:
+        await runtime.chat.send(identifier, MessageInput(content="test", memory_enabled=False))
+    assert unavailable.value.status == 503
+    assert (await api.post("/api/v1/agent/restart")).status_code == 200
 
 
 async def add_notes(runtime: Runtime, path: Path, name: str = "notes") -> str:

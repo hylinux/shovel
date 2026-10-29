@@ -39,7 +39,18 @@ This writes a static application to `frontend\out`. Serve those files from the b
 - **Chat:** click the main navigation item to open or collapse the sidebar's Session section without interrupting the active chat. New Session creates and selects a persisted session; history is ordered by latest interaction in a bounded scroll area, with Load more sessions for older pages. Rename/delete controls live under the selected Session in the sidebar. The Session page contains message history, numbered source excerpts, and a multiline composer: Enter inserts a newline; Ctrl + Enter or Send Message submits. The official AG-UI `HttpAgent` SDK streams the MAF Agent's text and tool activity; message and Session history are refreshed after success or failure.
 - **Settings:** the bottom sidebar menu contains runtime provider status and long-term Memory list/forget controls. Memory is enabled for every Session without a toggle. Short-term mem0 Memory stores original user messages without a duplicate LLM extraction; long-term mem0 Memory still extracts and merges user facts. Deleting a Session clears its short-term Memory but keeps long-term facts. Forgetting a long-term fact requires confirmation and does not erase its short-term copy.
 
-Configure `[model]` and `[memory]` for chat, and optional `[embedding]` for vector search, in the backend's `settings.toml`. Missing Chat/Memory configuration disables sending and directs users to Settings; Memory is never silently switched off. This interface neither reads nor edits credentials. Local-first storage does not imply that configured model providers run locally.
+**MCP Server Management** lists the current workspace's saved servers and edits
+`mcp.json` as JSON (stdio and Streamable HTTP, enabled/disabled, allowed tools,
+environment and headers). Saving validates and atomically writes the file with
+revision conflict protection, without opening connections or running commands.
+The separate **Restart Agent** action closes cached clients; extensions load on
+the next chat. It is rejected while any session is generating and retains
+sessions, Memory and background tasks. Reloading a dirty editor asks before
+discarding edits. This page does not poll resources. Only configure trusted
+servers and prefer `${ENV_VAR}` credential references: the editor shows the
+actual file, including any inline secrets.
+
+Configure `[model]` and `[memory]` for chat, and optional `[embedding]` for vector search, in the backend's `settings.toml`. Missing Chat/Memory configuration disables sending and directs users to Settings; Memory is never silently switched off. Provider credentials remain outside this interface; inline MCP credentials are visible in the MCP editor. Local-first storage does not imply that configured model providers run locally.
 
 ## API contract
 
@@ -62,7 +73,7 @@ Safe failures offer retry; potentially partial writes require review in
 Settings rather than automatic replay. Short-term Memory is available immediately;
 cross-Session long-term facts become available after extraction finishes.
 
-Endpoints used: `/status`, `/connectors`, `/resources` and its verify/pause/resume/revoke/scans actions, `/jobs` and events/cancel, `/operations` and retry, `/index/cleanup`, `/conversations` and messages, `/agent`, `/search`, `/memories`. The local folder connector uses `config.root_path`. Document paths and source content render as text, never raw HTML or executable file links.
+Endpoints used: `/status`, `/connectors`, `/resources` and its verify/pause/resume/revoke/scans actions, `/jobs` and events/cancel, `/operations` and retry, `/index/cleanup`, `/conversations` and messages, `/agent`, `/agent/mcp` (GET/PUT), `/agent/restart` (POST), `/search`, `/memories`. The local folder connector uses `config.root_path`. Document paths and source content render as text, never raw HTML or executable file links.
 
 ## Validation
 

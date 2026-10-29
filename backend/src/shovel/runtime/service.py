@@ -17,6 +17,7 @@ from shovel.services.resource_service import ResourceService
 
 if TYPE_CHECKING:
     from shovel.runtime.chat import ChatService
+    from shovel.runtime.mcp_config import MCPConfigurationService
     from shovel.runtime.memory import MemoryService
     from shovel.runtime.memory_tasks import MemoryTaskService
     from shovel.runtime.operations import OperationService
@@ -31,6 +32,7 @@ class Runtime:
         resources: ResourceService,
     ) -> None:
         from shovel.runtime.chat import ChatService
+        from shovel.runtime.mcp_config import MCPConfigurationService
         from shovel.runtime.memory import MemoryService
         from shovel.runtime.memory_tasks import MemoryTaskService
         from shovel.runtime.operations import OperationService
@@ -51,6 +53,7 @@ class Runtime:
         self.memory: MemoryService = MemoryService(settings)
         self.memory_tasks: MemoryTaskService = MemoryTaskService(self)
         self.chat: ChatService = ChatService(self)
+        self.mcp: MCPConfigurationService = MCPConfigurationService(settings.agent.workspace)
 
     def redact(self, message: str) -> str:
         keys = (

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import importlib.util
 import inspect
 import os
@@ -45,7 +46,11 @@ class MCPServerSettings(BaseModel):
     def transport(self) -> MCPServerSettings:
         if bool(self.command) == bool(self.url):
             raise ValueError("MCP server requires exactly one of command or url.")
-        if self.url and not _environment(self.url).startswith(("http://", "https://")):
+        # Configuration can be saved before its Host environment is ready.
+        if self.url and not (
+            self.url.startswith(("http://", "https://"))
+            or re.match(r"^\$\{[A-Za-z_][A-Za-z0-9_]*\}", self.url)
+        ):
             raise ValueError("MCP url must use HTTP or HTTPS.")
         if self.type is not None and (self.type == "stdio") != bool(self.command):
             raise ValueError("MCP type does not match command/url.")
@@ -55,6 +60,10 @@ class MCPServerSettings(BaseModel):
 class MCPSettings(BaseModel):
     model_config = ConfigDict(extra="forbid")
     mcpServers: dict[str, MCPServerSettings] = Field(default_factory=dict)
+
+
+def mcp_revision(content: bytes | None) -> str:
+    return hashlib.sha256(b"missing" if content is None else b"file:" + content).hexdigest()
 
 
 def _environment(value: str) -> str:
@@ -108,6 +117,7 @@ class AgentExtensions:
         self._stack: AsyncExitStack | None = None
         self._lock = asyncio.Lock()
         self._modules: list[str] = []
+        self.mcp_revision: str | None = None
 
     async def load(self, client: OpenAIChatCompletionClient[Any]) -> None:
         async with self._lock:
@@ -127,8 +137,12 @@ class AgentExtensions:
                 )
                 tools: list[Any] = []
                 mcp_path = workspace / "mcp.json"
-                if mcp_path.exists():
-                    config = MCPSettings.model_validate_json(mcp_path.read_text(encoding="utf-8"))
+                try:
+                    content = mcp_path.read_bytes()
+                except FileNotFoundError:
+                    content = None
+                if content is not None:
+                    config = MCPSettings.model_validate_json(content)
                     for name, server in config.mcpServers.items():
                         if server.disabled:
                             continue
@@ -149,9 +163,12 @@ class AgentExtensions:
                                 env={key: _environment(value) for key, value in server.env.items()},
                             )
                         else:
+                            url = _environment(server.url)
+                            if not url.startswith(("http://", "https://")):
+                                raise RuntimeFailure("MCP url must use HTTP or HTTPS.", status=503)
                             connection = MCPStreamableHTTPTool(
                                 **common,
-                                url=_environment(server.url),
+                                url=url,
                                 static_headers={
                                     key: _environment(value) for key, value in server.headers.items()
                                 },
@@ -180,6 +197,7 @@ class AgentExtensions:
                             raise ValueError(f"{path.name} must build a MAF Agent or Workflow.")
                         tools.append(child.as_tool(name=f"pipeline_{path.stem}"))
                 self.tools, self.skills, self._stack = tools, skills, stack
+                self.mcp_revision = mcp_revision(content)
             except BaseException as exc:
                 await stack.aclose()
                 if isinstance(exc, (asyncio.CancelledError, RuntimeFailure)):

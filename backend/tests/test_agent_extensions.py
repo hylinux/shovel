@@ -199,6 +199,37 @@ async def test_real_mcp_transports_execute_and_close_on_owner_task(
             await asyncio.create_task(extensions.close())
 
 
+@pytest.mark.parametrize(
+    ("disabled", "url"),
+    [(False, None), (False, "file:///private-mcp-token"), (True, None)],
+)
+async def test_mcp_environment_urls_are_resolved_and_checked_only_when_enabled(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, disabled: bool, url: str | None
+) -> None:
+    variable = "SHOVEL_TEST_UNRESOLVED_MCP_URL"
+    monkeypatch.delenv(variable, raising=False)
+    if url is not None:
+        monkeypatch.setenv(variable, url)
+    (tmp_path / "mcp.json").write_text(
+        json.dumps({"mcpServers": {"test": {"url": f"${{{variable}}}", "disabled": disabled}}}),
+        encoding="utf-8",
+    )
+    async with AsyncOpenAI(api_key="test") as sdk:
+        extensions = AgentExtensions(AgentSettings(workspace_path=tmp_path))
+        try:
+            client = OpenAIChatCompletionClient(model="test", async_client=sdk)
+            if disabled:
+                await extensions.load(client)
+                assert extensions.tools == []
+            else:
+                with pytest.raises(RuntimeFailure) as failure:
+                    await extensions.load(client)
+                assert failure.value.status == 503
+                assert "private-mcp-token" not in failure.value.message
+        finally:
+            await extensions.close()
+
+
 async def test_invalid_mcp_configuration_fails_explicitly_without_credentials_in_error(
     tmp_path: Path,
 ) -> None:

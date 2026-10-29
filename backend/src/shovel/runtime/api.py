@@ -40,6 +40,7 @@ from shovel.runtime.schemas import (
     ConversationInput,
     CredentialInput,
     HistoryPruneInput,
+    MCPConfigurationInput,
     MessageInput,
     ProfileInput,
     ReasonInput,
@@ -262,6 +263,29 @@ def configure_api(
         app.add_middleware(DevelopmentRequestLogging)
     app.state.runtime_provider = provider
     router = APIRouter(prefix="/api/v1")
+
+    def mcp_response(rt: Runtime, result: dict[str, Any]) -> JSONResponse:
+        loaded_revision = rt.chat.agent.extensions.mcp_revision
+        result.update(
+            agent_loaded=rt.chat.agent_state == "loaded",
+            agent_state=rt.chat.agent_state,
+            restart_required=rt.chat.agent_state == "restart_failed"
+            or (loaded_revision is not None and loaded_revision != result["revision"]),
+        )
+        return JSONResponse(result, headers={"Cache-Control": "no-store"})
+
+    @router.get("/agent/mcp")
+    async def mcp_configuration(rt: RuntimeDependency) -> JSONResponse:
+        return mcp_response(rt, await asyncio.to_thread(rt.mcp.read))
+
+    @router.put("/agent/mcp")
+    async def save_mcp_configuration(body: MCPConfigurationInput, rt: RuntimeDependency) -> JSONResponse:
+        return mcp_response(rt, await asyncio.to_thread(rt.mcp.save, body.content, body.revision))
+
+    @router.post("/agent/restart")
+    async def restart_agent(rt: RuntimeDependency) -> JSONResponse:
+        await rt.chat.restart_agent()
+        return mcp_response(rt, await asyncio.to_thread(rt.mcp.read))
 
     @app.exception_handler(ShovelError)
     async def shovel_error(_request: Request, exc: ShovelError) -> JSONResponse:

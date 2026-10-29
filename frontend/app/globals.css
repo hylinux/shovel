@@ -94,6 +94,14 @@ dd { margin: 0 0 8px; }
 .configuration summary span, .scope-panel summary span { font-size: 12px; color: var(--muted); font-weight: 400; margin-left: 12px; }
 .configuration ul { padding-left: 20px; margin: 10px 0 14px; }
 .configuration p { max-width: 75ch; }
+.mcp-path { overflow-wrap: anywhere; }
+.mcp-editor { margin: 24px 0; }
+.mcp-editor > p { margin: 8px 0; }
+.mcp-editor textarea { font-family: ui-monospace, "Cascadia Code", Consolas, monospace; line-height: 1.5; tab-size: 2; margin-bottom: 12px; }
+.mcp-servers { overflow-x: auto; }
+.mcp-servers table { width: 100%; border-collapse: collapse; margin: 12px 0; }
+.mcp-servers th, .mcp-servers td { padding: 10px 14px; border-bottom: 1px solid var(--border); text-align: left; overflow-wrap: anywhere; }
+.mcp-example { overflow-x: auto; padding: 14px 0; }
 .section-toolbar { display: flex; justify-content: space-between; align-items: flex-start; gap: 20px; margin-bottom: 20px; }
 .section-toolbar p { margin-top: 5px; font-size: 13px; color: var(--muted); }
 .count { display: inline-block; margin-left: 6px; color: var(--muted); font-size: 13px; font-weight: 500; }

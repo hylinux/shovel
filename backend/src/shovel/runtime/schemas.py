@@ -32,6 +32,12 @@ class InputModel(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
 
 
+class MCPConfigurationInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    content: str = Field(max_length=1_048_576)
+    revision: str = Field(pattern=r"^[a-f0-9]{64}$")
+
+
 class ResourceInput(InputModel):
     name: str = Field(min_length=1, max_length=200)
     connector_kind: str = Field(min_length=1, max_length=100)

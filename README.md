@@ -250,8 +250,9 @@ Oversized Skill/tool context fails explicitly instead of silently exceeding it.
 
 By default, the workspace is `%USERPROFILE%\.shovel\workspaces\default` on
 Windows. `shovel init` creates `skills`, `functions`, and `pipeline` below the
-configured workspace. Agent extensions are loaded lazily on the first chat;
-restart the Host after changing them or `mcp.json`.
+configured workspace. Agent extensions are loaded lazily on the first chat.
+Use **MCP Server Management → Restart Agent** after changing extensions or
+`mcp.json`, or restart the Host.
 
 ```toml
 [agent]
@@ -335,6 +336,19 @@ Supported transports are stdio (`command`/`args`/`env`) and Streamable HTTP
 configuration error. MCP tools are namespaced by server. Shovel uses MAF's native
 MCP connections and closes them with the Runtime. Invalid extension/MCP
 configuration fails chat explicitly rather than silently dropping capabilities.
+
+The Web sidebar's **MCP Server Management** page lists saved servers and provides
+a JSON editor for the current workspace's `mcp.json`. Saving validates the schema
+and atomically replaces the file, rejecting stale editor revisions rather than
+overwriting another edit. Invalid existing JSON remains editable. Saving does not
+launch commands, connect servers or change already-cached tools. **Restart Agent**
+closes cached MCP/model clients; connections and extensions are loaded again on
+the next chat. It is rejected while any session is generating and preserves
+conversation history, Memory and background tasks. Unresolved environment
+references can be saved but fail explicitly when an enabled server loads.
+Changing Host environment variables still requires restarting the Host.
+The editor displays the actual configuration, including any inline credentials;
+prefer environment references and do not share screenshots containing secrets.
 
 **Trust boundary:** enabling Python extensions grants the local modules and
 Skill scripts the Shovel process user's permissions. Configuring a stdio MCP

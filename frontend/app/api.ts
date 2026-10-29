@@ -22,6 +22,7 @@ export type Memory = { id: string; memory: string; created_at?: UnixSeconds | nu
 export type Items<T> = { items: T[] };
 export type Profile = { id: string; name: string; scan_mode: string; is_enabled: boolean; include: string[]; exclude: string[]; max_file_bytes: number; time_window_days: number | null; pipeline: Record<string, unknown> };
 export type MessagePage = { items: (Message & { sequence: number })[]; next_before: number | null };
+export type MCPConfiguration = { path: string; content: string; revision: string; exists: boolean; items: { name: string; transport: "stdio" | "http"; enabled: boolean }[]; validation_error: string | null; agent_loaded: boolean; agent_state: "loaded" | "not_loaded" | "restarting" | "restart_failed"; restart_required: boolean };
 
 export function errorText(error: unknown): string {
   return error instanceof Error ? error.message : "Something went wrong. Please try again.";

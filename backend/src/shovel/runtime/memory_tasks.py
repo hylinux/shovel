@@ -141,7 +141,9 @@ class MemoryTaskService:
             is not None
         )
 
-    async def run_once(self) -> bool:
+    async def run_once(self, *, respect_foreground: bool = False) -> bool:
+        if respect_foreground and self.runtime.performance.background_delay() > 0:
+            return False
         async with self._execute_lock:
             async with self.runtime.sessions() as session:
                 operation = await session.scalar(
@@ -194,6 +196,8 @@ class MemoryTaskService:
                     run_id=operation.payload.get("run_id"),
                     conversation_id=source.conversation_id,
                 ):
+                    if respect_foreground:
+                        await self.runtime.performance.wait_for_idle(self.runtime.stopping)
                     trace("memory.extraction.started", attempt=operation.attempts)
                     await self.runtime.memory.extract(
                         source.content,

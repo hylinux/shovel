@@ -30,6 +30,7 @@ from .errors import (
 )
 from .memory_config import MemorySettings
 from .model_settings import DefaultAgentModelSettings
+from .performance_config import PerformanceSettings
 from .zvec_config import ZvecSettings
 
 _READ_ENVIRONMENT: ContextVar[bool] = ContextVar("shovel_read_environment", default=True)
@@ -147,6 +148,7 @@ class AppSettings(BaseSettings):
     document: DocumentSettings = Field(default_factory=DocumentSettings)
     model: DefaultAgentModelSettings = Field(default_factory=DefaultAgentModelSettings)
     agent: AgentSettings = Field(default_factory=AgentSettings)
+    performance: PerformanceSettings = Field(default_factory=PerformanceSettings)
     database: DatabaseSettings = Field(default_factory=DatabaseSettings)
 
     #: 知识库向量存储(Zvec)

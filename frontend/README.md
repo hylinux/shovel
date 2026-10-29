@@ -23,6 +23,15 @@ stages. Logs contain IDs, counts and timings, not message content, source text,
 Memory facts, tool arguments/results or raw errors. Production emits none of
 these additional browser diagnostics; routine polling remains quiet.
 
+Identical in-flight JSON GETs share one transport, including development Strict
+Mode cleanup/re-subscribe. Each reader retains its own cancellation and response
+body; once all readers cancel, the underlying read is aborted after a one-turn
+grace period. Completed/error responses are not cached. Mutations invalidate
+shared-read entries, and Agent streams remain incremental and unshared.
+Settings shows startup warmup states and foreground chat capacity from status.
+Only loopback Ollama models are automatically warmed with synthetic input;
+remote providers are untouched. Background extraction waits for foreground idle.
+
 ## Production
 
 ```powershell

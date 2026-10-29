@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import AsyncGenerator
 from pathlib import Path
+from time import perf_counter
 from typing import TYPE_CHECKING
 
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
@@ -21,6 +22,7 @@ if TYPE_CHECKING:
     from shovel.runtime.memory import MemoryService
     from shovel.runtime.memory_tasks import MemoryTaskService
     from shovel.runtime.operations import OperationService
+    from shovel.runtime.performance import RuntimePerformance, RuntimeWarmup
     from shovel.runtime.retrieval import RetrievalService
 
 
@@ -36,6 +38,7 @@ class Runtime:
         from shovel.runtime.memory import MemoryService
         from shovel.runtime.memory_tasks import MemoryTaskService
         from shovel.runtime.operations import OperationService
+        from shovel.runtime.performance import RuntimePerformance, RuntimeWarmup
         from shovel.runtime.retrieval import RetrievalService
 
         self.settings = settings
@@ -48,12 +51,14 @@ class Runtime:
         self.worker_error: str | None = None
         self._sink: ZvecChunkSink | None = None
         self._sink_lock = asyncio.Lock()
+        self.performance: RuntimePerformance = RuntimePerformance(settings)
         self.operations: OperationService = OperationService(self)
         self.retrieval: RetrievalService = RetrievalService(self)
         self.memory: MemoryService = MemoryService(settings)
         self.memory_tasks: MemoryTaskService = MemoryTaskService(self)
         self.chat: ChatService = ChatService(self)
         self.mcp: MCPConfigurationService = MCPConfigurationService(settings.agent.workspace)
+        self.warmup: RuntimeWarmup = RuntimeWarmup(self)
 
     def redact(self, message: str) -> str:
         keys = (
@@ -69,12 +74,17 @@ class Runtime:
         return message[:4000]
 
     async def sink(self) -> ZvecChunkSink:
+        started = perf_counter()
         async with self._sink_lock:
             if self._sink is None:
-                trace("index.opening")
-                task = asyncio.create_task(
-                    asyncio.to_thread(open_chunk_sink, self.settings.zvec.knowledge_path)
-                )
+                trace("index.opening", lock_wait_ms=round((perf_counter() - started) * 1000, 2))
+                opening = perf_counter()
+
+                def open_sink() -> ZvecChunkSink:
+                    trace("index.worker.started", queue_ms=round((perf_counter() - opening) * 1000, 2))
+                    return open_chunk_sink(self.settings.zvec.knowledge_path)
+
+                task = asyncio.create_task(asyncio.to_thread(open_sink))
                 try:
                     self._sink = await asyncio.shield(task)
                 except asyncio.CancelledError:
@@ -86,7 +96,13 @@ class Runtime:
                         "知识库向量集合不存在,清理意图仍保留。",
                         hint="运行 shovel init 初始化向量集合;不配置模型也可以使用资源管理和关键词检索。",
                     ) from exc
-                trace("index.opened")
+                trace("index.opened", elapsed_ms=round((perf_counter() - opening) * 1000, 2))
+                self.warmup.states["index"] = {
+                    "state": "ready",
+                    "elapsed_ms": round((perf_counter() - opening) * 1000, 2),
+                }
+            self.warmup.states["index"]["state"] = "ready"
+            self.warmup.states["index"].pop("error_type", None)
             return self._sink
 
     async def close(self) -> None:
@@ -96,9 +112,12 @@ class Runtime:
             try:
                 await self.memory.close()
             finally:
-                if self._sink is not None:
-                    await self._sink.aclose()
-                    self._sink = None
+                try:
+                    await self.retrieval.close()
+                finally:
+                    if self._sink is not None:
+                        await self._sink.aclose()
+                        self._sink = None
 
 
 async def create_runtime(

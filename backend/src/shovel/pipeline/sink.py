@@ -32,6 +32,7 @@ import asyncio
 import threading
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
+from time import perf_counter
 from typing import Any, Protocol
 
 from shovel.db.base import now_ts
@@ -282,11 +283,19 @@ def open_chunk_sink(knowledge_path: str) -> ZvecChunkSink:
     默认维度, 而它极可能与用户配的 embedding 模型不符。
     """
 
+    from shovel.runtime.diagnostics import trace
+
+    started = perf_counter()
     from shovel.vector.store import init_zvec_runtime, open_collection
 
+    trace("index.import.completed", elapsed_ms=round((perf_counter() - started) * 1000, 2))
+    started = perf_counter()
     init_zvec_runtime()
-
-    return ZvecChunkSink(open_collection(knowledge_path))
+    trace("index.runtime.completed", elapsed_ms=round((perf_counter() - started) * 1000, 2))
+    started = perf_counter()
+    result = ZvecChunkSink(open_collection(knowledge_path))
+    trace("index.collection.completed", elapsed_ms=round((perf_counter() - started) * 1000, 2))
+    return result
 
 
 __all__ = [

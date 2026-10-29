@@ -19,7 +19,8 @@ from shovel.domain.enums import (
     RetrievalRoute,
     VectorState,
 )
-from shovel.pipeline.embedder import build_embedder
+from shovel.pipeline.embedder import Embedder, build_embedder
+from shovel.pipeline.embedding_cache import EmbeddingCache
 from shovel.runtime.diagnostics import trace
 from shovel.runtime.errors import RuntimeFailure
 from shovel.runtime.schemas import SearchInput
@@ -36,6 +37,33 @@ _FTS = table("chunk_search", column("chunk_id"), column("rank"))
 class RetrievalService:
     def __init__(self, runtime: Runtime) -> None:
         self.runtime = runtime
+        self._embedder: Embedder | None = None
+        settings = runtime.settings.performance
+        self._embeddings = EmbeddingCache(settings.embedding_cache_entries, settings.embedding_cache_seconds)
+
+    async def embed_query(self, query: str) -> tuple[list[float], str]:
+        if self._embedder is None:
+            self._embedder = build_embedder(
+                self.runtime.settings.embedding, expected_dimension=self.runtime.settings.zvec.dim
+            )
+        embedder = self._embedder
+        version = embedder.model_version
+        key = self._embeddings.key([version, query], {})
+        vector = self._embeddings.get(key)
+        if vector is not None:
+            trace("retrieval.embedding.cached")
+            return vector, version
+        started = perf_counter()
+        trace("retrieval.embedding.started", provider=self.runtime.settings.embedding.provider)
+        vector = (await embedder.embed([query]))[0]
+        self._embeddings.put(key, vector)
+        trace("retrieval.embedding.completed", elapsed_ms=round((perf_counter() - started) * 1000, 2))
+        return vector, version
+
+    async def close(self) -> None:
+        if self._embedder is not None:
+            await self._embedder.aclose()
+            self._embedder = None
 
     async def _scope(self, requested: list[str]) -> list[str]:
         async with self.runtime.sessions() as session:
@@ -46,7 +74,7 @@ class RetrievalService:
         return sorted(set(requested) if requested else allowed)
 
     @staticmethod
-    def _chunks(scope: list[str]) -> Select[tuple[Chunk]]:
+    def _chunks(scope: list[str]) -> Select[Chunk]:
         return (
             select(Chunk)
             .join(Document, and_(Chunk.doc_uri == Document.uri, Chunk.resource_id == Document.resource_id))
@@ -106,38 +134,31 @@ class RetrievalService:
             trace("retrieval.keyword.completed", candidates=len(rankings[-1]))
         model_version: str | None = None
         if scope and mode in {"vector", "hybrid"}:
-            embedder = build_embedder(
-                self.runtime.settings.embedding, expected_dimension=self.runtime.settings.zvec.dim
+            vector, model_version = await self.embed_query(request.query)
+            matches = await (await self.runtime.sink()).search(
+                vector,
+                resource_ids=scope,
+                model_version=model_version,
+                limit=candidate_count,
             )
-            try:
-                vector = (await embedder.embed([request.query]))[0]
-                model_version = embedder.model_version
-                matches = await (await self.runtime.sink()).search(
-                    vector,
-                    resource_ids=scope,
-                    model_version=model_version,
-                    limit=candidate_count,
-                )
-                identifiers = [identifier for identifier, _score in matches]
-                # Vectors are an acceleration structure, never an authority or permission source.
-                async with self.runtime.sessions() as session:
-                    valid = set(
-                        await session.scalars(
-                            self._chunks(scope)
-                            .with_only_columns(Chunk.id)
-                            .where(
-                                Chunk.id.in_(identifiers),
-                                Chunk.vector_state == VectorState.INDEXED,
-                                Chunk.model_version == model_version,
-                                Document.pipe_state == DocumentPipeState.INDEXED,
-                                Document.indexed_hash == Document.content_hash,
-                            )
+            identifiers = [identifier for identifier, _score in matches]
+            # Vectors are an acceleration structure, never an authority or permission source.
+            async with self.runtime.sessions() as session:
+                valid = set(
+                    await session.scalars(
+                        self._chunks(scope)
+                        .with_only_columns(Chunk.id)
+                        .where(
+                            Chunk.id.in_(identifiers),
+                            Chunk.vector_state == VectorState.INDEXED,
+                            Chunk.model_version == model_version,
+                            Document.pipe_state == DocumentPipeState.INDEXED,
+                            Document.indexed_hash == Document.content_hash,
                         )
                     )
-                rankings.append([identifier for identifier in identifiers if identifier in valid])
-                trace("retrieval.vector.completed", candidates=len(rankings[-1]))
-            finally:
-                await embedder.aclose()
+                )
+            rankings.append([identifier for identifier in identifiers if identifier in valid])
+            trace("retrieval.vector.completed", candidates=len(rankings[-1]))
         scores: defaultdict[str, float] = defaultdict(float)
         for ranking in rankings:
             for rank, identifier in enumerate(ranking, 1):

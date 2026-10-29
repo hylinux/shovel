@@ -2122,7 +2122,7 @@ async def test_real_mem0_local_qdrant_recall_persistence_and_forget(
     before = len(recall_embeddings)
     recalled = await runtime.memory.search("tea", conversation_id="tea-conversation")
     assert len(recalled) == 2
-    assert len(recall_embeddings) == before + 1
+    assert before == 1 and len(recall_embeddings) == before
     assert {item["memory"] for item in recalled} == {"I prefer tea.", "User prefers tea."}
     assert len(await runtime.memory.search("tea", conversation_id="another-conversation")) == 1
     await runtime.memory.forget_conversation("tea-conversation")

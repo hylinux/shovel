@@ -5,8 +5,9 @@ import { forgetPendingRequest, makePendingRequest, savePendingRequest, type Pend
 import { runAgentMessage, type AgentMessageInput } from "./agent-client";
 import { mergeSessionHistory } from "./session-history";
 import { startQueryPolling } from "./query-polling";
+import { invalidateReads, sharedRead } from "./read-requests";
 
-export type Status = { service: string; workspace_id: string; embedding_configured: boolean; model_configured: boolean; model_name: string; memory_configured: boolean };
+export type Status = { service: string; workspace_id: string; embedding_configured: boolean; model_configured: boolean; model_name: string; memory_configured: boolean; warmup?: Record<string, { state: string; elapsed_ms?: number; error_type?: string }>; chat_capacity?: { limit: number; running: number; waiting: number } };
 export type UnixSeconds = number;
 export type Resource = { id: string; name: string; connector_kind: string; state: string; config: { root_path?: string; store_id?: string; folder_ids?: string[]; include_subfolders?: boolean }; description?: string; authority?: string; sensitivity?: string; state_reason?: string; last_verified_at?: UnixSeconds | null };
 export type OutlookStore = { id: string; name: string };
@@ -34,8 +35,10 @@ export class ApiError extends Error {
 
 export async function api<T>(path: string, options: RequestInit = {}): Promise<T> {
   let response: Response;
+  const read = !options.body && (options.method || "GET").toUpperCase() === "GET";
   try {
-    response = await fetch(`/api/v1${path}`, {
+    if (!read) invalidateReads();
+    response = await (read ? sharedRead : fetch)(`/api/v1${path}`, {
       ...options,
       headers: { ...(options.body ? { "Content-Type": "application/json" } : {}), ...options.headers },
       cache: "no-store",
@@ -43,6 +46,8 @@ export async function api<T>(path: string, options: RequestInit = {}): Promise<T
   } catch (error) {
     if (error instanceof Error && error.name === "AbortError") throw error;
     throw new ApiError("Cannot reach Shovel. Check that the backend is running, then retry.");
+  } finally {
+    if (!read) invalidateReads();
   }
   let body;
   try { body = await response.json(); }
@@ -181,6 +186,7 @@ export function useAgentAction() {
       if (!request.signal.aborted) setError(`${errorText(error)} Check session history before resending.`);
       return false;
     } finally {
+      invalidateReads();
       if (!request.signal.aborted) { setBusy(false); setText(""); setTool(""); }
       controller.current = null;
     }

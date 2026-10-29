@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import re
 from collections.abc import Awaitable, Callable
@@ -16,7 +17,9 @@ from agent_framework import (
     AgentSession,
     ChatContext,
     ChatMiddleware,
+    ChatOptions,
     ChatResponse,
+    ChatResponseUpdate,
     ContextProvider,
     FunctionInvocationContext,
     FunctionMiddleware,
@@ -46,6 +49,11 @@ SYSTEM = """你是 Shovel,用户电脑上的个人知识助手。
 你可以使用已注册的工具和 Skills 完成任务,不要声称执行过未调用的工具。"""
 
 EventSink = Callable[[BaseEvent], Awaitable[None]]
+
+
+class ModelOptions(ChatOptions[None], total=False):
+    extra_body: dict[str, int]
+
 
 _GREETING = re.compile(r"(?:hi|hello|hey|你好|您好|嗨)[\s!\uff01.\u3002]*", re.IGNORECASE)
 _SOCIAL_REPLY = re.compile(
@@ -165,8 +173,36 @@ class ShovelContextProvider(ContextProvider):
         if budget < 500:
             raise RuntimeFailure("问题超过此模型的上下文预算,请缩短问题或调整 model.max_input_chars。")
         memory_context: list[dict[str, str]] = []
+        memory_task = (
+            asyncio.create_task(self.runtime.memory.search(request.content, conversation_id=self.identifier))
+            if request.memory_enabled
+            else None
+        )
+        search_task = (
+            asyncio.create_task(
+                self.runtime.retrieval.search(
+                    SearchInput(
+                        query=request.content[:8000],
+                        resource_ids=request.resource_ids,
+                        mode=request.search_mode,
+                        limit=6,
+                    )
+                )
+            )
+            if not self.standalone_greeting
+            else None
+        )
+        tasks = [task for task in (memory_task, search_task) if task is not None]
+        try:
+            await asyncio.gather(*tasks)
+        finally:
+            for task in tasks:
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
         if request.memory_enabled:
-            memories = await self.runtime.memory.search(request.content, conversation_id=self.identifier)
+            assert memory_task is not None
+            memories = memory_task.result()
             memory_budget = min(2000, budget // 4)
             for item in memories[:10]:
                 fact = item.get("memory")
@@ -183,15 +219,8 @@ class ShovelContextProvider(ContextProvider):
             trace("retrieval.skipped", reason="standalone_greeting")
             sources = []
         else:
-            search = await self.runtime.retrieval.search(
-                SearchInput(
-                    query=request.content[:8000],
-                    resource_ids=request.resource_ids,
-                    mode=request.search_mode,
-                    limit=6,
-                )
-            )
-            sources = search["items"]
+            assert search_task is not None
+            sources = search_task.result()["items"]
         source_budget = budget * 3 // 4
         for source in sources:
             candidate = {"index": len(self.result.sources) + 1, **source}
@@ -278,8 +307,9 @@ class ShovelContextProvider(ContextProvider):
 
 
 class ContextBudgetMiddleware(ChatMiddleware):
-    def __init__(self, limit: int) -> None:
+    def __init__(self, limit: int, *, provider: str = "", model: str = "") -> None:
         self.limit = limit
+        self.provider, self.model = provider, model
 
     async def process(self, context: ChatContext, call_next: Callable[[], Awaitable[None]]) -> None:
         started = perf_counter()
@@ -302,18 +332,48 @@ class ContextBudgetMiddleware(ChatMiddleware):
             input_chars=size,
             messages=len(context.messages),
             streaming=context.stream,
+            provider=self.provider,
+            model=self.model,
+            tools=len((context.options or {}).get("tools") or []),
         )
 
+        first_text: float | None = None
+
+        def update(item: ChatResponseUpdate) -> ChatResponseUpdate:
+            nonlocal first_text
+            if first_text is None and item.text:
+                first_text = perf_counter()
+                trace(
+                    "model.call.first_text",
+                    model_call_id=call_id,
+                    elapsed_ms=round((first_text - started) * 1000, 2),
+                )
+            return item
+
         def completed(response: ChatResponse[Any]) -> None:
+            usage = response.usage_details or {}
+            metrics: dict[str, int | float] = {
+                key: value
+                for key in ("input_token_count", "output_token_count", "total_token_count")
+                if isinstance((value := usage.get(key)), (int, float))
+            }
+            raw = response.raw_representation
+            for key in ("load_duration", "prompt_eval_duration", "eval_duration", "total_duration"):
+                value = raw.get(key) if isinstance(raw, dict) else getattr(raw, key, None)
+                if isinstance(value, (int, float)):
+                    metrics[f"provider_{key}_ms"] = round(value / 1_000_000, 2)
             trace(
                 "model.call.completed",
                 model_call_id=call_id,
                 output_chars=len(response.text),
                 output_messages=len(response.messages),
                 elapsed_ms=round((perf_counter() - started) * 1000, 2),
+                first_text_ms=None if first_text is None else round((first_text - started) * 1000, 2),
+                **metrics,
             )
 
         if context.stream:
+            context.stream_transform_hooks.append(update)
             context.stream_result_hooks.append(completed)
         try:
             await call_next()
@@ -350,6 +410,12 @@ class ShovelAgent:
         self._client: httpx.AsyncClient | None = None
         self._sdk: AsyncOpenAI | None = None
         self._framework: OpenAIChatCompletionClient[Any] | None = None
+
+    def output_options(self, max_tokens: int) -> ModelOptions:
+        if self.runtime.settings.model.model_provider_type == ModelProviderType.OLLAMA:
+            # MAF translates max_tokens to max_completion_tokens, which Ollama ignores.
+            return {"extra_body": {"max_tokens": max_tokens}}
+        return {"max_tokens": max_tokens}
 
     def client(self) -> OpenAIChatCompletionClient[Any]:
         if self._framework is None:
@@ -439,11 +505,15 @@ class ShovelAgent:
             tools=[knowledge.search, list_resources, list_extensions, *self.extensions.tools],
             context_providers=providers,
             middleware=[
-                ContextBudgetMiddleware(self.runtime.settings.model.max_input_chars),
+                ContextBudgetMiddleware(
+                    self.runtime.settings.model.max_input_chars,
+                    provider=self.runtime.settings.model.model_provider_type.value,
+                    model=self.runtime.settings.model.model_name,
+                ),
                 ToolDiagnosticsMiddleware(),
             ],
             compaction_strategy=SlidingWindowStrategy(keep_last_groups=21),
-            default_options={"max_tokens": self.runtime.settings.model.max_output_tokens},
+            default_options=self.output_options(self.runtime.settings.model.max_output_tokens),
         )
         trace("model.started", provider=self.runtime.settings.model.model_provider_type.value)
         try:

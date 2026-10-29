@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING
 
 import structlog
 from ag_ui.core import BaseEvent, CustomEvent, EventType, RunErrorEvent, RunFinishedEvent, RunStartedEvent
-from agent_framework import Message
+from agent_framework import ChatResponse, Message
 from anyio import CancelScope
 from sqlalchemy import func, select, update
 
@@ -62,6 +62,19 @@ class ChatService:
             ) from exc
         finally:
             self._restarting = False
+
+    async def warm_model(self) -> None:
+        if self._restarting or self._restart_failed:
+            raise RuntimeFailure("Agent 无法预热,请先完成重启。", status=503)
+        self._active_runs += 1
+        try:
+            response = await self.agent.client().get_response(
+                [Message("user", ["Ready"])], options=self.agent.output_options(1)
+            )
+            if not isinstance(response, ChatResponse):
+                raise RuntimeFailure("模型预热未返回有效响应。", status=502)
+        finally:
+            self._active_runs -= 1
 
     async def recover(self) -> None:
         async with self.runtime.sessions() as session:
@@ -132,7 +145,8 @@ class ChatService:
             self._active_runs += 1
             try:
                 with trace_context(conversation_id=identifier, run_id=run_id):
-                    return await self._send(identifier, request, run_id=run_id, on_event=on_event)
+                    async with self.runtime.performance.admit(self.runtime.stopping):
+                        return await self._send(identifier, request, run_id=run_id, on_event=on_event)
             finally:
                 self._active_runs -= 1
 

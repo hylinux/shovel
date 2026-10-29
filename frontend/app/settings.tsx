@@ -15,6 +15,8 @@ export function Settings({ status }: { status?: Status }) {
         <li><code>[memory]</code> — {status.memory_configured ? "ready; enabled for every session" : "required for chat; configure a Memory embedder and extraction model"}</li>
       </ul> : <p className="muted">Waiting for runtime configuration…</p>}
       <p className="muted">Chat uses Memory by default. Short-term Memory stores user messages without another LLM extraction; long-term Memory extracts and merges user facts through mem0.</p>
+      {status?.warmup && <><h3>Startup warmup</h3><ul>{Object.entries(status.warmup).map(([name, item]) => <li key={name}>{name.replaceAll("_", " ")}: {item.state}{item.elapsed_ms !== undefined && ` (${Math.round(item.elapsed_ms)} ms)`}{item.error_type && ` - ${item.error_type}; check backend logs`}</li>)}</ul><p className="muted">Local model warmup uses a synthetic prompt, not session data. Disabled components still initialize on demand. A ready model may later be unloaded by its provider.</p></>}
+      {status?.chat_capacity && <p className="muted">Chat concurrency: {status.chat_capacity.running}/{status.chat_capacity.limit} running; {status.chat_capacity.waiting} waiting. Background Memory waits for a foreground idle window.</p>}
     </section>
     <section className="memory-section"><h2>Manage long-term Memory</h2>
       <p className="muted">View or forget long-term facts stored by mem0. Deleting a session clears its short-term Memory, not its long-term facts. Forgetting a fact does not erase its short-term copy. Loading this list contacts your configured Memory provider.</p>

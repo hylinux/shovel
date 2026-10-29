@@ -124,7 +124,7 @@ class MemoryExtractionWorker(BackgroundService):  # type: ignore[misc]
         try:
             while not stopping.is_set():
                 runtime.memory_wake.clear()
-                if await runtime.memory_tasks.run_once():
+                if await runtime.memory_tasks.run_once(respect_foreground=True):
                     continue
                 try:
                     await asyncio.wait_for(runtime.memory_wake.wait(), timeout=1)
@@ -140,6 +140,16 @@ class MemoryExtractionWorker(BackgroundService):  # type: ignore[misc]
             self._runtime.memory.cancel_extraction()
             self._runtime.memory_wake.set()
         await super().stop(stopping)
+
+
+class RuntimeWarmupWorker(BackgroundService):  # type: ignore[misc]
+    def __init__(self, provider: Callable[[], object]) -> None:
+        super().__init__(stop_timeout=10)
+        self._provider = provider
+
+    async def execute_async(self, stopping: asyncio.Event) -> None:
+        runtime = await resolve_runtime(self._provider)
+        await runtime.warmup.run()
 
 
 class FrontendFiles(StaticFiles):
@@ -188,6 +198,7 @@ def build_host(
         .enable_health_checks(False)
         .use_urls(host, port)
         .add_hosted_service(worker)
+        .add_hosted_service(RuntimeWarmupWorker(container.runtime))
         .add_hosted_service(MemoryExtractionWorker(container.runtime))
         .configure_endpoint(
             lambda _ctx, app: configure_api(app, container.runtime, settings, development=development)

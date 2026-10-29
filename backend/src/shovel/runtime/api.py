@@ -335,6 +335,8 @@ def configure_api(
             "model_name": rt.settings.model.model_name,
             "memory_configured": rt.memory.configured,
             "workspace_id": workspace_id(rt.settings),
+            "warmup": rt.warmup.states,
+            "chat_capacity": rt.performance.snapshot(),
         }
 
     @router.get("/connectors")

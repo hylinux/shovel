@@ -357,6 +357,70 @@ arguments. These are trusted extensions, not sandboxed code or read-only tools.
 Review them and restrict MCP tool lists before enabling them. Shovel does not
 install user extensions or dependencies automatically.
 
+### Conversation performance
+
+The Web Host warms its existing Zvec handle in the background. When a provider
+is Ollama on an HTTP loopback endpoint, it also warms configured Memory/RAG
+embedders and the chat model using synthetic input (one output token for chat).
+It never loads Skills/MCP/Python extensions, saves turns or extracts facts during
+warmup. Cloud and remote model endpoints and Ollama models ending in `-cloud`
+or `:cloud` are not automatically called. A loopback Ollama server can still
+proxy other model aliases to a cloud service; disable `warm_local_models` if
+local execution cannot be guaranteed.
+Short-lived CLI Hosts retain on-demand initialization.
+
+Warmup waits for foreground idle between components and reports `cold`, `warming`,
+`ready`, `failed`, `cancelled` or `disabled` through `/api/v1/status` and Settings.
+A failure is logged by component/error type, without credentials or paths; it
+does not silently replace vector search with keyword search or create an index.
+Ready means warmup completed, not a guarantee that Ollama will retain all models
+in memory. A chat submitted before warmup completes can still pay startup cost.
+
+```toml
+[performance]
+warm_index = true
+warm_local_models = true
+max_foreground_runs = 0
+foreground_queue_seconds = 120
+background_idle_seconds = 5
+embedding_cache_entries = 128
+embedding_cache_seconds = 300
+```
+
+`max_foreground_runs = 0` selects one concurrent foreground run for Ollama and
+four for other chat providers. Positive values override that limit. Admission
+covers context preparation through durable answer persistence; queued requests
+count as foreground activity and can be cancelled without leaking capacity.
+Queue timeout fails explicitly rather than allowing unlimited simultaneous
+model work. Memory and RAG reads within an admitted run execute concurrently,
+then use the existing deterministic context budget and citation validation.
+
+The extraction worker remains single-concurrency/FIFO and starts tasks only
+after all foreground runs finish and the idle window expires. It checks again
+before inference. Already-running extraction/warmup is not preempted: cancelling
+a client process does not guarantee that a model server stops computing.
+Foreground requests never wait for the background LLM to release a global lock.
+Use a separate, smaller `[memory.llm]` model or separate compute if this remaining
+contention matters; Shovel does not download/change models or hardware settings.
+
+Only successful, valid embedding vectors are cached in bounded, expiring,
+process-local caches. Memory and RAG caches are separate; Memory keys include
+all embedding arguments (including search/add action), while RAG includes model
+version. No prompt text is retained as a cache key or logged. Search results,
+permissions, revision checks and Memory facts are not cached: deletion/forget
+and resource visibility still take effect. Set entries to zero to disable.
+The RAG HTTP client is owned/closed by Runtime rather than recreated per query;
+the extraction subprocess also reuses its configured LLM client until reset.
+
+Development logs split index thread scheduling/import/runtime/collection-open,
+query embedding, chat admission, first model text and completion. Model logs
+include provider/model and token usage when supplied; provider-native durations
+are recorded only if exposed by the compatible API. `first_text_ms` includes
+provider waiting/loading/prompt work and must not be called pure prefill time.
+The existing outer `model.completed` includes context/hooks; use
+`model.call.completed` for the individual model request. No speedup is promised
+without a cold/warm benchmark on the configured model and hardware.
+
 ## Memory
 
 Memory is enabled by default for every chat request. It requires an

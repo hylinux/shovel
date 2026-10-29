@@ -17,6 +17,7 @@ from anyio import CancelScope
 from shovel.config.settings import AppSettings
 from shovel.memory.config import build_memory_config, memory_paths
 from shovel.memory.store import open_memory
+from shovel.pipeline.embedding_cache import EmbeddingCache
 from shovel.runtime.diagnostics import trace
 from shovel.runtime.errors import NotFound, RuntimeFailure
 
@@ -54,13 +55,18 @@ _WRITES = frozenset(
         "save_messages",
     }
 )
+_worker_llm: tuple[str, Any] | None = None
 
 
 def _generate_memory_response(config: dict[str, Any], args: tuple[Any, ...], kwargs: dict[str, Any]) -> Any:
     from mem0.utils.factory import LlmFactory
 
+    global _worker_llm
     try:
-        model = LlmFactory.create(config["provider"], config["config"])
+        fingerprint = hashlib.sha256(json.dumps(config, sort_keys=True).encode()).hexdigest()
+        if _worker_llm is None or _worker_llm[0] != fingerprint:
+            _worker_llm = (fingerprint, LlmFactory.create(config["provider"], config["config"]))
+        model = _worker_llm[1]
         return model.generate_response(*args, **kwargs)
     except Exception as exc:
         raise RuntimeError(f"Memory provider failed ({type(exc).__name__})") from None
@@ -132,8 +138,19 @@ class _BackgroundLlm:
 
 
 class _TimedMemoryComponent:
-    def __init__(self, target: Any, phase: str, methods: set[str]) -> None:
+    def __init__(
+        self,
+        target: Any,
+        phase: str,
+        methods: set[str],
+        cache: EmbeddingCache | None = None,
+        metadata: dict[str, str] | None = None,
+    ) -> None:
         self._target, self._phase, self._methods = target, phase, methods
+        self._cache = cache
+        self._metadata = metadata or {}
+        self._calls = 0
+        self._counter_lock = threading.Lock()
 
     def __getattr__(self, name: str) -> Any:
         value = getattr(self._target, name)
@@ -142,8 +159,22 @@ class _TimedMemoryComponent:
 
         @wraps(value)
         def call(*args: Any, **kwargs: Any) -> Any:
+            key = None
+            if self._cache is not None and name == "embed":
+                try:
+                    key = self._cache.key(args, kwargs)
+                except TypeError:
+                    trace("memory.embedding.cache_bypassed", reason="non_json_arguments")
+                if key is not None:
+                    cached = self._cache.get(key)
+                    if cached is not None:
+                        trace("memory.embedding.cached", action=name)
+                        return cached
             started = perf_counter()
-            trace(f"memory.{self._phase}.started", action=name)
+            with self._counter_lock:
+                first_call = self._calls == 0
+                self._calls += 1
+            trace(f"memory.{self._phase}.started", action=name, first_call=first_call, **self._metadata)
             try:
                 result = value(*args, **kwargs)
             except BaseException as exc:
@@ -157,6 +188,13 @@ class _TimedMemoryComponent:
                     elapsed_ms=round((perf_counter() - started) * 1000, 2),
                 )
                 raise
+            if (
+                key is not None
+                and isinstance(result, list)
+                and all(isinstance(item, (int, float)) for item in result)
+            ):
+                assert self._cache is not None
+                self._cache.put(key, result)
             trace(
                 f"memory.{self._phase}.completed",
                 action=name,
@@ -306,6 +344,7 @@ class MemoryService:
                 if component is not None:
                     setattr(self._memory, name, _OwnedStorage(component, self._storage))
             self._memory.llm = _BackgroundLlm(self._memory.llm, self._generate)
+            provider_config = build_memory_config(self.settings.memory, self.settings.model)
             for name, phase, methods in (
                 ("llm", "llm", {"generate_response"}),
                 ("embedding_model", "embedding", {"embed", "embed_batch"}),
@@ -313,9 +352,32 @@ class MemoryService:
             ):
                 component = getattr(self._memory, name, None)
                 if component is not None:
-                    setattr(self._memory, name, _TimedMemoryComponent(component, phase, methods))
+                    cache = None
+                    if phase == "embedding":
+                        performance = self.settings.performance
+                        cache = EmbeddingCache(
+                            performance.embedding_cache_entries,
+                            performance.embedding_cache_seconds,
+                            dimension=self.settings.memory.dim,
+                        )
+                    metadata = {}
+                    if phase in {"embedding", "llm"}:
+                        section = provider_config["embedder" if phase == "embedding" else "llm"]
+                        metadata = {
+                            "provider": section["provider"],
+                            "model": section["config"].get("model", ""),
+                        }
+                    setattr(
+                        self._memory, name, _TimedMemoryComponent(component, phase, methods, cache, metadata)
+                    )
             trace("memory.client.ready", elapsed_ms=round((perf_counter() - started) * 1000, 2))
         return self._memory
+
+    async def warmup(self) -> None:
+        def warm() -> None:
+            self._get().embedding_model.embed("Shovel warmup", "search")
+
+        await self._call(warm)
 
     async def _call[T](self, action: Callable[[], T]) -> T:
         started = perf_counter()

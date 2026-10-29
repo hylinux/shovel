@@ -15,6 +15,14 @@ npm run dev
 
 Open `http://localhost:3000`. Development alone rewrites `/api/*` to the HTTP backend at the specified host and port (defaults shown above). Folder paths refer to the backend machine, not the browser. Windows paths such as `C:\Users\you\Documents` are preserved as entered.
 
+With `uv run shovel run dev`, `[shovel.chat]` browser diagnostics are forwarded
+to the terminal with the `web` prefix. A shared `run_id` correlates submission,
+HTTP status and backend request ID, first text, tool activity, saved-message
+confirmation and completion/failure/cancellation with backend Agent/RAG/Memory
+stages. Logs contain IDs, counts and timings, not message content, source text,
+Memory facts, tool arguments/results or raw errors. Production emits none of
+these additional browser diagnostics; routine polling remains quiet.
+
 ## Production
 
 ```powershell

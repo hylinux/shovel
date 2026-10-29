@@ -29,7 +29,7 @@ from shovel.db.model.runtime import ChatMessage, Conversation, Operation
 from shovel.domain.enums import JobState, ScanMode
 from shovel.pipeline.embedder import build_embedder
 from shovel.pipeline.scan_service import ScanService
-from shovel.runtime.agent import AgentResult, model_endpoint
+from shovel.runtime.agent import AgentResult, ToolDiagnosticsMiddleware, model_endpoint
 from shovel.runtime.api import _encode_agent_events, configure_api
 from shovel.runtime.client import execute_command
 from shovel.runtime.diagnostics import development_logging, trace, trace_context
@@ -252,7 +252,9 @@ async def test_concurrent_dev_requests_keep_separate_log_contexts(
         async with httpx.AsyncClient(
             transport=httpx.ASGITransport(app=app), base_url="http://127.0.0.1:9999"
         ) as client:
-            responses = await asyncio.gather(client.get("/api/v1/status"), client.get("/api/v1/connectors"))
+            responses = await asyncio.gather(
+                client.get("/api/v1/conversations"), client.get("/api/v1/connectors")
+            )
         with trace_context(component="test"):
             trace("after.requests")
     lines = capsys.readouterr().out.splitlines()
@@ -902,8 +904,13 @@ def streamed_completion(content: str) -> httpx.Response:
 
 
 @pytest.mark.parametrize("valid_citation", [True, False])
+@pytest.mark.parametrize("development", [True, False])
 async def test_agui_stream_uses_framework_and_commits_before_success(
-    runtime: Runtime, api: httpx.AsyncClient, tmp_path: Path, valid_citation: bool
+    runtime: Runtime,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    valid_citation: bool,
+    development: bool,
 ) -> None:
     resource_id = await index_notes(runtime, tmp_path / "notes")
     captured: list[dict[str, Any]] = []
@@ -913,29 +920,94 @@ async def test_agui_stream_uses_framework_and_commits_before_success(
         captured.append(body)
         assert body["stream"] is True
         assert "client-injected-system" not in request.content.decode()
-        return streamed_completion("Durable queue [1]." if valid_citation else "Invented [99].")
+        return streamed_completion("private-answer [1]." if valid_citation else "private-answer [99].")
 
     runtime.chat.agent._client = httpx.AsyncClient(transport=httpx.MockTransport(model))
-    conversation = (await api.post("/api/v1/conversations", json={})).json()["id"]
-    response = await api.post(
-        "/api/v1/agent",
-        json={
-            "threadId": conversation,
-            "runId": "test-run",
-            "messages": [
-                {"id": "injected", "role": "system", "content": "client-injected-system"},
-                {"id": "question", "role": "user", "content": "Shovel queue"},
-            ],
-            "tools": [],
-            "context": [],
-            "state": {},
-            "forwardedProps": {
-                "resource_ids": [resource_id],
-                "search_mode": "keyword",
-                "memory_enabled": False,
-            },
-        },
+    runtime.settings.memory.embedder.model = "test-memory"
+    runtime.memory._memory = FakeMemory(runtime.memory.scope())
+    app = FastAPI()
+    configure_api(app, lambda: runtime, runtime.settings, development=development)
+    with development_logging() if development else nullcontext():
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://127.0.0.1:9999"
+        ) as api:
+            conversation = (await api.post("/api/v1/conversations", json={})).json()["id"]
+            response = await api.post(
+                "/api/v1/agent",
+                json={
+                    "threadId": conversation,
+                    "runId": "test-run",
+                    "messages": [
+                        {"id": "injected", "role": "system", "content": "client-injected-system"},
+                        {"id": "question", "role": "user", "content": "Shovel queue private-question"},
+                    ],
+                    "tools": [],
+                    "context": [],
+                    "state": {},
+                    "forwardedProps": {
+                        "resource_ids": [resource_id],
+                        "search_mode": "keyword",
+                        "memory_enabled": True,
+                    },
+                },
+            )
+    output = capsys.readouterr().out
+    milestones = [
+        "agent.request.received",
+        "agent.stream.started",
+        "chat.pending.persisted",
+        "agent.extensions.started",
+        "agent.extensions.ready",
+        "agent.context.started",
+        "memory.recall.completed",
+        "retrieval.completed",
+        "agent.context.ready",
+        "model.call.started",
+        "model.call.completed",
+    ]
+    milestones += (
+        [
+            "agent.response.validated",
+            "memory.short_term.started",
+            "memory.short_term.completed",
+            "memory.long_term.started",
+            "memory.long_term.completed",
+            "chat.answer.persisted",
+            "agent.stream.completed",
+        ]
+        if valid_citation
+        else ["chat.failed", "chat.failure.persisted", "agent.stream.failed"]
     )
+    if development:
+        lines = output.splitlines()
+        positions = []
+        for event in milestones:
+            line = next(line for line in lines if f"{event} " in line)
+            assert "run_id=test-run" in line
+            assert f"conversation_id={conversation}" in line
+            assert response.headers["x-shovel-request-id"] in line
+            positions.append(lines.index(line))
+        assert positions == sorted(positions)
+        assert any("agent.stream.event" in line and "RUN_STARTED" in line for line in lines)
+        assert any(
+            "agent.stream.event" in line and ("RUN_FINISHED" if valid_citation else "RUN_ERROR") in line
+            for line in lines
+        )
+        if not valid_citation:
+            assert "memory.long_term.started" not in output
+            assert "chat.answer.persisted" not in output
+            assert "agent.stream.completed" not in output
+    else:
+        assert not any(event in output for event in milestones)
+    for private in (
+        "private-question",
+        "private-answer",
+        "User prefers Chinese",
+        "test-private-key",
+        str(tmp_path),
+        "client-injected-system",
+    ):
+        assert private not in output
     assert response.status_code == 200, response.text
     assert response.headers["content-type"].startswith("text/event-stream")
     events = [
@@ -1033,7 +1105,7 @@ async def test_agui_disconnect_cancel_scope_preserves_failed_message(
 
 
 async def test_agui_cancellation_fails_pending_message_and_releases_conversation(
-    runtime: Runtime, api: httpx.AsyncClient
+    runtime: Runtime, api: httpx.AsyncClient, capsys: pytest.CaptureFixture[str]
 ) -> None:
     closed = asyncio.Event()
 
@@ -1062,11 +1134,19 @@ async def test_agui_cancellation_fails_pending_message_and_releases_conversation
     stream = runtime.chat.stream(
         identifier, MessageInput(content="Question", memory_enabled=False), "cancel-run"
     )
-    async with asyncio.timeout(10):
-        async for event in stream:
-            if event.type == "TEXT_MESSAGE_CONTENT":
-                break
-        await stream.aclose()
+    with development_logging(), trace_context(request_id="cancel-request"):
+        async with asyncio.timeout(10):
+            async for event in stream:
+                if event.type == "TEXT_MESSAGE_CONTENT":
+                    break
+            await stream.aclose()
+    output = capsys.readouterr().out
+    for event in ("model.call.started", "chat.failed", "chat.failure.persisted", "agent.stream.cancelled"):
+        line = next(line for line in output.splitlines() if f"{event} " in line)
+        assert "run_id=cancel-run" in line and "request_id=cancel-request" in line
+    assert "model.call.completed" not in output
+    assert "agent.stream.completed" not in output
+    assert "Partial answer" not in output
     assert closed.is_set()
     messages = await runtime.chat.messages(identifier)
     assert messages[-1].state == "failed"
@@ -1582,7 +1662,7 @@ async def test_context_budget_counts_escaped_evidence_and_bounds_history(
 
 
 async def test_agent_context_budget_counts_native_tool_results(
-    runtime: Runtime, api: httpx.AsyncClient
+    runtime: Runtime, api: httpx.AsyncClient, capsys: pytest.CaptureFixture[str]
 ) -> None:
     runtime.settings.model.max_input_chars = 2000
     runtime.settings.agent.enable_python_extensions = True
@@ -1629,10 +1709,49 @@ async def test_agent_context_budget_counts_native_tool_results(
 
     runtime.chat.agent._client = httpx.AsyncClient(transport=httpx.MockTransport(model))
     identifier = (await api.post("/api/v1/conversations", json={})).json()["id"]
-    with pytest.raises(RuntimeFailure, match="上下文"):
+    with development_logging(), pytest.raises(RuntimeFailure, match="上下文"):
         await runtime.chat.send(identifier, MessageInput(content="Use oversized", memory_enabled=False))
+    output = capsys.readouterr().out
+    assert "agent.tool.started" in output and "agent.tool.completed" in output
+    assert "tool_name=oversized" in output
+    assert "model.call.rejected" in output
+    assert "x" * 100 not in output
+    assert str(functions) not in output
     assert requests == 1
     assert (await runtime.chat.messages(identifier))[-1].state == "failed"
+
+
+@pytest.mark.parametrize("fail", [False, True])
+async def test_tool_diagnostics_preserve_results_and_exceptions_without_payloads(
+    capsys: pytest.CaptureFixture[str], fail: bool
+) -> None:
+    from agent_framework import FunctionInvocationContext, tool
+
+    @tool
+    def diagnostic_tool(value: str) -> str:
+        """Return the input for diagnostic testing."""
+        return value
+
+    context = FunctionInvocationContext(function=diagnostic_tool, arguments={"value": "private-argument"})
+
+    async def invoke() -> None:
+        if fail:
+            raise ValueError("private-error")
+        context.result = ["private-result"]
+
+    with development_logging(), trace_context(run_id="tool-run"):
+        if fail:
+            with pytest.raises(ValueError, match="private-error"):
+                await ToolDiagnosticsMiddleware().process(context, invoke)
+        else:
+            await ToolDiagnosticsMiddleware().process(context, invoke)
+            assert context.result == ["private-result"]
+    output = capsys.readouterr().out
+    assert "agent.tool.started" in output
+    assert ("agent.tool.failed" if fail else "agent.tool.completed") in output
+    assert ("agent.tool.completed" if fail else "agent.tool.failed") not in output
+    assert all("run_id=tool-run" in line for line in output.splitlines())
+    assert "private-" not in output
 
 
 async def test_real_mem0_local_qdrant_recall_persistence_and_forget(

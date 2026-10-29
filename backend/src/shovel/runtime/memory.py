@@ -5,6 +5,7 @@ import hashlib
 import inspect
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
+from contextvars import copy_context
 from functools import partial
 from time import perf_counter
 from typing import Any
@@ -55,16 +56,21 @@ class MemoryService:
                 hint="配置 [memory.embedder] 的模型和 [model] 或 [memory.llm];未启用记忆的对话不受影响。",
             )
         if self._memory is None:
+            started = perf_counter()
+            trace("memory.client.started")
             for path in memory_paths(self.settings.memory):
                 path.mkdir(parents=True, exist_ok=True)
             self._memory = open_memory(self.settings.memory, self.settings.model)
+            trace("memory.client.ready", elapsed_ms=round((perf_counter() - started) * 1000, 2))
         return self._memory
 
     async def _call[T](self, action: Callable[[], T]) -> T:
         started = perf_counter()
         trace("memory.started", action=action.__name__)
         try:
-            result = await asyncio.get_running_loop().run_in_executor(self._executor, action)
+            result = await asyncio.get_running_loop().run_in_executor(
+                self._executor, copy_context().run, action
+            )
             trace(
                 "memory.completed",
                 action=action.__name__,
@@ -110,7 +116,9 @@ class MemoryService:
                     "user_id": self.scope()["user_id"],
                     "OR": [self.scope(), self.scope(conversation_id)],
                 }
-            return self._items(memory.search(query, **arguments))
+            rows = self._items(memory.search(query, **arguments))
+            trace("memory.recall.completed", items=len(rows), short_term=conversation_id is not None)
+            return rows
 
         return await self._call(search)
 
@@ -119,9 +127,15 @@ class MemoryService:
             memory = self._get()
             messages = [{"role": "user", "content": content}]
             if conversation_id is not None:
+                started = perf_counter()
+                trace("memory.short_term.started", inference=False)
                 # Short-term recall keeps the original user text; only long-term facts need inference.
                 memory.add(messages, infer=False, **self.scope(conversation_id))
+                trace("memory.short_term.completed", elapsed_ms=round((perf_counter() - started) * 1000, 2))
+            started = perf_counter()
+            trace("memory.long_term.started", inference=True)
             memory.add(messages, **self.scope())
+            trace("memory.long_term.completed", elapsed_ms=round((perf_counter() - started) * 1000, 2))
 
         await self._call(add)
 

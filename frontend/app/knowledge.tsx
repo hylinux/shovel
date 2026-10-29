@@ -3,6 +3,7 @@
 import { useState, type FormEvent } from "react";
 import { segment, useAgentAction, useQuery, type MessagePage, type Status } from "./api";
 import { Empty, Feedback, Sources } from "./ui";
+import { chatTrace } from "./agent-client";
 
 export function Knowledge({ status, sessionId, onSessionChanged }: { status?: Status; sessionId: string; onSessionChanged: () => void }) {
   return <section className="session-content" aria-label="Chat session">{sessionId
@@ -22,13 +23,17 @@ function Chat({ sessionId, status, onActivity }: { sessionId: string; status?: S
     event.preventDefault();
     if (sendDisabled) return;
     const question = content.trim();
+    const runId = crypto.randomUUID();
+    chatTrace("chat.submit", { run_id: runId, conversation_id: sessionId, input_chars: question.length });
     setPendingQuestion(question);
-    const response = await action.run(sessionId, { content: question, resource_ids: [], memory_enabled: true, search_mode: "auto" });
+    const response = await action.run(sessionId, { content: question, resource_ids: [], memory_enabled: true, search_mode: "auto" }, runId);
+    chatTrace("chat.settled", { run_id: runId, conversation_id: sessionId, success: response });
     if (response) { setContent(""); setBefore(undefined); }
     onActivity();
     setPendingQuestion("");
     // Failed model calls may still have persisted user and failed assistant messages.
     history.refresh();
+    chatTrace("chat.history.refresh.requested", { run_id: runId, conversation_id: sessionId });
   }
   return <><div className="messages" aria-label="Session messages" aria-busy={history.loading || action.busy}>
     {(history.data?.next_before || before) && <div className="button-row">

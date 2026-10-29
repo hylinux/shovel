@@ -77,6 +77,17 @@ start/completion logs unless they take at least one second. Failed responses,
 exceptions and slow requests remain visible, as do scan, Agent and Memory
 diagnostics. Next.js omits duplicate access logs for these polling URLs; the
 backend remains responsible for their failure and latency diagnostics.
+Chat submissions additionally carry one AG-UI `run_id` from the browser through
+the backend. `[shovel.chat]` browser logs show submission, HTTP status/request ID,
+first text, tool activity, persistence confirmation and terminal outcome.
+Backend logs share that `run_id` and report history/persistence, extensions,
+context/RAG, individual model calls, tools, Memory recall, and separate short-
+and long-term Memory writes, including counts and timings. SSE heartbeats show
+that a quiet request is still open; they do not mean the model has completed.
+`model.call.*` timings cover individual model calls; the existing `model.completed`
+duration covers the whole Agent run, including context and Memory work.
+Logs include metadata only, never prompts, answers, retrieved excerpts, Memory
+facts, tool arguments/results or credentials.
 Next.js server output and browser
 console logs are forwarded with the `web` prefix; browser console output is
 forwarded verbatim, so do not log sensitive data there. These additional

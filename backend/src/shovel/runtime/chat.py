@@ -93,7 +93,7 @@ class ChatService:
         if lock.locked():
             raise RuntimeFailure("此对话正在生成回答,请等待完成后再发送。", status=409)
         async with lock:
-            with trace_context(conversation_id=identifier):
+            with trace_context(conversation_id=identifier, run_id=run_id):
                 return await self._send(identifier, request, run_id=run_id, on_event=on_event)
 
     async def stream(self, identifier: str, request: MessageInput, run_id: str) -> AsyncGenerator[BaseEvent]:
@@ -105,22 +105,27 @@ class ChatService:
                 await queue.put(event)
 
         async def generate() -> None:
-            try:
-                saved = await self.send(identifier, request, run_id=run_id, on_event=emit)
-                from shovel.runtime.api import message_view
+            with trace_context(conversation_id=identifier, run_id=run_id):
+                trace("agent.stream.started")
+                try:
+                    saved = await self.send(identifier, request, run_id=run_id, on_event=emit)
+                    from shovel.runtime.api import message_view
 
-                await queue.put(CustomEvent(name="shovel.message", value=message_view(saved)))
-                await queue.put(RunFinishedEvent(thread_id=identifier, run_id=run_id))
-            except asyncio.CancelledError:
-                raise
-            except Exception as exc:
-                message = (
-                    exc.message if isinstance(exc, RuntimeFailure) else "Agent 执行失败,请检查服务日志。"
-                )
-                if not isinstance(exc, RuntimeFailure):
-                    self._log.error("agent.stream.failed", error_type=type(exc).__name__)
-                await queue.put(RunErrorEvent(message=self.runtime.redact(message)))
-            await queue.put(None)
+                    await queue.put(CustomEvent(name="shovel.message", value=message_view(saved)))
+                    await queue.put(RunFinishedEvent(thread_id=identifier, run_id=run_id))
+                    trace("agent.stream.completed", message_id=saved.id)
+                except asyncio.CancelledError:
+                    trace("agent.stream.cancelled")
+                    raise
+                except Exception as exc:
+                    trace("agent.stream.failed", error_type=type(exc).__name__)
+                    message = (
+                        exc.message if isinstance(exc, RuntimeFailure) else "Agent 执行失败,请检查服务日志。"
+                    )
+                    if not isinstance(exc, RuntimeFailure):
+                        self._log.error("agent.stream.failed", error_type=type(exc).__name__)
+                    await queue.put(RunErrorEvent(message=self.runtime.redact(message)))
+                await queue.put(None)
 
         yield RunStartedEvent(thread_id=identifier, run_id=run_id)
         task = asyncio.create_task(generate())
@@ -143,7 +148,8 @@ class ChatService:
         on_event: EventSink | None = None,
     ) -> ChatMessage:
         started = perf_counter()
-        trace("chat.started", memory_enabled=request.memory_enabled)
+        trace("chat.started", memory_enabled=request.memory_enabled, input_chars=len(request.content))
+        persistence_started = perf_counter()
         async with self.runtime.sessions() as session:
             conversation = await session.get(Conversation, identifier)
             if conversation is None:
@@ -181,6 +187,13 @@ class ChatService:
             if request.memory_enabled:
                 conversation.has_short_memory = True
             await session.commit()
+        trace(
+            "chat.pending.persisted",
+            user_message_id=user.id,
+            assistant_message_id=answer.id,
+            history_messages=len(history),
+            elapsed_ms=round((perf_counter() - persistence_started) * 1000, 2),
+        )
         try:
             result = await self.agent.respond(
                 identifier,
@@ -189,6 +202,7 @@ class ChatService:
                 run_id=run_id,
                 on_event=on_event,
             )
+            persistence_started = perf_counter()
             async with self.runtime.sessions() as session:
                 saved = await session.get(ChatMessage, answer.id)
                 assert saved is not None
@@ -198,6 +212,12 @@ class ChatService:
                     update(Conversation).where(Conversation.id == identifier).values(updated_at=now_ts())
                 )
                 await session.commit()
+                trace(
+                    "chat.answer.persisted",
+                    message_id=saved.id,
+                    output_chars=len(saved.content),
+                    elapsed_ms=round((perf_counter() - persistence_started) * 1000, 2),
+                )
                 trace(
                     "chat.completed",
                     citations=len(saved.citations),
@@ -222,6 +242,7 @@ class ChatService:
                         .values(state="failed", content=self.runtime.redact(failure_message))
                     )
                     await session.commit()
+                    trace("chat.failure.persisted", message_id=answer.id)
             raise
 
     async def close(self) -> None:

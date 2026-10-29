@@ -31,7 +31,7 @@ from shovel.exceptions.resource import (
     ResourceNotFoundError,
     UnknownConnectorError,
 )
-from shovel.runtime.diagnostics import DevelopmentRequestLogging
+from shovel.runtime.diagnostics import DevelopmentRequestLogging, trace
 from shovel.runtime.errors import NotFound, RuntimeFailure
 from shovel.runtime.hosting import resolve_runtime
 from shovel.runtime.schemas import (
@@ -56,7 +56,9 @@ from shovel.services.outlook import OutlookError
 _AGENT_HEARTBEAT_SECONDS = 10.0
 
 
-async def _encode_agent_events(events: AsyncGenerator[BaseEvent]) -> AsyncIterator[str]:
+async def _encode_agent_events(
+    events: AsyncGenerator[BaseEvent], *, run_id: str | None = None
+) -> AsyncIterator[str]:
     encoder = EventEncoder()
     pending: asyncio.Task[BaseEvent | None] | None = None
     try:
@@ -65,12 +67,20 @@ async def _encode_agent_events(events: AsyncGenerator[BaseEvent]) -> AsyncIterat
             while not pending.done():
                 done, _ = await asyncio.wait((pending,), timeout=_AGENT_HEARTBEAT_SECONDS)
                 if not done:
+                    trace("agent.stream.heartbeat", run_id=run_id)
                     # Keep proxy sockets alive without cancelling the Agent or emitting protocol events.
                     yield ": keep-alive\n\n"
             completed, pending = pending, None
             event = completed.result()
             if event is None:
                 return
+            if event.type not in {
+                "TEXT_MESSAGE_CONTENT",
+                "TOOL_CALL_ARGS",
+                "THINKING_TEXT_MESSAGE_CONTENT",
+                "REASONING_MESSAGE_CONTENT",
+            }:
+                trace("agent.stream.event", run_id=run_id, event_type=event.type)
             yield encoder.encode(event)
     finally:
         # Starlette's disconnect cancel scope must not interrupt durable failure cleanup.
@@ -688,9 +698,19 @@ def configure_api(
         if not isinstance(properties, dict):
             raise RuntimeFailure("AG-UI forwardedProps 必须是对象。")
         request = MessageInput.model_validate({**properties, "content": content})
+        trace(
+            "agent.request.received",
+            run_id=body.run_id,
+            conversation_id=body.thread_id,
+            input_chars=len(content),
+            client_messages=len(body.messages),
+            resource_count=len(request.resource_ids),
+            memory_enabled=request.memory_enabled,
+            search_mode=request.search_mode,
+        )
 
         return StreamingResponse(
-            _encode_agent_events(rt.chat.stream(body.thread_id, request, body.run_id)),
+            _encode_agent_events(rt.chat.stream(body.thread_id, request, body.run_id), run_id=body.run_id),
             media_type="text/event-stream",
             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
         )

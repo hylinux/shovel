@@ -165,13 +165,13 @@ export function useAgentAction() {
   const [tool, setTool] = useState("");
   const controller = useRef<AbortController | null>(null);
   useEffect(() => () => controller.current?.abort(), []);
-  const run = useCallback(async (sessionId: string, input: AgentMessageInput): Promise<boolean> => {
+  const run = useCallback(async (sessionId: string, input: AgentMessageInput, runId: string): Promise<boolean> => {
     if (controller.current) return false;
     const request = new AbortController();
     controller.current = request;
     setBusy(true); setError(""); setText(""); setTool("");
     try {
-      await runAgentMessage("/api/v1/agent", sessionId, input, request.signal, setText, setTool);
+      await runAgentMessage("/api/v1/agent", sessionId, input, request.signal, setText, setTool, runId);
       return true;
     } catch (error) {
       if (!request.signal.aborted) setError(`${errorText(error)} Check session history before resending.`);

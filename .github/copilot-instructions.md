@@ -20,6 +20,8 @@ uv run pytest
 # One file or one test; --no-cov disables the default whole-package coverage report.
 uv run pytest backend\tests\test_chunker.py --no-cov
 uv run pytest backend\tests\test_chunker.py::test_same_input_yields_identical_ids --no-cov
+# Deterministic platform integration demos; model responses and mail sending are test fixtures.
+uv run pytest backend\tests\test_platform_demos.py --no-cov
 ```
 
 Pytest discovers `backend\tests`, adds `backend\src` to the import path, enables
@@ -67,13 +69,38 @@ in `.github\workflows\ci.yml`.
 - The installed `shovel` entry point is the Typer app in `backend\src\shovel\cli`.
   `runtime\hosting.py` builds the Generic Host/FastAPI application and background
   workers; `container.py` owns dependency-injector providers and async resource
-  lifetimes. `runtime\service.py` assembles operations, retrieval, chat, and Memory.
-- Durable Web and CLI mutations share the `OperationService` queue. The CLI
-  uses REST when a matching Host is running, otherwise a short-lived non-Web
-  Host via `runtime\client.py`; read-only CLI queries access SQLite directly.
+  lifetimes. `runtime\service.py` composes both legacy services and the Capability
+  platform in the same Runtime.
+- Legacy resource/scan and Memory mutations use the `OperationService` queue.
+  The legacy CLI uses REST when a matching Host is running, otherwise a short-lived
+  non-Web Host via `runtime\client.py`; read-only legacy CLI queries access SQLite directly.
   OS locks protect the database, knowledge-vector and Memory-vector directories
   against competing Runtime writers. Restart recovery preserves queued parameters
   and Job IDs.
+- New Capability, Workflow, Proactive, Approval and Execution entry points share
+  `platform\service.py`'s `PlatformApplication`. Agent tools, `/api/v1/platform`
+  and CLI commands use this facade; ORM/SQL stay in repository/query adapters.
+  `runtime\platform_client.py` uses the matching Web Host or the same short-lived
+  Generic Host for both reads and commands.
+- `capability\` separates Definition identity from versioned Function/Skill/
+  Workflow/Agent content. `InvocationService` resolves and freezes exact versions,
+  hashes, dependency locks and permission ceilings before persistence.
+  `execution\engine.py` owns the single new Execution lifecycle; executors share
+  it, including child calls. The durable root reuses physical `operation`, not
+  parallel SkillTask/WorkflowTask/ProactiveTask tables. Legacy Job/Chat/Memory
+  lifecycles have not all migrated into this engine.
+- `automation\` matches revisioned Proactive configuration and declarative
+  conditions/input mappings, then invokes a capability. ScheduleTriggerService
+  only publishes NormalizedEvents. The bounded in-process EventBus is not durable:
+  only a committed Execution crosses that boundary; dedupe is not Exactly Once.
+  ExecutionWakeupService separately handles existing executions' timers/retries;
+  RecoveryService runs under RuntimeLock. These workers reuse the existing Host.
+- Workflows are trigger-agnostic Capability content with serial-DAG Input,
+  Function, Skill, Condition, Approval, Ask User, Notification, Emit Event and
+  Output nodes. Checkpoints live on the Execution root; node calls use child
+  Executions. Versioned Skill/Agent executors use isolated, tool-free MAF Agents
+  with frozen instructions, not mutable workspace extensions or Main Agent
+  Memory. Skill Memory Access is Disabled in V1.
 - Scanning flows through connector discovery/fetch, parser, parent/child chunker,
   embedder, persistence, and reconciliation. `pipeline\scan_service.py`
   coordinates this flow. SQLite stores authoritative document/chunk text,
@@ -116,6 +143,41 @@ in `.github\workflows\ci.yml`.
   plus an Operation, not the completed resource. Preserve `Idempotency-Key` across lost responses and
   retries; changed arguments with the same key conflict. Keep browser recovery
   workspace-scoped and consistent with CLI request identity.
+- Platform `execution.run`, `proactive.run` and `execution.resume` return 202 plus
+  Execution. Published content is immutable; availability is separate. Editing
+  forks a new Draft.
+  Preserve old version hashes and request fingerprints when changing serializers;
+  adding default fields must not rewrite existing published payloads or locks.
+- Platform permissions default empty. `[platform.security]` supplies user/platform
+  policy; `platform.agent_permissions` further limits the Main Agent.
+  Permissions are exact `(action, resource)` pairs, intersecting configured
+  user/platform grants with caller, capability, service, workflow/skill, parent
+  and frozen boundaries. Child authority can only narrow. Authorization precedes
+  Risk, Policy and Approval and is rechecked at dispatch/after approval; approval
+  never supplies a missing grant. Any applicable approval requirement wins,
+  including explicit Workflow Approval nodes and platform minimums.
+- Capability publishing, service enable/resume, global automation resume,
+  approval/rejection and input require an exact server preview (`prepare: true`)
+  followed by the same intent and `confirmation_id`. Tickets are process-local,
+  single-use and expire after five
+  minutes; durable ApprovalRequests are separate facts. Main Agent tools return
+  structured pending actions, never issue/consume human tickets or interpret
+  ordinary chat as consent. Approval/input actions bind request ID, execution ID,
+  scope and user. Interaction is a projection; Notification/Delivery is transport.
+- Proactive edits save a disabled revision; explicit enable is required. Admission
+  freezes the service revision/configuration. Per-service pause preserves enabled
+  state. Global pause is a scoped AppSetting: it blocks automatic Event/Schedule
+  admission only, permits manual Run Now and leaves existing executions/timers
+  active. Global resume rechecks targets and does not replay skipped occurrences.
+- Workflow V1 has no external trigger, Parallel, Join, Loop or Script nodes;
+  Emit Event is an execution step, not a trigger. Function implementations resolve
+  only trusted FunctionContract/handler registrations, never user import paths,
+  eval/exec or automatically imported workspace Python extensions. Demo external
+  writes belong in test fixtures, not the production catalog.
+- Snooze/Delay suspend an existing Execution with `wake_at`, not a business
+  Schedule. Retry only explicitly transient, replay-safe work with bounded
+  attempts/backoff; dispatched non-idempotent external effects require
+  reconciliation, not blind resume/retry. Completed children must not repeat.
 - Only AG-UI `RUN_FINISHED` confirms the durable answer and queued Memory work;
   incremental text is not persistence, and completion is not completed extraction
   or indexing. On a lost response/stream, inspect persisted history before
@@ -131,6 +193,12 @@ in `.github\workflows\ci.yml`.
   tabs through `app\query-polling.ts`; keep explicit actions and Agent streaming
   independent of polling. Settings keeps visited tab panels mounted to preserve
   MCP/instructions drafts.
+- Platform editors use server-authorized `/platform/options`; the server rechecks
+  selections at save/validate/publish. Service controls reconcile acknowledged
+  server revisions with older poll results through `observedService`; do not
+  immediately reuse stale query revisions. Activity owns `execution.run`/
+  `proactive.run` recovery receipts, separate from legacy Background tasks;
+  look up the original request key before resending an uncertain run.
 - Workspace extensions load lazily from `agent.workspace_path`: MAF Skills under
   `skills\<name>\SKILL.md` advertise metadata and load content on demand.
   `functions\*.py` exports `tools`; `pipeline\*.py` exports `create_agent(client)`
@@ -189,7 +257,8 @@ in `.github\workflows\ci.yml`.
   reads only the file. Preserve `SecretStr` values with Python-mode dumps for
   DI; configuration serialization must not replace real secrets with masks.
   Resource credentials use `identity_ref` and the OS keyring/environment
-  references, never raw credentials in queued payloads.
+  references, never raw credentials in queued payloads. Capability connection
+  requirements likewise store references, not secrets in versions or Workflows.
 - Use `runtime.diagnostics.trace` for dev-only diagnostics, scoped by
   `development_logging()` in `run dev`. Log IDs, counts, and timings, not bodies,
   document text, source paths, or credentials. Browser console output is
@@ -197,3 +266,6 @@ in `.github\workflows\ci.yml`.
 - Preserve the loopback-only, single-owner runtime boundary. For current
   behavior consult the root/frontend READMEs and CLI help; architecture design
   and roadmap documents also contain future plans.
+- Implemented platform boundaries and decisions are documented in
+  `Documents\platform_architecture.md` and `Documents\platform_adrs.md`.
+  `Documents\platform_validation.md` records integration evidence and limitations.

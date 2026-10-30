@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 from collections.abc import AsyncGenerator
 from pathlib import Path
 from time import perf_counter
@@ -8,13 +9,38 @@ from typing import TYPE_CHECKING
 
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
+from shovel.automation.events import InProcessEventBus
+from shovel.automation.manager import ProactiveServiceManager
+from shovel.automation.schedules import ScheduleTriggerService
+from shovel.capability.domain import CapabilityKind, CapabilityScope
+from shovel.capability.registry import CapabilityRegistry
 from shovel.config.settings import AppSettings
+from shovel.db.approval_repository import SQLiteApprovalRepository
+from shovel.db.capability_repository import SQLiteCapabilityRepository
+from shovel.db.execution_control_repository import SQLiteExecutionControlRepository
+from shovel.db.execution_repository import SQLiteExecutionRepository
+from shovel.db.interaction_repository import SQLiteInteractionRepository
 from shovel.db.migrations import upgrade_database
+from shovel.db.operation_repository import SQLiteOperationReader
+from shovel.db.platform_queries import SQLitePlatformQueries
+from shovel.db.proactive_repository import SQLiteProactiveRepository
+from shovel.db.workflow_repository import SQLiteWorkflowRepository
 from shovel.exceptions.pipeline import VectorSinkError
+from shovel.execution.control import ExecutionWakeupService, RecoveryService
+from shovel.execution.engine import ExecutionEngine
+from shovel.execution.executors import AgentExecutor, FunctionExecutor, SkillExecutor, WorkflowExecutor
+from shovel.execution.invocation import InvocationService
+from shovel.interaction.service import InteractionService, NotificationService
 from shovel.pipeline.sink import ZvecChunkSink, open_chunk_sink
+from shovel.platform.authorization import ApprovalAuthorization, ExplicitActions, InputAuthorization
+from shovel.platform.policy import ConfiguredSecurityPolicy
+from shovel.platform.service import PlatformApplication
 from shovel.runtime.diagnostics import trace
 from shovel.runtime.locking import RuntimeLock
+from shovel.runtime.operation_reads import OperationQueries
+from shovel.security.services import ApprovalService, AuthorizationService, SecurityGate
 from shovel.services.resource_service import ResourceService
+from shovel.workflow.service import WorkflowService
 
 if TYPE_CHECKING:
     from shovel.runtime.agent_instructions import AgentInstructionsService
@@ -54,6 +80,72 @@ class Runtime:
         self._sink: ZvecChunkSink | None = None
         self._sink_lock = asyncio.Lock()
         self.performance: RuntimePerformance = RuntimePerformance(settings)
+        self.capabilities = CapabilityRegistry(SQLiteCapabilityRepository(sessions))
+        scope = CapabilityScope(
+            workspace_id=hashlib.sha256(str(settings.agent.workspace.resolve()).encode()).hexdigest()[:24],
+            user_id=settings.platform.user_id,
+        )
+        security = SecurityGate(
+            AuthorizationService(
+                ConfiguredSecurityPolicy(
+                    scope,
+                    lambda: self.settings.platform.security,
+                )
+            )
+        )
+        actions = ExplicitActions()
+        self.invocations = InvocationService(
+            self.capabilities, SQLiteExecutionRepository(sessions), security=security
+        )
+        self.approvals = ApprovalService(
+            SQLiteApprovalRepository(sessions),
+            self.invocations.security,
+            authorizer=ApprovalAuthorization(actions),
+        )
+        self.events = InProcessEventBus()
+        proactive_repository = SQLiteProactiveRepository(sessions)
+        self.proactive = ProactiveServiceManager(proactive_repository, self.invocations, wake=self.wake.set)
+        self.schedules = ScheduleTriggerService(proactive_repository, self.events)
+        self.events.subscribe(self.proactive.handle_event)
+        self.workflows = WorkflowService(
+            SQLiteWorkflowRepository(sessions),
+            self.invocations.security,
+            bus=self.events,
+            authorizer=InputAuthorization(actions),
+        )
+        control_repository = SQLiteExecutionControlRepository(sessions)
+        self.wakeups = ExecutionWakeupService(control_repository)
+        self.recovery = RecoveryService(control_repository, self.capabilities.retry_safe)
+        interaction_repository = SQLiteInteractionRepository(sessions)
+        self.interactions = InteractionService(
+            interaction_repository, self.approvals, self.workflows, self.wakeups
+        )
+        self.notifications = NotificationService(interaction_repository)
+        self.operation_queries = OperationQueries(SQLiteOperationReader(sessions))
+        self.execution_engine = ExecutionEngine(
+            self.invocations,
+            {
+                CapabilityKind.FUNCTION: FunctionExecutor({}),
+                CapabilityKind.SKILL: SkillExecutor(lambda: self.chat.agent.client()),
+                CapabilityKind.WORKFLOW: WorkflowExecutor(),
+                CapabilityKind.AGENT: AgentExecutor(lambda: self.chat.agent.client()),
+            },
+            workflow_context=self.workflows.bind,
+            wakeups=self.wakeups,
+        )
+        self.platform = PlatformApplication(
+            scope,
+            self.execution_engine,
+            self.proactive,
+            self.approvals,
+            self.workflows,
+            self.interactions,
+            self.wakeups,
+            SQLitePlatformQueries(sessions),
+            actions,
+            agent_permissions=lambda: self.settings.platform.agent_permissions,
+            wake=self.wake.set,
+        )
         self.operations: OperationService = OperationService(self)
         self.retrieval: RetrievalService = RetrievalService(self)
         self.memory: MemoryService = MemoryService(settings, sessions)
@@ -111,7 +203,11 @@ class Runtime:
 
     async def close(self) -> None:
         try:
-            await self.chat.close()
+            try:
+                await self.events.stop()
+            finally:
+                await self.execution_engine.close()
+                await self.chat.close()
         finally:
             try:
                 await self.memory.close()
@@ -137,6 +233,8 @@ async def create_runtime(
         runtime = Runtime(settings, sessions, resources)
         try:
             await runtime.memory.initialize()
+            await runtime.recovery.recover()
+            await runtime.interactions.refresh()
             await runtime.operations.recover()
             await runtime.chat.recover()
             trace(

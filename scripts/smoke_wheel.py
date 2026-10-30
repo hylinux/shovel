@@ -33,6 +33,8 @@ async def smoke(root: Path) -> None:
                 "http_port": port,
                 "database": {"url": f"sqlite+aiosqlite:///{(root / 'runtime.db').as_posix()}"},
                 "zvec": {"knowledge_path": str(root / "vectors"), "log_dir": str(root / "logs"), "dim": 4},
+                "agent": {"workspace_path": str(root / "workspace")},
+                "memory": {"index_path": str(root / "memory-vectors"), "dim": 4},
             }
         ),
         encoding="utf-8",

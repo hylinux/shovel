@@ -4,6 +4,7 @@ import asyncio
 import inspect
 import json
 import os
+import time
 from collections.abc import Callable
 from pathlib import Path
 from typing import cast
@@ -152,6 +153,68 @@ class RuntimeWarmupWorker(BackgroundService):  # type: ignore[misc]
         await runtime.warmup.run()
 
 
+class AutomationWorker(BackgroundService):  # type: ignore[misc]
+    def __init__(self, provider: Callable[[], object]) -> None:
+        super().__init__(stop_timeout=45)
+        self._provider = provider
+        self._runtime: Runtime | None = None
+
+    async def start(self, stopping: asyncio.Event) -> None:
+        self._runtime = await resolve_runtime(self._provider)
+        await self._runtime.events.start()
+        await super().start(stopping)
+
+    async def execute_async(self, stopping: asyncio.Event) -> None:
+        assert self._runtime is not None
+        try:
+            while not stopping.is_set():
+                await self._runtime.schedules.tick(time.time())
+                try:
+                    await asyncio.wait_for(stopping.wait(), timeout=1)
+                except TimeoutError:
+                    continue
+        except Exception as exc:
+            structlog.get_logger("shovel.automation").error(
+                "automation.failed", error_type=type(exc).__name__
+            )
+            stopping.set()
+            raise
+
+    async def stop(self, stopping: asyncio.Event) -> None:
+        try:
+            await super().stop(stopping)
+        finally:
+            if self._runtime is not None:
+                await self._runtime.events.stop()
+
+
+class ExecutionMaintenanceWorker(BackgroundService):  # type: ignore[misc]
+    def __init__(self, provider: Callable[[], object]) -> None:
+        super().__init__(stop_timeout=45)
+        self._provider = provider
+
+    async def execute_async(self, stopping: asyncio.Event) -> None:
+        runtime = await resolve_runtime(self._provider)
+        try:
+            while not stopping.is_set():
+                if await runtime.wakeups.run_due():
+                    runtime.wake.set()
+                await runtime.interactions.refresh()
+                for _ in range(100):
+                    if stopping.is_set() or not await runtime.notifications.run_once():
+                        break
+                try:
+                    await asyncio.wait_for(stopping.wait(), timeout=1)
+                except TimeoutError:
+                    continue
+        except Exception as exc:
+            structlog.get_logger("shovel.execution").error(
+                "execution.maintenance_failed", error_type=type(exc).__name__
+            )
+            stopping.set()
+            raise
+
+
 class FrontendFiles(StaticFiles):
     async def get_response(self, path: str, scope: Scope) -> Response:
         try:
@@ -198,6 +261,8 @@ def build_host(
         .enable_health_checks(False)
         .use_urls(host, port)
         .add_hosted_service(worker)
+        .add_hosted_service(AutomationWorker(container.runtime))
+        .add_hosted_service(ExecutionMaintenanceWorker(container.runtime))
         .add_hosted_service(RuntimeWarmupWorker(container.runtime))
         .add_hosted_service(MemoryExtractionWorker(container.runtime))
         .configure_endpoint(
@@ -214,7 +279,11 @@ def build_cli_host(settings: AppSettings) -> tuple[Host, Callable[[], object]]:
     lifetime = ApplicationLifetime()
     host = Host(
         container=container,
-        services=[RuntimeWorker(container.runtime), MemoryExtractionWorker(container.runtime)],
+        services=[
+            RuntimeWorker(container.runtime),
+            ExecutionMaintenanceWorker(container.runtime),
+            MemoryExtractionWorker(container.runtime),
+        ],
         lifetime=lifetime,
     )
     return host, container.runtime

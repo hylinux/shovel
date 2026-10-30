@@ -5,15 +5,12 @@ import json
 from typing import Annotated
 
 import typer
-from sqlalchemy import select
 
 from shovel.cli.context import cli_context
 from shovel.cli.decorators import command_handler
 from shovel.cli.ui.console import console
 from shovel.config.settings import AppSettings, load_settings
-from shovel.db.database import create_async_database_engine, create_async_session_factory
-from shovel.db.model.runtime import Operation
-from shovel.runtime.api import operation_view
+from shovel.runtime.client import list_operations as query_operations
 from shovel.runtime.client import manage_operation
 from shovel.runtime.errors import RuntimeFailure
 from shovel.runtime.locking import endpoint_file
@@ -31,20 +28,7 @@ def list_operations(
     limit: Annotated[int, typer.Option(min=1, max=1000)] = 20,
     state: Annotated[str | None, typer.Option()] = None,
 ) -> None:
-    async def read() -> list[dict[str, object]]:
-        settings = _settings()
-        context = create_async_database_engine(settings.database.url)
-        engine = await anext(context)
-        try:
-            statement = select(Operation).order_by(Operation.queued_at.desc(), Operation.id).limit(limit)
-            if state is not None:
-                statement = statement.where(Operation.state == state)
-            async with create_async_session_factory(engine)() as session:
-                return [operation_view(row) for row in await session.scalars(statement)]
-        finally:
-            await context.aclose()
-
-    console.print_json(data=asyncio.run(read()))
+    console.print_json(data=asyncio.run(query_operations(_settings(), limit=limit, state=state)))
 
 
 @app.command("requests")

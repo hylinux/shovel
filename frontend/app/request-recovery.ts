@@ -9,6 +9,13 @@ export type PendingRequest = {
 
 const prefix = "shovel.request.";
 
+function platformReceipt(path: string, body: unknown): boolean {
+  if (path !== "/platform/commands" || typeof body !== "string") return false;
+  const command: unknown = JSON.parse(body);
+  return typeof command === "object" && command !== null && "action" in command
+    && (command.action === "execution.run" || command.action === "proactive.run");
+}
+
 export async function makePendingRequest(
   workspace: string, path: string, method: string, body?: string,
 ): Promise<PendingRequest> {
@@ -25,7 +32,8 @@ function isPendingRequest(value: unknown): value is PendingRequest {
     && "workspace" in value && typeof value.workspace === "string"
     && "path" in value && typeof value.path === "string"
     && (/^\/resources(?:\/|$)/.test(value.path) || value.path === "/index/cleanup" || value.path === "/history/prune"
-      || /^\/memories(?:\/|$)/.test(value.path) || value.path === "/memory/index/rebuild")
+      || /^\/memories(?:\/|$)/.test(value.path) || value.path === "/memory/index/rebuild"
+      || platformReceipt(value.path, "body" in value ? value.body : undefined))
     && "method" in value && typeof value.method === "string" && ["POST", "PUT", "PATCH", "DELETE"].includes(value.method)
     && (!("body" in value) || typeof value.body === "string");
 }

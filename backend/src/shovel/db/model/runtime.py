@@ -7,7 +7,7 @@ from typing import Any
 import sqlalchemy as sa
 from sqlalchemy.orm import Mapped, mapped_column
 
-from shovel.db.base import Base, JSONDict, JSONList, new_id, now_ts
+from shovel.db.base import Base, JSONDict, JSONList, NullableJSONDict, new_id, now_ts
 
 
 class Operation(Base):
@@ -28,6 +28,38 @@ class Operation(Base):
     started_at: Mapped[int | None] = mapped_column(sa.Integer)
     finished_at: Mapped[int | None] = mapped_column(sa.Integer)
     attempts: Mapped[int] = mapped_column(sa.Integer, default=0, nullable=False)
+    capability_version_id: Mapped[str | None] = mapped_column(
+        sa.ForeignKey("capability_version.id", ondelete="RESTRICT")
+    )
+    root_execution_id: Mapped[str | None] = mapped_column(sa.ForeignKey("operation.id", ondelete="RESTRICT"))
+    parent_execution_id: Mapped[str | None] = mapped_column(
+        sa.ForeignKey("operation.id", ondelete="RESTRICT")
+    )
+    correlation_id: Mapped[str | None] = mapped_column(sa.Text)
+    child_key: Mapped[str | None] = mapped_column(sa.Text)
+    execution_data: Mapped[dict[str, Any] | None] = mapped_column(NullableJSONDict)
+    workflow_data: Mapped[dict[str, Any] | None] = mapped_column(NullableJSONDict)
+    execution_control: Mapped[dict[str, Any]] = mapped_column(
+        JSONDict, default=dict, server_default="{}", nullable=False
+    )
+    execution_usage: Mapped[dict[str, Any]] = mapped_column(
+        JSONDict, default=dict, server_default="{}", nullable=False
+    )
+    row_version: Mapped[int] = mapped_column(sa.Integer, default=0, server_default="0", nullable=False)
+    claim_token: Mapped[str | None] = mapped_column(sa.Text)
+    execution_deadline: Mapped[float | None] = mapped_column(sa.Float)
+
+    __table_args__ = (
+        sa.Index("uq_execution_child", "parent_execution_id", "child_key", unique=True),
+        sa.Index("idx_execution_root", "root_execution_id"),
+        sa.Index("idx_execution_correlation", "correlation_id"),
+        sa.Index(
+            "idx_execution_deadline",
+            "state",
+            "execution_deadline",
+            sqlite_where=sa.text("execution_data IS NOT NULL"),
+        ),
+    )
 
 
 class Conversation(Base):

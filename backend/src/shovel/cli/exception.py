@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import os
+import traceback
 from typing import NoReturn
 
+import structlog
 import typer
+from pydantic import ValidationError
 from rich.markup import escape
 
 from shovel.cli.ui.console import console
@@ -42,6 +45,9 @@ class CliExceptionHandler:
         self,
         exc: Exception,
     ) -> NoReturn:
+        if isinstance(exc, ValidationError):
+            console.error("Invalid command parameters. Check structured IDs, versions and JSON; see --help.")
+            raise typer.Exit(ExitCodes.GENERAL_ERROR)
 
         if isinstance(
             exc,
@@ -74,6 +80,14 @@ class CliExceptionHandler:
         self,
         exc: Exception,
     ) -> NoReturn:
+        structlog.get_logger("shovel.cli").error(
+            "cli.internal_failure",
+            error_type=type(exc).__name__,
+            frames=[
+                {"function": frame.name, "line": frame.lineno}
+                for frame in traceback.extract_tb(exc.__traceback__)
+            ],
+        )
 
         console.error("An unexpected error occurred.")
 

@@ -31,6 +31,7 @@ from .errors import (
 from .memory_config import MemorySettings
 from .model_settings import DefaultAgentModelSettings
 from .performance_config import PerformanceSettings
+from .platform_config import PlatformSettings
 from .zvec_config import ZvecSettings
 
 _READ_ENVIRONMENT: ContextVar[bool] = ContextVar("shovel_read_environment", default=True)
@@ -159,6 +160,7 @@ class AppSettings(BaseSettings):
 
     #: 原生记忆: SQLite 权威数据与独立的可重建 Zvec 索引。
     memory: MemorySettings = Field(default_factory=MemorySettings)
+    platform: PlatformSettings = Field(default_factory=PlatformSettings)
 
     @classmethod
     def settings_customise_sources(

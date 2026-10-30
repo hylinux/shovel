@@ -1,7 +1,8 @@
 "use client";
 
 import { useCallback, useEffect, useReducer, useRef, useState } from "react";
-import { forgetPendingRequest, makePendingRequest, savePendingRequest, type PendingRequest } from "./request-recovery";
+import { forgetPendingRequest, makePendingRequest, pendingRequests, savePendingRequest, type PendingRequest } from "./request-recovery";
+import { isPlatformRun } from "./platform-types";
 import { runAgentMessage, type AgentMessageInput } from "./agent-client";
 import { mergeSessionHistory } from "./session-history";
 import { startQueryPolling } from "./query-polling";
@@ -135,7 +136,8 @@ export function useAction() {
     controller.current = request;
     setBusy(true); setError(""); setNotice("");
     const serialized = body === undefined ? undefined : JSON.stringify(body);
-    const durable = path.startsWith("/resources") || path === "/index/cleanup" || path === "/history/prune"
+    const platformRun = path === "/platform/commands" && isPlatformRun(body);
+    const durable = platformRun || path.startsWith("/resources") || path === "/index/cleanup" || path === "/history/prune"
       || path === "/memory/index/rebuild" || (path.startsWith("/memories") && method !== "DELETE");
     let submitted = false;
     try {
@@ -143,7 +145,9 @@ export function useAction() {
         const status = await api<Status>("/status", { signal: request.signal });
         if (!pending.current || pending.current.path !== path || pending.current.method !== method
           || pending.current.body !== serialized || pending.current.workspace !== status.workspace_id) {
-          pending.current = await makePendingRequest(status.workspace_id, path, method, serialized);
+          pending.current = (platformRun ? pendingRequests(status.workspace_id).find((row) =>
+            row.path === path && row.method === method && row.body === serialized) : undefined)
+            || await makePendingRequest(status.workspace_id, path, method, serialized);
         }
         savePendingRequest(pending.current);
       }
@@ -160,7 +164,9 @@ export function useAction() {
         forgetPendingRequest(pending.current.key); pending.current = null;
       }
       if (!request.signal.aborted) setError(errorText(error) + (submitted && durable && pending.current
-        ? ` Outcome unknown. Recovery ID: ${pending.current.id}. Find it in Background tasks before submitting again.` : ""));
+        ? platformRun
+          ? ` Outcome unknown. Request key: ${pending.current.key}. Find it in Activity before submitting again.`
+          : ` Outcome unknown. Recovery ID: ${pending.current.id}. Find it in Background tasks before submitting again.` : ""));
     } finally {
       if (!request.signal.aborted) setBusy(false);
       controller.current = null;

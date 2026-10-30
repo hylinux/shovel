@@ -47,6 +47,8 @@ def process_settings(root: Path) -> AppSettings:
             "database": {"url": f"sqlite+aiosqlite:///{(root / 'runtime.db').as_posix()}"},
             "zvec": {"knowledge_path": str(root / "vectors"), "log_dir": str(root / "logs"), "dim": 4},
             "embedding": {"provider": "openai", "model": "process-test", "base_url": "http://unused.invalid"},
+            "agent": {"workspace_path": str(root / "workspace")},
+            "memory": {"index_path": str(root / "memory-vectors"), "dim": 4},
         }
     )
 

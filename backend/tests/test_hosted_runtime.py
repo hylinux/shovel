@@ -643,7 +643,22 @@ async def test_legacy_operation_migration_preserves_rows_and_is_repeatable(tmp_p
         async with create_async_session_factory(engine)() as session:
             row = await session.get(Operation, "legacy")
             assert row is not None and row.result == {"completed": 1} and row.request_key is None
-            assert list(await session.scalars(select(SchemaMigration.version))) == [1, 2, 3, 4, 5, 6]
+            assert list(await session.scalars(select(SchemaMigration.version))) == [
+                1,
+                2,
+                3,
+                4,
+                5,
+                6,
+                7,
+                8,
+                9,
+                10,
+                11,
+                12,
+                13,
+                14,
+            ]
     finally:
         await context.aclose()
 
@@ -1701,7 +1716,22 @@ async def test_existing_database_upgrade_and_fts_backfill(tmp_path: Path) -> Non
         await upgrade_database(engine)
         await upgrade_database(engine)
         async with create_async_session_factory(engine)() as session:
-            assert list(await session.scalars(select(SchemaMigration.version))) == [1, 2, 3, 4, 5, 6]
+            assert list(await session.scalars(select(SchemaMigration.version))) == [
+                1,
+                2,
+                3,
+                4,
+                5,
+                6,
+                7,
+                8,
+                9,
+                10,
+                11,
+                12,
+                13,
+                14,
+            ]
             assert await session.scalar(text("SELECT count(*) FROM chunk_search")) == 1
             assert (
                 await session.scalar(

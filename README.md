@@ -14,7 +14,7 @@ local storage does not make remote inference local.
 
 ## Current progress
 
-Current implementation as of **2026-10-29**:
+Current implementation as of **2026-10-30**:
 
 | Area | Implemented |
 | --- | --- |
@@ -22,13 +22,15 @@ Current implementation as of **2026-10-29**:
 | Knowledge / RAG | Local folders and classic Outlook, durable scans, parent/child chunks, SQLite FTS5, Zvec vectors, hybrid ranking, and numbered citations |
 | Native Memory | Separate history/summaries/facts, structured extraction, deduplication/consolidation, supersession, expiry, soft/hard deletion, provenance, scope isolation, bounded recall, and index recovery |
 | Workspace extensions | MAF Skills, MCP stdio/HTTP, read-only built-ins, and opt-in Python functions and child Agent/Workflow tools |
+| Capability platform | Immutable versions, one durable Execution engine, narrowing permissions, explicit approvals, trigger-agnostic Workflow V1 and interval/daily/event automation |
 | Web workbench | Expanded Chat session tree, persistent session rename/delete/history, Search Documents, Resources, Background tasks, and tabbed Settings |
 | Settings | Separate runtime, native Memory, MCP management, and editable Agent instructions tabs with automatic Agent restart |
 | Reliability | Durable Operations, idempotency receipts, cancellation/restart recovery, vector deletion Outboxes, and foreground-aware background work |
 | Distribution | Static Next.js export served by Python in production, bundled wheels, and installed-package smoke checks in CI |
 
 This is a **development-stage, loopback-only, single-owner runtime**, not a
-public multi-user service. Visual Agent/Workflow authoring, cron/watch scheduling,
+public multi-user service. The Capability platform includes a serial Workflow V1
+editor and interval/daily automation. Visual Agent authoring, cron/watch scheduling,
 Graph Memory, and automatic Procedural Memory learning are not implemented.
 Workspace Agent/Workflow tools are supported; they are not a complete multi-Agent
 management product. See the [long-term designs](#documentation) for future goals,
@@ -81,6 +83,8 @@ these addresses. Both services stop when either exits or the command is stopped.
 
 The sidebar exposes **Chat** with indented New Session/existing sessions,
 **Search Documents**, **Resources**, **Background tasks**, and **Settings**.
+The platform panels add **Proactive Services**, **Approval Center**, **Activity**,
+**Skills** and **Workflows**.
 MCP Server Management lives inside Settings, alongside native Memory and
 provider/performance status. Editing model/storage configuration still requires
 editing TOML or environment variables and restarting the Host.
@@ -652,6 +656,105 @@ arbitrary filesystem path. Raw resource credentials must not appear in queued
 config/payloads; use `identity_ref`. Model credentials remain in local
 configuration/environment variables and should not be committed.
 
+### Capability and Execution entry points
+
+The Main Agent, HTTP API and new CLI groups share `PlatformApplication` and the
+existing Capability, Invocation, Approval, Workflow and Proactive application
+services. New entry points never access ORM objects. Existing resource, scan and
+chat entry-point persistence remains legacy code; this is not a claim of global
+ORM-boundary convergence.
+
+Use `GET /api/v1/platform/capabilities`, `/executions`, `/proactive`, `/approvals`
+and `/interactions` to inspect state. `POST /api/v1/platform/commands` accepts a
+typed `PlatformCommand`; `/docs` describes its actions and fields. Invocation,
+manual service run and scheduled resume return **202 + the same Execution**.
+Pass a stable `request_key` (or `Idempotency-Key`) for invocations and manual runs.
+
+Publishing, enabling/resuming automation, approving/rejecting and providing input
+require two explicit requests: send the command with `"prepare": true`, review
+the returned preview, then resend that exact command with its
+`"confirmation_id"` and without `prepare`. Tickets are single-use, expire after
+five minutes, and become invalid when the relevant content/revision changes or
+the Host restarts. Approval/input commands require both `identifier` (the request
+ID) and `execution_id`. These confirmation tickets do not grant permissions.
+The Main Agent cannot issue or consume tickets: it only returns a structured
+`requires_confirmation` action for the user. Draft services are always disabled.
+Pause/disable stops future admissions, not already-created Executions.
+
+```powershell
+uv run shovel capability list
+uv run shovel capability search "research"
+uv run shovel skill versions <capability-id>
+uv run shovel workflow validate <capability-id> 1
+uv run shovel workflow publish <capability-id> 1
+uv run shovel --request-key my-workflow-run workflow run <capability-id> 1
+uv run shovel proactive explain <service-id>
+uv run shovel approval approve <approval-id> --execution-id <execution-id>
+uv run shovel execution show <execution-id>
+uv run shovel interaction input <interaction-id> --execution-id <execution-id> --response '"answer"'
+```
+
+CLI confirmation displays structured IDs, revision and content before prompting;
+there is no implicit publish/approval `--yes`. With a matching Web Host, commands
+use HTTP. Otherwise these new commands reuse the short-lived Generic Host, not
+a second Runtime; offline run waits for completion or suspension. Console
+notifications can accompany CLI output. `proactive explain` reports the latest
+durable Execution snapshot and current admission blockers; skipped events are
+not durable history.
+
+Permissions default to empty. Configure explicit exact permission pairs locally,
+then restart the Host; no API or Agent tool writes this authority:
+
+```toml
+[platform]
+user_id = "owner"
+agent_permissions = [{ action = "read", resource = "knowledge" }]
+
+[platform.security]
+user_grants = [{ action = "read", resource = "knowledge" }]
+platform_constraints = [{ action = "read", resource = "knowledge" }]
+allowed_side_effects = ["none"]
+preference = "MINIMUM_REQUIRED"
+```
+
+Effective permissions intersect grants, platform constraints, the caller's
+ceiling and all Capability/parent boundaries. `agent_permissions` further narrows
+Main Agent invocation; permission pairs are exact, not wildcard grants. No real
+external-write adapter is enabled by these entry points.
+
+The existing workbench includes **Proactive Services**, **Approval Center**,
+**Activity**, **Skills** and **Workflows**. These panels use the same platform API
+and confirmation previews as the CLI; the browser never grants permissions.
+`GET /api/v1/platform/options` supplies currently authorized published dependency
+options, and save/publish recheck the selection on the server.
+
+Service editing saves a disabled new revision; enabling it requires another
+explicit review. Per-service pause preserves its enabled flag. Global pause is
+persisted separately in workspace/user-scoped application settings: it blocks
+automatic Event/Schedule admission, preserves individual states, and allows
+manual Run Now. Global resume rechecks enabled targets and does not replay
+skipped events or missed schedule occurrences. Existing Executions, approvals
+and Execution timers continue while automation is paused.
+
+Skill Memory Access is read-only **Disabled** in V1: isolated tool-free Skills
+do not inherit Main Agent Memory or tools. Editors save drafts, validate them,
+and publish immutable versions; tests run only published versions through the
+normal durable Execution path and may call a configured model provider.
+The Workflow V1 designer provides the nine supported serial-DAG nodes and
+editable edges, schemas and declarative JSON mappings, not arbitrary scripts,
+external trigger nodes, parallelism or loops. Activity can reconcile interrupted
+browser runs using their original persisted request keys before resending.
+
+UI/API support preference and quiet-hours editing plus global automation control;
+current CLI/Main Agent tools expose only their documented individual-service and
+inspection actions, not every UI edit/global command. See the
+[implemented architecture](Documents/platform_architecture.md),
+[fifteen ADRs](Documents/platform_adrs.md) and
+[Phase 13 validation report](Documents/platform_validation.md). The report records
+five passing deterministic demos, real browser/package checks, and the remaining
+MCP dependency and whole-repository formatting baseline failures; it is not an
+all-green release claim.
+
 ## Reliable submissions and profile management
 
 All durable writes accept `Idempotency-Key` (1–128 ASCII letters/digits or
@@ -807,6 +910,9 @@ check: it must exercise the installed artifact, not the source environment.
 | [Complete Ollama configuration](Documents/settings.example.toml) | Chat, independent knowledge/Memory embeddings, SQLite and Zvec paths |
 | [Ollama Modelfile](Documents/shovel-chat-fast.Modelfile) | `shovel-chat-fast` model definition and creation command |
 | [Frontend workbench](frontend/README.md) | Navigation, AG-UI behavior, Settings, MCP and frontend development |
+| [Capability platform architecture](Documents/platform_architecture.md) | Implemented planes, models, permissions/approval, events/timers, persistence and migration boundaries |
+| [Capability platform ADRs](Documents/platform_adrs.md) | Fifteen architecture decisions, alternatives, consequences and compatibility |
+| [Phase 13 validation](Documents/platform_validation.md) | Five demos, final invariant matrix, verification results and remaining release blockers |
 | [Scan pipeline](Documents/scan_pipeline.md) | Ingestion, lifecycle, durable cleanup, DI and recovery contracts |
 | [Outlook integration](Documents/outlook_local.md) | Supported Outlook environment, source identity and indexing limits |
 | [Memory vector identity](Documents/db_base_memory_vector_id.md) | Deterministic IDs, lifecycle, authority checks and rebuild semantics |

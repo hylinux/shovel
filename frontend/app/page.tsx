@@ -9,8 +9,12 @@ import { Knowledge } from "./knowledge";
 import { SearchDocuments } from "./search";
 import { Settings } from "./settings";
 import { Feedback } from "./ui";
+import { ProactiveServices } from "./proactive";
+import { ApprovalCenter, ExecutionActivity } from "./platform-activity";
+import { CapabilityLibrary } from "./capabilities";
 
-const views = ["Resources", "Background tasks", "Search Documents", "Chat"] as const;
+const platformViews = ["Proactive Services", "Approval Center", "Activity", "Skills", "Workflows"] as const;
+const views = ["Resources", "Background tasks", "Search Documents", "Chat", ...platformViews] as const;
 type View = typeof views[number] | "Settings";
 const descriptions: Record<View, string> = {
   Resources: "Choose which local documents and Outlook mail Shovel can work with.",
@@ -18,10 +22,16 @@ const descriptions: Record<View, string> = {
   "Search Documents": "Find relevant passages in your indexed documents.",
   Chat: "Ask your documents. Keep the sources in view.",
   Settings: "Review providers, manage MCP servers and saved Memory.",
+  "Proactive Services": "Configure automation without putting triggers inside capabilities.",
+  "Approval Center": "Review exact actions and provide execution-bound input.",
+  Activity: "Inspect durable executions, frozen versions and decisions.",
+  Skills: "Create isolated Skill drafts and explicitly publish immutable versions.",
+  Workflows: "Design trigger-agnostic workflows with the V1 node palette.",
 };
 
 export default function Home() {
   const [view, setView] = useState<View>("Resources");
+  const [visited, setVisited] = useState<Set<string>>(new Set());
   const [sessionsOpen, setSessionsOpen] = useState(true);
   const [selectedSession, setSelectedSession] = useState("");
   const [sessionRevision, refreshSessions] = useReducer((value: number) => value + 1, 0);
@@ -34,6 +44,7 @@ export default function Home() {
       setSessionsOpen(view === "Chat" ? !sessionsOpen : true);
     }
     setView(item);
+    setVisited((current) => new Set(current).add(item));
   }
   function selectSession(identifier: string) {
     setSelectedSession(identifier);
@@ -46,7 +57,7 @@ export default function Home() {
         <Link href="/" className="brand" aria-label="Shovel home"><span className="brand-mark" aria-hidden="true">S</span>Shovel</Link>
         <p className="sidebar-caption">Personal Agent Platform</p>
         <nav className="main-navigation" aria-label="Main navigation">
-          {views.map((item, index) => <button key={item} aria-current={view === item ? "page" : undefined} aria-expanded={item === "Chat" ? showSessions : undefined} aria-controls={item === "Chat" ? "session-navigation" : undefined} onClick={() => navigate(item)}><span aria-hidden="true" className="nav-symbol">{["▤", "≡", "⌕", "◇"][index]}</span>{item}{item === "Chat" && <span className="nav-chevron" aria-hidden="true">{showSessions ? "⌄" : "›"}</span>}</button>)}
+          {views.map((item, index) => <button key={item} aria-current={view === item ? "page" : undefined} aria-expanded={item === "Chat" ? showSessions : undefined} aria-controls={item === "Chat" ? "session-navigation" : undefined} onClick={() => navigate(item)}><span aria-hidden="true" className="nav-symbol">{["▤", "≡", "⌕", "◇", "◷", "✓", "↗", "▧", "⌘"][index]}</span>{item}{item === "Chat" && <span className="nav-chevron" aria-hidden="true">{showSessions ? "⌄" : "›"}</span>}</button>)}
         </nav>
         <section id="session-navigation" className="session-navigation" aria-label="Chat sessions" hidden={!showSessions}>
           <SessionNavigation selected={selectedSession} active={view === "Chat"} revision={sessionRevision} onSelect={selectSession} onDeleted={() => { setSelectedSession(""); refreshSessions(); }} />
@@ -65,6 +76,13 @@ export default function Home() {
         {view === "Search Documents" && <SearchDocuments resources={resources.data?.items || []} status={status.data} />}
         {view === "Chat" && <Knowledge status={status.data} sessionId={selectedSession} onSessionChanged={refreshSessions} />}
         {view === "Settings" && <Settings status={status.data} />}
+        {platformViews.filter((item) => visited.has(item)).map((item) => <div key={item} className="platform-view" hidden={view !== item}>
+          {item === "Proactive Services" && <ProactiveServices active={view === item} />}
+          {item === "Approval Center" && <ApprovalCenter active={view === item} />}
+          {item === "Activity" && <ExecutionActivity active={view === item} />}
+          {item === "Skills" && <CapabilityLibrary kind="skill" active={view === item} />}
+          {item === "Workflows" && <CapabilityLibrary kind="workflow" active={view === item} />}
+        </div>)}
         <footer className="page-footer">Shovel · Local documents, connected knowledge</footer>
       </main>
     </div>

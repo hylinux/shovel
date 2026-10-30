@@ -14,9 +14,11 @@ from pydantic import SecretStr
 from shovel.config.settings import AppSettings
 from shovel.db.base import new_id
 from shovel.db.database import create_async_database_engine, create_async_session_factory
+from shovel.db.operation_repository import SQLiteOperationReader
 from shovel.runtime.errors import RuntimeFailure
 from shovel.runtime.hosting import build_cli_host, local_endpoint, resolve_runtime
 from shovel.runtime.locking import endpoint_file
+from shovel.runtime.operation_reads import OperationQueries, operation_view
 from shovel.runtime.operations import TERMINAL
 from shovel.runtime.requests import request_operation_id
 from shovel.runtime.schemas import CleanupInput, HistoryPruneInput, ProfileInput, ResourceInput, ScanInput
@@ -202,7 +204,6 @@ async def execute_command(
     secret: SecretStr | None = None,
     request_key: str | None = None,
 ) -> dict[str, Any]:
-    from shovel.runtime.api import operation_view
 
     body = dict(payload or {})
     if kind == "cleanup":
@@ -298,10 +299,6 @@ async def execute_command(
 async def manage_operation(
     settings: AppSettings, identifier: str, *, wait: bool = False, retry: bool = False
 ) -> dict[str, Any]:
-    from shovel.db.model.runtime import Operation
-    from shovel.runtime.api import operation_view
-    from shovel.runtime.errors import NotFound
-
     async with httpx.AsyncClient(timeout=30) as client:
         url = await _remote(settings, client)
         if url is not None:
@@ -327,11 +324,9 @@ async def manage_operation(
         context = create_async_database_engine(settings.database.url)
         engine = await anext(context)
         try:
-            async with create_async_session_factory(engine)() as session:
-                row = await session.get(Operation, identifier)
-                if row is None:
-                    raise NotFound("操作", identifier)
-                return operation_view(row)
+            return await OperationQueries(SQLiteOperationReader(create_async_session_factory(engine))).get(
+                identifier
+            )
         finally:
             await context.aclose()
     host, provider = build_cli_host(settings)
@@ -341,12 +336,29 @@ async def manage_operation(
         if retry:
             await runtime.operations.retry(identifier)
         while True:
-            row = await runtime.operations.get(identifier)
-            if not wait or row.state in TERMINAL:
-                return operation_view(row)
+            row = await runtime.operation_queries.get(identifier)
+            if not wait or row["state"] in TERMINAL:
+                return row
             if host.lifetime.stopping.is_set():
                 raise _disconnected(identifier)
             await asyncio.sleep(0.05)
     finally:
         host.lifetime.stop_application()
         await host.stop_async()
+
+
+async def list_operations(
+    settings: AppSettings,
+    *,
+    limit: int = 20,
+    state: str | None = None,
+) -> list[dict[str, Any]]:
+    context = create_async_database_engine(settings.database.url)
+    engine = await anext(context)
+    try:
+        return await OperationQueries(SQLiteOperationReader(create_async_session_factory(engine))).list(
+            limit=limit,
+            state=state,
+        )
+    finally:
+        await context.aclose()

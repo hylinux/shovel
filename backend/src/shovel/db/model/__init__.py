@@ -7,9 +7,18 @@
 
 from __future__ import annotations
 
+from .automation import ProactiveService
+from .capability import (
+    CapabilityDefinition,
+    CapabilityDependency,
+    CapabilityVersion,
+    CapabilityVersionAvailability,
+)
 from .config import Resource, ScanProfile, Schedule
 from .content import BlobRef, Chunk, Document, DocumentDerived
-from .execution import Job, JobEvent
+from .control import ExecutionWakeup
+from .execution import ExecutionAttempt, ExecutionStep, Job, JobEvent
+from .interaction import InputRequest, Interaction, Notification, NotificationDelivery
 from .knowledge import (
     Entity,
     EntityEdge,
@@ -38,11 +47,17 @@ from .retrieval import (
     SchemaMigration,
 )
 from .runtime import ChatMessage, Conversation, MemoryEpoch, Operation
+from .security import ApprovalRequest
 
 __all__ = [
     "AgentScope",
     "AppSetting",
+    "ApprovalRequest",
     "BlobRef",
+    "CapabilityDefinition",
+    "CapabilityDependency",
+    "CapabilityVersion",
+    "CapabilityVersionAvailability",
     "ChatMessage",
     "Chunk",
     "Conversation",
@@ -52,10 +67,15 @@ __all__ = [
     "Entity",
     "EntityEdge",
     "EvalCase",
+    "ExecutionAttempt",
+    "ExecutionStep",
+    "ExecutionWakeup",
     "FactDecision",
     "FactEvent",
     "FactMessage",
     "FactTask",
+    "InputRequest",
+    "Interaction",
     "Job",
     "JobEvent",
     "MemoryBelief",
@@ -66,7 +86,10 @@ __all__ = [
     "MemoryRevision",
     "MemoryWorking",
     "Mention",
+    "Notification",
+    "NotificationDelivery",
     "Operation",
+    "ProactiveService",
     "Resource",
     "RetrievalFeedback",
     "RetrievalLog",

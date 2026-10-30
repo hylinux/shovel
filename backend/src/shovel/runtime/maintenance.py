@@ -47,6 +47,7 @@ async def prune_history(runtime: Runtime, request: HistoryPruneInput, operation_
             await session.scalars(
                 select(Operation.id)
                 .where(
+                    Operation.capability_version_id.is_(None),
                     Operation.finished_at < cutoff,
                     Operation.request_key.is_(None),
                     Operation.state.in_(("succeeded", "completed_with_errors", "failed", "cancelled")),

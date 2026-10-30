@@ -16,6 +16,7 @@ from shovel.db.model.runtime import Operation
 from shovel.domain.enums import ErrorKind, JobState, LogLevel, ResourceState
 from shovel.exceptions.base import ShovelError
 from shovel.exceptions.resource import DuplicateResourceNameError
+from shovel.execution.domain import EXECUTION_KIND
 from shovel.pipeline.cleanup import IndexCleanupService
 from shovel.pipeline.embedder import build_embedder
 from shovel.pipeline.scan_service import ScanOutcome, ScanService
@@ -58,6 +59,8 @@ class OperationService:
         cancel_jobs: bool = False,
         initial_result: dict[str, Any] | None = None,
     ) -> Operation:
+        if kind == EXECUTION_KIND:
+            raise RuntimeFailure("Versioned capabilities must be submitted through InvocationService.")
         fingerprint = request_fingerprint(kind, payload, request_ref)
         async with self._submit_lock:
             previous = await self._replay(request_key, fingerprint)
@@ -298,6 +301,8 @@ class OperationService:
 
     async def retry(self, identifier: str) -> Operation:
         existing = await self.get(identifier)
+        if existing.capability_version_id is not None:
+            raise RuntimeFailure("Versioned executions cannot use legacy Operation retries.", status=409)
         if existing.kind.startswith("memory."):
             return await self.runtime.memory_tasks.retry(existing)
         async with self.runtime.sessions() as session:
@@ -323,7 +328,13 @@ class OperationService:
     async def recover(self) -> None:
         trace("operations.recovery.started")
         async with self.runtime.sessions() as session:
-            interrupted = list(await session.scalars(select(Operation).where(Operation.state == "running")))
+            interrupted = list(
+                await session.scalars(
+                    select(Operation).where(
+                        Operation.state == "running", Operation.capability_version_id.is_(None)
+                    )
+                )
+            )
             for operation in interrupted:
                 job = await session.get(Job, operation.job_id) if operation.job_id else None
                 interrupted_shutdown = (
@@ -406,17 +417,31 @@ class OperationService:
 
     async def run_once(self) -> bool:
         async with self.runtime.sessions() as session:
-            identifier = await session.scalar(
-                select(Operation.id)
-                .where(Operation.state == "queued", ~Operation.kind.like("memory.%"))
-                .order_by(Operation.queued_at, text("operation.rowid"))
-                .limit(1)
-            )
-            if identifier is None:
+            candidate = (
+                await session.execute(
+                    select(Operation.id, Operation.capability_version_id)
+                    .where(
+                        Operation.state == "queued",
+                        ~Operation.kind.like("memory.%"),
+                        Operation.parent_execution_id.is_(None),
+                    )
+                    .order_by(Operation.queued_at, text("operation.rowid"))
+                    .limit(1)
+                )
+            ).one_or_none()
+            if candidate is None:
                 return False
+            identifier, version_id = candidate
+            if version_id is not None:
+                await session.rollback()
+                return await self.runtime.execution_engine.run_once(identifier)
             claimed = await session.execute(
                 update(Operation)
-                .where(Operation.id == identifier, Operation.state == "queued")
+                .where(
+                    Operation.id == identifier,
+                    Operation.state == "queued",
+                    Operation.capability_version_id.is_(None),
+                )
                 .values(state="running", started_at=now_ts(), attempts=Operation.attempts + 1)
                 .returning(Operation.id)
             )

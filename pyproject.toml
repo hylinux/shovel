@@ -19,6 +19,8 @@ dependencies = [
     # 要同时支持 openai / azure / ollama 三种端点形状, 而 ollama 的批量
     # 只有原生 /api/embed 才有 —— SDK 反而挡在中间。见 pipeline/embedder.py
     "httpx>=0.28.1",
+    "jsonschema>=4.26,<5",
+    "referencing>=0.37,<1",
     # 资源凭据: 密钥存进操作系统凭据库, 数据库里只留一个引用字符串。
     # 没有可用后端时硬失败而不是退回明文 —— 见 services/credentials.py
     "keyring>=25.6.0",
@@ -34,6 +36,7 @@ dependencies = [
     "sqlalchemy>=2.0.51",
     "tomli-w>=1.2.0",
     "typer>=0.27.0",
+    "tzdata>=2025.2",
     "zvec>=0.7.0",
 ]
 

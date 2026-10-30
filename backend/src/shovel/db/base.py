@@ -11,6 +11,8 @@ from sqlalchemy import Dialect, MetaData
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 from sqlalchemy.types import TypeDecorator
 
+from shovel.domain.identity import new_id as new_id
+
 NAMING_CONVENTION = {
     "ix": "idx_%(column_0_N_label)s",
     "uq": "uq_%(table_name)s_%(column_0_N_name)s",
@@ -37,11 +39,6 @@ def now_ts() -> int:
     当前的unix epoch 秒 (UTC)
     """
     return int(time.time())
-
-
-def new_id(prefix: str) -> str:
-
-    return f"{prefix}_{uuid.uuid4().hex}"
 
 
 def chunk_vector_id(
@@ -164,6 +161,16 @@ class JSONDict(JSONEncoded):
 
     def empty_value(self) -> dict[str, Any]:
         return {}
+
+
+class NullableJSONDict(JSONDict):
+    cache_ok = True
+
+    def process_bind_param(self, value: Any, dialect: Dialect) -> str | None:
+        return None if value is None else super().process_bind_param(value, dialect)
+
+    def process_result_value(self, value: str | None, dialect: Dialect) -> Any:
+        return None if value is None else super().process_result_value(value, dialect)
 
 
 def Enum(enum_cls: type[enum.Enum], **kw: Any) -> sa.Enum:

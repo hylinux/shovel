@@ -23,7 +23,7 @@ from shovel.db.model.config import Resource, ScanProfile
 from shovel.db.model.content import Chunk, Document
 from shovel.db.model.execution import Job, JobEvent
 from shovel.db.model.retrieval import DeletionOutbox
-from shovel.db.model.runtime import ChatMessage, Conversation, Operation
+from shovel.db.model.runtime import ChatMessage, Conversation
 from shovel.domain.enums import ResourceState
 from shovel.exceptions.base import ShovelError
 from shovel.exceptions.resource import (
@@ -36,6 +36,8 @@ from shovel.runtime.agent_instructions import AgentInstructionsView
 from shovel.runtime.diagnostics import DevelopmentRequestLogging, trace
 from shovel.runtime.errors import NotFound, RuntimeFailure
 from shovel.runtime.hosting import resolve_runtime
+from shovel.runtime.operation_reads import operation_view
+from shovel.runtime.platform_api import platform_router
 from shovel.runtime.schemas import (
     AgentInstructionsInput,
     CleanupInput,
@@ -116,26 +118,6 @@ def resource_view(resource: Resource) -> dict[str, Any]:
             "last_verified_at",
             "created_at",
             "updated_at",
-        )
-    }
-
-
-def operation_view(operation: Operation) -> dict[str, Any]:
-    return {
-        name: getattr(operation, name)
-        for name in (
-            "id",
-            "kind",
-            "request_key",
-            "state",
-            "resource_id",
-            "job_id",
-            "result",
-            "error",
-            "queued_at",
-            "started_at",
-            "finished_at",
-            "attempts",
         )
     }
 
@@ -567,18 +549,18 @@ def configure_api(
         state: str | None = None,
         resource_id: str | None = None,
     ) -> dict[str, Any]:
-        statement = select(Operation).order_by(Operation.queued_at.desc(), Operation.id)
-        if state is not None:
-            statement = statement.where(Operation.state == state)
-        if resource_id is not None:
-            statement = statement.where(Operation.resource_id == resource_id)
-        async with rt.sessions() as session:
-            rows = await session.scalars(statement.limit(limit).offset(offset))
-            return {"items": [operation_view(row) for row in rows]}
+        return {
+            "items": await rt.operation_queries.list(
+                limit=limit,
+                offset=offset,
+                state=state,
+                resource_id=resource_id,
+            )
+        }
 
     @router.get("/operations/{identifier}")
     async def operation(identifier: str, rt: RuntimeDependency) -> dict[str, Any]:
-        return operation_view(await rt.operations.get(identifier))
+        return await rt.operation_queries.get(identifier)
 
     @router.post("/operations/{identifier}/retry", status_code=202)
     async def retry(identifier: str, rt: RuntimeDependency) -> dict[str, Any]:
@@ -866,6 +848,7 @@ def configure_api(
         return {"deleted": True}
 
     app.include_router(router)
+    app.include_router(platform_router(current_runtime))
 
     @app.api_route(
         "/api/{path:path}",

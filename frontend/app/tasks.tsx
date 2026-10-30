@@ -54,7 +54,7 @@ function RecoveryRequests({ refresh }: { refresh: () => void }) {
   async function load() {
     try {
       const status = await api<Status>("/status");
-      const rows = pendingRequests(status.workspace_id);
+      const rows = pendingRequests(status.workspace_id).filter((row) => row.path !== "/platform/commands");
       setRequests(rows); setError(""); setNotice(rows.length ? "" : "No interrupted browser requests found.");
     } catch (error) { setError(errorText(error)); }
   }

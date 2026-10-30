@@ -4,6 +4,7 @@ import os
 
 import typer
 
+from shovel.cli.commands import platform
 from shovel.cli.commands.config import app as config_app
 from shovel.cli.commands.history import app as history_app
 from shovel.cli.commands.init import app as init_app
@@ -85,3 +86,10 @@ app.add_typer(
 app.add_typer(operation_app, name="operation", help="Inspect and recover durable background operations.")
 app.add_typer(profile_app, name="profile", help="Manage persisted scan profiles.")
 app.add_typer(history_app, name="history", help="Explicitly prune terminal task history.")
+app.add_typer(platform.capability, name="capability", help="Discover registered capabilities.")
+app.add_typer(platform.skill, name="skill", help="Inspect, validate and explicitly publish Skills.")
+app.add_typer(platform.workflow, name="workflow", help="Validate, publish and run Workflows.")
+app.add_typer(platform.proactive, name="proactive", help="Manage Proactive Services.")
+app.add_typer(platform.approval, name="approval", help="Review structured Execution approvals.")
+app.add_typer(platform.execution, name="execution", help="Inspect and control durable Executions.")
+app.add_typer(platform.interaction, name="interaction", help="Inspect and explicitly answer input requests.")

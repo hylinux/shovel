@@ -33,6 +33,7 @@ from agent_framework.openai import OpenAIChatCompletionClient
 from openai import APIError, AsyncAzureOpenAI, AsyncOpenAI
 
 from shovel.config.model_settings import DefaultAgentModelSettings, ModelProviderType
+from shovel.platform.agent_tools import agent_tools
 from shovel.runtime.agent_extensions import AgentExtensions
 from shovel.runtime.agent_instructions import BUILTIN_INSTRUCTIONS as SYSTEM
 from shovel.runtime.agent_instructions import (
@@ -560,7 +561,13 @@ class ShovelAgent:
             client=client,
             name="shovel",
             instructions=self.instructions,
-            tools=[knowledge.search, list_resources, list_extensions, *self.extensions.tools],
+            tools=[
+                knowledge.search,
+                list_resources,
+                list_extensions,
+                *agent_tools(self.runtime.platform),
+                *self.extensions.tools,
+            ],
             context_providers=providers,
             middleware=[
                 ContextBudgetMiddleware(

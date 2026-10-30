@@ -1,0 +1,16 @@
+from typing import Protocol
+
+from shovel.capability.domain import CapabilityDefinition, CapabilityKind, CapabilityScope, CapabilityVersion
+from shovel.execution.domain import Execution
+from shovel.platform.domain import ExecutionTiming
+from shovel.security.domain import ApprovalRequest
+
+
+class PlatformQueries(Protocol):
+    async def capabilities(
+        self, scope: CapabilityScope, kind: CapabilityKind | None, query: str
+    ) -> list[CapabilityDefinition]: ...
+    async def versions(self, scope: CapabilityScope, identifier: str) -> list[CapabilityVersion]: ...
+    async def executions(self, scope: CapabilityScope, service_id: str | None = None) -> list[Execution]: ...
+    async def approvals(self, scope: CapabilityScope) -> list[ApprovalRequest]: ...
+    async def timings(self, scope: CapabilityScope, identifiers: list[str]) -> dict[str, ExecutionTiming]: ...

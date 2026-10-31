@@ -191,6 +191,8 @@ MAF 客户端复用现有 provider 创建逻辑，但主 Agent 和提取器分�
 - 索引信息：记录关联的 `model_version`，ORM 行另保存 `vector_state`。
 
 `provenance` 保存来源类型、源会话、源消息、原文 evidence 和提取器版本。
+新来源还保存 Host 确定的 `asserted_at`（UTC Unix 秒）：自动提取使用源消息时间，
+排队管理写入使用 Operation 入队时间，不以模型完成时间替代用户断言时间。
 正常重复归并最多保留最近 20 条不同来源项；当前默认提取器版本是 `native-v1`。
 这是来源追溯，不是无限增长的完整审计日志。
 
@@ -352,6 +354,9 @@ output       = memory_candidates JSON Schema
 ### 7.4 第三层：结构化输出约束
 
 一次最多 10 个候选，额外字段被拒绝。候选包含：
+每次请求的 evidence JSON Schema 枚举由原始用户文本及有界原文片段生成，
+而不是让模型自由改写证据。若供应商仍返回不在源消息中的 evidence，整批进入显式失败/
+重试流程，不会成功提交一个悄悄缺少职业的部分结果。Schema 同样计入提取上下文预算。
 
 ```json
 {
@@ -371,8 +376,18 @@ output       = memory_candidates JSON Schema
 
 自动输出类型只有 `semantic` 和 `episodic`，没有 `procedural`。
 谓词只接受：
-`prefers`、`dislikes`、`uses`、`works_at`、`has_role`、`has_timezone`、
+`prefers`、`dislikes`、`uses`、`works_at`、`has_name`、`has_role`、`has_timezone`、
 `has_language`、`has_goal`、`has_constraint`、`decides`、`knows_about`。
+
+“请记住”不会使其中明确自述的事实失去提取资格；一条消息中的独立事实分别提取。
+例如“记住我的名字叫 Mike，我是一位资深的 Java 程序员”分别生成
+`has_name / user.name` 和 `has_role / user.occupation` 候选，职业保留资历与专业方向。
+它们默认写入跨 Session 的 agent Scope，而不是只保留在原 Session 的历史中。
+回答声称“记住了”仍不代表后台提取与索引已完成。
+姓名、职业、时区、语言的用户属性在程序层规范为 semantic 和稳定 topic，
+避免模型把稳定职业误分类为事件而丢失结构化属性。
+成功提交后，核心用户属性可由 SQLite 直接跨 Session 读取；
+其他事实的语义召回仍需要 `[memory.embedder]` 和可用索引。
 
 自动候选 schema 当前不输出 `expires_at` 或 `occurred_at`。
 事件记录未提供事件时刻时使用写入时刻；不能把它理解为已实现自然语言日期解析。
@@ -381,12 +396,14 @@ output       = memory_candidates JSON Schema
 
 `admissible()` 要求：
 
-- 文本去除首尾空白后长度为 8～1500 个字符。
+- 文本去除首尾空白后长度为 1～1500 个字符；短姓名同样是合法事实。
 - 置信度达到 `memory.min_confidence`，且置信度和重要性取值合法。
 - evidence 非空，并且是源用户消息的**精确子串**。
 - 来源与候选相关字段不匹配凭据规则；来源不匹配外部引用规则。
 - 不自动接受 procedural。
 - `replaces=true` 时，evidence 还必须包含可识别的明确纠正/选择表达。
+  模型误报的纠正标志会被关闭并记录计数警告；其余校验合法的自述仍可新增，
+  不能因错误标志整条丢弃，也不能据此 supersede 旧记录。
 
 模型无效 JSON、额外字段、格式错误等会使任务进入显式失败/重试流程。
 合法候选被策略排除则可以得到空结果并正常提交成功回执。
@@ -396,7 +413,9 @@ output       = memory_candidates JSON Schema
 
 ### 8.1 精确或规范化重复
 
-在同一写入 Scope 和类型中，若 fingerprint 相同，或规范化后的文本相同：
+在同一写入 Scope 和类型中，semantic 事实按结构化 fingerprint 去重；
+episodic / procedural 还允许规范化后的正文相同。
+两个 semantic 候选即使复用整条消息作为正文，也不能仅因正文相同就合并姓名和职业。
 
 - 复用已有 active 记录，不创建另一条。
 - 置信度和重要性取现有值与新值的较大者。
@@ -470,8 +489,8 @@ stateDiagram-v2
 忘记操作把权威状态改为 deleted，同时持久化向量删除意图。
 即使向量清理尚未运行，SQLite 复核也会阻止召回。
 
-保留的 deleted fingerprint/正文作为 tombstone，阻止同一写入 Scope 中的
-精确/规范化同一事实被再次整理激活。
+保留的 deleted fingerprint（事件/程序还比较规范化正文）作为 tombstone，
+阻止同一写入 Scope 中的同一事实被再次整理激活。
 它不是对所有未来自然语言改写的永久语义封禁。
 
 ### 9.3 硬删除
@@ -501,6 +520,20 @@ stateDiagram-v2
 
 ### 10.1 召回流程
 
+核心用户属性先走独立的 SQLite 查询：只读取当前可见 Scope 内
+`subject=user`、active、未过期的 `has_name`、`has_role`、`has_timezone`、
+`has_language`。窗口查询按最新来源的断言时间，为每个属性投影最近的有效记录；
+旧来源没有该字段时读取仍存在的源消息时间，最后回退到记录时间。
+重复事实追加的新来源也参与排序，不改变原记录创建时间。最多四种属性，
+不全量加载事实或旧 Session 历史，也不依赖相似度或向量模型版本。
+这只是读取投影，不改写其他 active 历史记录或取代显式纠正生命周期。
+回到旧 Session 时，比其历史断言更新的已提交属性优先；尚未提交的新断言
+仍保留历史回答路径，延迟完成的旧提取不能被误当作更新的用户断言。
+核心属性只按结构化身份去重，不采用模型建议的语义合并覆盖新值；
+例如旧的泛化职业不能吞掉新声明的资深 Java 职业。
+
+其余事实保留以下语义路径：
+
 1. 使用独立 `[memory.embedder]` 向量化当前问题。
 2. Zvec 按 workspace、user、Scope、agent/session 和模型版本过滤。
 3. 取最多 `memory.max_items × 4` 个候选。
@@ -508,7 +541,8 @@ stateDiagram-v2
 5. 应用 `memory.min_similarity` 门槛。
 6. 按 ID 回到 SQLite 读取当前记录。
 7. 复核归属、类型、revision、模型版本、active 状态和有效期。
-8. 对通过复核的记录排序、按字符与条数预算选择，更新访问统计。
+8. 核心属性优先，其余通过复核的记录按分数排序；统一按字符与条数预算选择，
+   更新访问统计。向量命中的旧核心属性不能绕过当前 SQLite 属性投影。
 
 残留向量、过时 revision、旧模型向量和已删除记录不能单凭向量命中进入上下文。
 
@@ -538,6 +572,13 @@ score =
 召回上下文只携带最后一条来源中的 `source_kind`、`conversation_id`、`message_id`，
 不把完整 evidence 历史重复发送给聊天模型。
 管理列表可以显示更完整的 provenance。
+semantic 召回同时携带 subject / predicate / object。主 Agent 再投影为
+ID、正文、类型和这些结构化属性，不让管理用时间戳与来源元数据挤占事实预算。
+用户属性不是文档引用，资料中的账号、人名或路径不能替代当前用户身份。
+文档/摘要参考与长期用户 Memory 分成两条数据消息；长期 Memory 紧邻本轮问题，
+明确标注跨 Session 来源，避免大段文档把用户背景埋在同一份参考 JSON 中。
+这些参考使用 user 数据角色，不占用 system 指令角色；只有最后一条消息是本轮用户请求，
+事实提取仍只读取原始用户消息，不读取 Host 注入的数据。
 
 应用层选中记录后增加访问次数，随后主 Agent 还会执行一轮更紧的总预算筛选；
 因此访问次数代表应用层选中，不证明模型最终使用或引用了该事实。
@@ -545,8 +586,8 @@ score =
 ### 10.4 没有 embedder 或索引故障
 
 没有 `[memory.embedder]` 时，SQLite 保存、列表和生命周期仍可使用，
-但不会改用全量加载或关键词 Memory 召回。
-索引/embedding 发生已处理的错误时，Runtime 记录类型化错误、返回空召回，
+核心用户属性的有界读取仍可用，但不会改用全量加载或关键词 Memory 召回。
+索引/embedding 发生已处理的错误时，Runtime 记录类型化错误、保留核心属性读取，
 并向聊天结果附加语义记忆不可用/恢复中的警告。
 
 这是一条明确报告的降级路径，不是伪造召回成功，也不丢弃权威事实。
@@ -554,6 +595,14 @@ score =
 ## 11. 主 Agent 的上下文装配
 
 `ShovelContextProvider.before_run()` 是 Memory 和聊天接合的主要入口。
+纯姓名、职业、时区、语言及已识别的用户背景询问，在启用 Memory 且无显式文档检索要求时，
+先由 `ShovelAgent.profile_response()` 有界读取 SQLite 核心属性并确定性展示。
+这类查询不是重新要求生成模型猜测事实；同样发送标准 AG-UI 文本事件，保存回答后才结束 Run，
+不把问题再当作新事实提取。字段缺失明确显示没有可用记录，不推断文档路径里的用户名。
+若当前 Session 有新自述，而对应长期记录尚不能用该自述的 provenance 确认提交，
+则仍走主 Agent 的历史回答路径，不能用旧资料覆盖尚在提取中的新信息。
+混合自述/任务、显式资源范围和文档查询仍使用完整 Agent；没有新增 Session 模式或关闭工具。
+已识别的纯背景询问不自动检索无关文档，其他主 Agent 请求的上下文流程如下。
 
 ```text
 初始预算 B =
@@ -889,7 +938,7 @@ SQLite 事实、原始历史和管理 API 返回的内容并非加密保险箱�
 | --- | --- | --- |
 | `[model]` | 主 Agent 对话，默认也作为提取/摘要模型配置来源 | 不能正常聊天 |
 | `[memory.llm]` | 可选的专用提取/摘要模型 | 整组回退到 `[model]` |
-| `[memory.embedder]` | Memory 事实与问题的语义向量 | 不提供长期语义召回，SQLite 管理仍可用 |
+| `[memory.embedder]` | Memory 事实与问题的语义向量 | 无语义召回，SQLite 管理与核心用户属性读取仍可用 |
 | `[embedding]` | RAG 文档和查询向量 | 自动检索可走关键词，不等于禁用 Memory |
 
 `[memory.llm]` 是独立模型配置对象，不是逐字段继承 `[model]`。

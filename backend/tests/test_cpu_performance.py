@@ -22,7 +22,7 @@ from test_knowledge_baseline import baseline_runtime, index_corpus, isolated_set
 @pytest.mark.skipif(
     os.environ.get("SHOVEL_RUN_CPU_BENCHMARK") != "1", reason="Explicit local CPU benchmark opt-in required"
 )
-async def test_local_cpu_mode_and_context_comparison(tmp_path: Path) -> None:
+async def test_local_cpu_context_comparison(tmp_path: Path) -> None:
     path = os.environ.get("SHOVEL_CPU_CONFIG")
     assert path, "Set SHOVEL_CPU_CONFIG to the explicitly selected settings.toml."
     configured = AppSettings.load(path)
@@ -57,55 +57,51 @@ async def test_local_cpu_mode_and_context_comparison(tmp_path: Path) -> None:
             await runtime.chat.warm_model()
             for profile in ("default", "compact"):
                 runtime.settings.performance.context_profile = profile
-                for mode in ("agent", "chat"):
-                    first_texts: list[float] = []
-                    totals: list[float] = []
-                    output_sizes: list[int] = []
-                    for _ in range(samples):
-                        async with runtime.sessions() as session:
-                            conversation = Conversation()
-                            session.add(conversation)
-                            await session.commit()
-                        await runtime.chat.send(
-                            conversation.id,
-                            MessageInput(
-                                content="I am designing a local desktop assistant. Keep answers concise.",
-                                interaction_mode="chat",
-                                memory_enabled=False,
-                            ),
-                        )
-                        started = perf_counter()
-                        first_text: float | None = None
-
-                        async def receive(event: BaseEvent) -> None:
-                            nonlocal first_text
-                            if first_text is None and event.type == EventType.TEXT_MESSAGE_CONTENT:
-                                first_text = perf_counter() - started
-
-                        answer = await runtime.chat.send(
-                            conversation.id,
-                            MessageInput(
-                                content="解释本地知识库的离线备份和恢复步骤。",
-                                interaction_mode=mode,
-                                memory_enabled=False,
-                            ),
-                            on_event=receive,
-                        )
-                        totals.append((perf_counter() - started) * 1000)
-                        assert first_text is not None and answer.state == "completed"
-                        first_texts.append(first_text * 1000)
-                        output_sizes.append(len(answer.content))
-                    report.append(
-                        {
-                            "profile": profile,
-                            "mode": mode,
-                            "samples": samples,
-                            "first_text_p50_ms": median(first_texts),
-                            "first_text_p95_ms": sorted(first_texts)[math.ceil(samples * 0.95) - 1],
-                            "durable_p50_ms": median(totals),
-                            "durable_p95_ms": sorted(totals)[math.ceil(samples * 0.95) - 1],
-                            "output_chars": output_sizes,
-                            "memory_enabled": False,
-                        }
+                first_texts: list[float] = []
+                totals: list[float] = []
+                output_sizes: list[int] = []
+                for _ in range(samples):
+                    async with runtime.sessions() as session:
+                        conversation = Conversation()
+                        session.add(conversation)
+                        await session.commit()
+                    await runtime.chat.send(
+                        conversation.id,
+                        MessageInput(
+                            content="I am designing a local desktop assistant. Keep answers concise.",
+                            memory_enabled=False,
+                        ),
                     )
+                    started = perf_counter()
+                    first_text: float | None = None
+
+                    async def receive(event: BaseEvent) -> None:
+                        nonlocal first_text
+                        if first_text is None and event.type == EventType.TEXT_MESSAGE_CONTENT:
+                            first_text = perf_counter() - started
+
+                    answer = await runtime.chat.send(
+                        conversation.id,
+                        MessageInput(
+                            content="解释本地知识库的离线备份和恢复步骤。",
+                            memory_enabled=False,
+                        ),
+                        on_event=receive,
+                    )
+                    totals.append((perf_counter() - started) * 1000)
+                    assert first_text is not None and answer.state == "completed"
+                    first_texts.append(first_text * 1000)
+                    output_sizes.append(len(answer.content))
+                report.append(
+                    {
+                        "profile": profile,
+                        "samples": samples,
+                        "first_text_p50_ms": median(first_texts),
+                        "first_text_p95_ms": sorted(first_texts)[math.ceil(samples * 0.95) - 1],
+                        "durable_p50_ms": median(totals),
+                        "durable_p95_ms": sorted(totals)[math.ceil(samples * 0.95) - 1],
+                        "output_chars": output_sizes,
+                        "memory_enabled": False,
+                    }
+                )
     print("CPU_BENCHMARK=" + json.dumps(report))

@@ -11,7 +11,6 @@ export type AgentMessageInput = {
   resource_ids: string[];
   memory_enabled: boolean;
   search_mode: string;
-  interaction_mode?: "agent" | "chat";
 };
 
 export async function runAgentMessage(

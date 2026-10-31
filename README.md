@@ -270,6 +270,11 @@ character budget bounds history, retrieved evidence, and recalled Memory;
 it is not a tokenizer-based context-window guarantee. Lower it for small models.
 MAF uses Chat Completions with provider-adapted output limits; Ollama also receives
 `max_tokens` explicitly. Models requiring a different API need a matching adapter.
+If an Ollama Agent response ends empty without any actionable content or tool
+calls, Shovel attempts one tool-free answer recovery using the same context.
+The saved answer includes a recovery warning; existing tool calls are not replayed.
+If recovery also produces no text, the run remains failed and no Memory extraction
+is queued. Truncated responses are not retried through this recovery path.
 
 ### Other providers and retrieval
 
@@ -501,13 +506,10 @@ parallel rather than being unconditionally serialized with generation.
 Chat model warmup precedes index and embedding warmup; the index still opens
 once, safely off the event loop, and Agent retrieval can await that same handle.
 
-The composer defaults to **Agent**, retaining existing automatic retrieval and
-tools. Explicit **Chat** mode retains Memory/history/summary but skips automatic
-RAG, all tools, and workspace extension loading. Switch back to Agent for
-document questions and actions. The server enforces this for both message REST
-and AG-UI requests through `interaction_mode = "chat"`; omitted mode means
-`"agent"`. Chat rejects resource selection or an explicit non-auto search mode.
-This is not a safety-approval preference and cannot grant permissions.
+Every Session uses the full **Agent**, with automatic document retrieval, tools,
+workspace extensions, Memory, history and summaries. There is no Agent/Chat
+mode selector or `interaction_mode` request field. Existing permission and
+approval boundaries still apply; enabling tools never grants permissions.
 
 `context_profile = "compact"` is opt-in. It caps serialized source allocation at
 2500 characters, Memory at 1000, summary at 1000, and complete recent user-led
@@ -515,7 +517,7 @@ history groups at 4000, subject to the existing total budget. Instructions are
 retained, no synchronous summary model is introduced, and stored history is not
 deleted. Compact mode also reserves serialized tool-schema space and checks it
 at the final call; if tools exceed the budget, it fails explicitly rather than
-dropping tools. Use Chat, the default profile or a larger character budget.
+dropping tools. Use the default profile or a larger character budget.
 Smaller budgets can reduce continuity or evidence detail: validate
 quality before enabling them. The default profile and retrieval candidate count
 remain unchanged. RAG metadata is read in batches, and concurrent identical
@@ -552,8 +554,8 @@ committed test corpus, rejects remote/cloud model providers, and never loads
 your workspace extensions. It explicitly disables Memory per benchmark request
 to isolate model/context/RAG costs; Memory and background contention are covered
 by offline correctness tests, not measured by this comparison. It reports
-backend first-text and durable-completion P50/P95 and output size for Agent/Chat
-and default/compact profiles. Small samples are exploratory, not a speed or
+backend first-text and durable-completion P50/P95 and output size for the full
+Agent with default/compact profiles. Small samples are exploratory, not a speed or
 quality guarantee; compare citations and answers separately, and use the existing
 live knowledge baseline when appropriate.
 
@@ -608,7 +610,18 @@ Unsupported, low-confidence, credential-containing and ambiguously quoted inputs
 are conservatively excluded. These controls are not a guarantee against every
 form of prompt injection; configure trusted models and review saved facts.
 
-Active facts are recalled before the main Agent call, alongside independent RAG.
+Core user attributes (name, occupation, timezone, language) are read directly
+from visible, active, unexpired SQLite facts, independently of vector similarity.
+Recognized pure profile questions display committed values deterministically,
+including streaming and persisted answers, without asking the model to guess.
+Profiles use source assertion times, including reaffirmed duplicate facts, rather
+than delayed extraction completion times. Recent uncommitted session assertions
+retain the history path; newer committed updates from other Sessions take precedence.
+This is not a separate Session mode: mixed requests and explicit document scopes
+still use the full Agent and its tools.
+
+For other requests, active facts are recalled before the main Agent call,
+alongside independent RAG, with Memory separated from document reference data.
 Vector results must pass SQLite ownership, lifecycle, revision, embedding-version
 and expiry checks. Relevance is a gate before importance, confidence, recency and
 access-history ranking. Only selected facts enter the configured character/item

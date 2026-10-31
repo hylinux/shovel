@@ -88,7 +88,9 @@ class MemoryOwnership:
     user_id: Mapped[str] = mapped_column(sa.Text, nullable=False)
     scope_kind: Mapped[str] = mapped_column(sa.Text, default="agent", nullable=False)
     fingerprint: Mapped[str] = mapped_column(sa.Text, nullable=False, index=True)
-    provenance: Mapped[list[dict[str, str]]] = mapped_column(JSONList, default=list, nullable=False)
+    provenance: Mapped[list[dict[str, str | int | None]]] = mapped_column(
+        JSONList, default=list, nullable=False
+    )
 
 
 class NativeMemory(Base, ValidityMixin, SalienceMixin, MemoryOwnership):

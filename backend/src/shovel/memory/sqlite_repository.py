@@ -6,7 +6,7 @@ from collections.abc import Sequence
 from dataclasses import asdict, replace
 from typing import Any
 
-from sqlalchemy import and_, or_, select, text, true, update
+from sqlalchemy import and_, case, func, or_, select, text, true, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from shovel.db.base import now_ts
@@ -21,6 +21,7 @@ from shovel.db.model.memory import (
 from shovel.db.model.runtime import ChatMessage, MemoryEpoch, Operation
 from shovel.domain.enums import MemoryPredicate, MemorySource, MemoryValidityState, VectorState
 from shovel.memory.domain import (
+    PROFILE_TOPICS,
     ExtractionCancelled,
     IndexIntent,
     MemoryCandidate,
@@ -122,6 +123,63 @@ class SQLiteMemoryRepository:
     def __init__(self, sessions: async_sessionmaker[AsyncSession]) -> None:
         self.sessions = sessions
 
+    async def profile(self, scope: MemoryScope, *, limit: int) -> list[MemoryRecord]:
+        table = MemoryBelief
+        asserted_at = func.coalesce(
+            case(
+                (
+                    func.json_type(table.provenance, "$[#-1].asserted_at") == "integer",
+                    func.json_extract(table.provenance, "$[#-1].asserted_at"),
+                )
+            ),
+            select(ChatMessage.created_at)
+            .where(ChatMessage.id == func.json_extract(table.provenance, "$[#-1].message_id"))
+            .correlate(table)
+            .scalar_subquery(),
+            table.recorded_at,
+        )
+        ranked = (
+            select(
+                table.id,
+                asserted_at.label("asserted_at"),
+                func.row_number()
+                .over(partition_by=table.predicate, order_by=(asserted_at.desc(), table.id))
+                .label("position"),
+            )
+            .where(
+                _visible(table, scope),
+                table.subject == "user",
+                table.predicate.in_([MemoryPredicate(p) for p in PROFILE_TOPICS]),
+                table.validity_state == MemoryValidityState.ACTIVE,
+                or_(table.valid_until.is_(None), table.valid_until > now_ts()),
+            )
+            .subquery()
+        )
+        async with self.sessions() as session:
+            rows = await session.execute(
+                select(table, ranked.c.asserted_at)
+                .join(ranked, table.id == ranked.c.id)
+                .where(ranked.c.position == 1)
+                .order_by(ranked.c.asserted_at.desc(), table.id)
+                .limit(limit)
+            )
+            return [
+                replace(record(row, MemoryType.SEMANTIC), asserted_at=timestamp) for row, timestamp in rows
+            ]
+
+    async def assertion_time(self, scope: MemoryScope, source: str) -> int | None:
+        async with self.sessions() as session:
+            return await session.scalar(
+                select(ChatMessage.created_at)
+                .where(
+                    ChatMessage.conversation_id == scope.session_id,
+                    ChatMessage.role == "user",
+                    ChatMessage.content == source,
+                )
+                .order_by(ChatMessage.sequence.desc())
+                .limit(1)
+            )
+
     async def list_records(
         self,
         scope: MemoryScope,
@@ -175,6 +233,7 @@ class SQLiteMemoryRepository:
         async with self.sessions() as session:
             await session.execute(text("BEGIN IMMEDIATE"))
             operation = None
+            source = None
             if operation_id is not None:
                 operation = await session.get(Operation, operation_id)
                 epoch = await session.scalar(
@@ -238,7 +297,16 @@ class SQLiteMemoryRepository:
                     duplicate = next((r for r in rows if r.id == candidate.merge_with), None)
                     if duplicate is None or duplicate.validity_state != MemoryValidityState.ACTIVE:
                         raise ExtractionCancelled()
-                evidence = asdict(replace(provenance, evidence=candidate.evidence))
+                asserted_at = (
+                    source.created_at
+                    if source is not None
+                    else operation.queued_at
+                    if operation is not None
+                    else provenance.asserted_at
+                    if provenance.asserted_at is not None
+                    else now_ts()
+                )
+                evidence = asdict(replace(provenance, evidence=candidate.evidence, asserted_at=asserted_at))
                 if duplicate is not None and replace_id is None:
                     if duplicate.validity_state == MemoryValidityState.ACTIVE:
                         duplicate.confidence = max(duplicate.confidence, candidate.confidence)

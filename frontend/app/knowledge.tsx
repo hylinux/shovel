@@ -16,7 +16,6 @@ function Chat({ sessionId, status, onActivity }: { sessionId: string; status?: S
   const [before, setBefore] = useState<number>();
   const history = useQuery<MessagePage>(`/conversations/${segment(sessionId)}/messages?limit=100${before ? `&before=${before}` : ""}`);
   const [content, setContent] = useState("");
-  const [interactionMode, setInteractionMode] = useState<"agent" | "chat">("agent");
   const [pendingQuestion, setPendingQuestion] = useState("");
   const action = useAgentAction();
   const messagesRef = useRef<HTMLDivElement>(null);
@@ -39,7 +38,7 @@ function Chat({ sessionId, status, onActivity }: { sessionId: string; status?: S
     const runId = crypto.randomUUID();
     chatTrace("chat.submit", { run_id: runId, conversation_id: sessionId, input_chars: question.length });
     setPendingQuestion(question);
-    const response = await action.run(sessionId, { content: question, resource_ids: [], memory_enabled: true, search_mode: "auto", interaction_mode: interactionMode }, runId);
+    const response = await action.run(sessionId, { content: question, resource_ids: [], memory_enabled: true, search_mode: "auto" }, runId);
     chatTrace("chat.settled", { run_id: runId, conversation_id: sessionId, success: response });
     if (response) { setContent(""); setBefore(undefined); }
     onActivity();
@@ -63,11 +62,6 @@ function Chat({ sessionId, status, onActivity }: { sessionId: string; status?: S
   </div><form className="composer" onSubmit={submit}>
     {status && (!status.model_configured || !status.memory_configured) && <p className="warning">Configure Chat and Memory in Settings before sending a message.</p>}
     <Feedback error={action.error} />
-    <label htmlFor="interaction-mode">Mode</label>
-    <select id="interaction-mode" value={interactionMode} disabled={action.busy} onChange={(event) => setInteractionMode(event.target.value === "chat" ? "chat" : "agent")} aria-describedby="interaction-mode-description">
-      <option value="agent">Agent · Documents and tools</option><option value="chat">Chat · Memory, without documents or tools</option>
-    </select>
-    <p id="interaction-mode-description" className="muted">{interactionMode === "chat" ? "Chat keeps Memory but cannot search documents or perform actions. Switch to Agent to use tools." : "Agent can search accessible documents and use tools. Safety approval still applies."}</p>
     <label htmlFor="question">Message</label>
     <textarea ref={questionRef} id="question" value={content} onChange={(event) => setContent(event.target.value)} onKeyDown={(event) => {
       if (event.key === "Enter" && event.ctrlKey && !event.nativeEvent.isComposing) {

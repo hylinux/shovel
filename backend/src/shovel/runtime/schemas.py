@@ -34,7 +34,7 @@ class InputModel(BaseModel):
 
 
 class MemoryInput(InputModel):
-    text: str = Field(min_length=8, max_length=1500)
+    text: str = Field(min_length=1, max_length=1500)
     kind: Literal["semantic", "episodic", "procedural"] = "semantic"
     scope: Literal["user", "workspace", "agent", "session"] = "agent"
     session_id: str = Field(default="", max_length=200)
@@ -44,6 +44,7 @@ class MemoryInput(InputModel):
         "dislikes",
         "uses",
         "works_at",
+        "has_name",
         "has_role",
         "has_timezone",
         "has_language",
@@ -223,13 +224,6 @@ class MessageInput(InputModel):
     resource_ids: list[str] = Field(default_factory=list, max_length=200)
     memory_enabled: bool = True
     search_mode: SearchMode = "auto"
-    interaction_mode: Literal["agent", "chat"] = "agent"
-
-    @model_validator(mode="after")
-    def validate_interaction_mode(self) -> MessageInput:
-        if self.interaction_mode == "chat" and (self.resource_ids or self.search_mode != "auto"):
-            raise ValueError("Chat mode does not accept resource_ids or an explicit search_mode.")
-        return self
 
 
 class CredentialInput(InputModel):

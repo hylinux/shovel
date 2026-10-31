@@ -155,7 +155,7 @@ class MemoryService:
         except _INDEX_ERRORS as exc:
             self._index_error = type(exc).__name__
             self._log.warning("memory.retrieval.unavailable", error_type=self._index_error)
-            return []
+            return await self.application.retrieve(query, conversation_id, use_index=False)
 
     async def list(
         self,
@@ -240,12 +240,19 @@ class MemoryService:
                 related = []
                 self._index_error = type(exc).__name__
                 self._log.warning("memory.consolidation.index_unavailable", error_type=self._index_error)
-            await self.application.extract(
+            saved = await self.application.extract(
                 source,
                 Provenance("user_message", conversation_id, message_id),
                 operation_id=operation_id,
                 generation=generation,
                 related=related,
+            )
+            trace(
+                "memory.extraction.committed",
+                operation_id=operation_id,
+                count=len(saved),
+                semantic_count=sum(item.kind.value == "semantic" for item in saved),
+                episodic_count=sum(item.kind.value == "episodic" for item in saved),
             )
         finally:
             self._active = None

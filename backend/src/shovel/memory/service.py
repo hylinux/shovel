@@ -8,7 +8,10 @@ import time
 from collections.abc import Sequence
 from dataclasses import replace
 
+import structlog
+
 from shovel.memory.domain import (
+    PROFILE_TOPICS,
     MemoryRecord,
     MemoryScope,
     MemoryState,
@@ -16,6 +19,7 @@ from shovel.memory.domain import (
     Provenance,
     admissible,
     eligible_source,
+    explicit_correction,
     normalize,
 )
 from shovel.memory.ports import MemoryExtractor, MemoryRepository, MemoryVectorIndex
@@ -84,11 +88,24 @@ class MemoryService:
             if eligible_source(source)
             else []
         )
-        accepted = [
-            candidate for candidate in candidates if admissible(candidate, source, self.min_confidence)
-        ]
+        accepted = []
+        ignored_corrections = 0
+        for candidate in candidates:
+            if candidate.replaces and not explicit_correction(candidate.evidence):
+                ignored_corrections += 1
+                candidate = replace(candidate, replaces=False)
+            if not admissible(candidate, source, self.min_confidence):
+                continue
+            if candidate.subject == "user" and candidate.predicate in PROFILE_TOPICS:
+                candidate = replace(
+                    candidate, kind=MemoryType.SEMANTIC, topic=PROFILE_TOPICS[candidate.predicate]
+                )
+            accepted.append(candidate)
+        if ignored_corrections:
+            structlog.get_logger().warning("memory.extraction.correction_ignored", count=ignored_corrections)
         references = {r.id: r for r in related}
-        for candidate in accepted:
+        ignored_profile_merges = 0
+        for index, candidate in enumerate(accepted):
             if candidate.merge_with:
                 target = references.get(candidate.merge_with)
                 if (
@@ -100,6 +117,13 @@ class MemoryService:
                     or normalize(target.subject) != normalize(candidate.subject)
                 ):
                     raise ValueError("Extractor proposed an unsupported semantic merge.")
+                if candidate.subject == "user" and candidate.predicate in PROFILE_TOPICS:
+                    accepted[index] = replace(candidate, merge_with=None)
+                    ignored_profile_merges += 1
+        if ignored_profile_merges:
+            structlog.get_logger().warning(
+                "memory.extraction.profile_merge_ignored", count=ignored_profile_merges
+            )
         if any(
             c.predicate
             not in {
@@ -107,6 +131,7 @@ class MemoryService:
                 "dislikes",
                 "uses",
                 "works_at",
+                "has_name",
                 "has_role",
                 "has_timezone",
                 "has_language",
@@ -149,13 +174,19 @@ class MemoryService:
                 records.append(record)
         return records
 
-    async def retrieve(self, query: str, conversation_id: str = "") -> list[dict[str, object]]:
-        if self.index is None:
-            return []
+    async def retrieve(
+        self, query: str, conversation_id: str = "", *, use_index: bool = True
+    ) -> list[dict[str, object]]:
         scope = replace(self.scope, session_id=conversation_id)
-        hits = await self.index.search(query, scope, self.max_items * 4)
-        found: dict[str, tuple[MemoryRecord, float]] = {}
         now = int(time.time())
+        profile = await self.repository.profile(scope, limit=self.max_items)
+        found = {record.id: (record, rank(record, 1, now)) for record in profile}
+        profile_ids = set(found)
+        hits = (
+            await self.index.search(query, scope, self.max_items * 4)
+            if self.index is not None and use_index
+            else []
+        )
         for hit in hits:
             if hit.similarity < self.min_similarity:
                 continue
@@ -164,7 +195,9 @@ class MemoryService:
             except NotFound:
                 continue
             if (
-                record.kind != hit.kind
+                (record.subject == "user" and record.predicate in PROFILE_TOPICS)
+                or self.index is None
+                or record.kind != hit.kind
                 or record.revision != hit.revision
                 or record.model_version != self.index.model_version
                 or record.state != MemoryState.ACTIVE
@@ -176,8 +209,12 @@ class MemoryService:
                 found[hit.id] = (record, score)
         selected: list[dict[str, object]] = []
         identifiers = []
-        for record, _score in sorted(found.values(), key=lambda item: (-item[1], item[0].id)):
+        for record, _score in sorted(
+            found.values(), key=lambda item: (item[0].id not in profile_ids, -item[1], item[0].id)
+        ):
             entry = view(record)
+            if record.kind == MemoryType.SEMANTIC:
+                entry.update(subject=record.subject, predicate=record.predicate, object=record.object)
             entry["provenance"] = [
                 {
                     key: value

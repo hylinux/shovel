@@ -1113,6 +1113,223 @@ def streamed_completion(content: str) -> httpx.Response:
     )
 
 
+@pytest.mark.parametrize("stream", [False, True])
+@pytest.mark.parametrize("recovered", [False, True])
+async def test_ollama_empty_agent_response_has_one_tool_free_recovery(
+    runtime: Runtime,
+    api: httpx.AsyncClient,
+    stream: bool,
+    recovered: bool,
+) -> None:
+    from shovel.config.model_settings import ModelProviderType
+
+    runtime.settings.model.model_provider_type = ModelProviderType.OLLAMA
+    captured: list[dict[str, Any]] = []
+
+    def model(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        captured.append(body)
+        text = "Received your name and occupation." if len(captured) == 2 and recovered else ""
+        if stream:
+            return streamed_completion(text)
+        return httpx.Response(
+            200,
+            json={
+                "created": 1,
+                "choices": [{"message": {"role": "assistant", "content": text}, "finish_reason": "stop"}],
+            },
+        )
+
+    runtime.chat.agent._client = httpx.AsyncClient(transport=httpx.MockTransport(model))
+    conversation = (await api.post("/api/v1/conversations", json={})).json()["id"]
+    content = "Hi, remember: my name is Mike and I am a senior Java programmer."
+    response = (
+        await api.post(
+            "/api/v1/agent",
+            json={
+                "threadId": conversation,
+                "runId": "empty-ollama-test",
+                "messages": [{"id": "question", "role": "user", "content": content}],
+                "tools": [],
+                "context": [],
+                "state": {},
+                "forwardedProps": {"memory_enabled": True},
+            },
+        )
+        if stream
+        else await api.post(
+            f"/api/v1/conversations/{conversation}/messages",
+            json={"content": content, "memory_enabled": True},
+        )
+    )
+    assert len(captured) == 2
+    assert captured[0]["tools"]
+    assert not captured[1].get("tools") and "tool_choice" not in captured[1]
+    assert captured[1]["messages"] == captured[0]["messages"]
+    history = await runtime.chat.messages(conversation)
+    assert len(history) == 2
+    assert history[-1].state == ("completed" if recovered else "failed")
+    assert bool(history[-1].memory_operation_id) == recovered
+    if recovered:
+        assert history[-1].content == "Received your name and occupation."
+        assert any("Ollama" in warning and "恢复" in warning for warning in history[-1].warnings)
+    if stream:
+        events = [json.loads(line[6:]) for line in response.text.splitlines() if line.startswith("data: ")]
+        assert events[-1]["type"] == ("RUN_FINISHED" if recovered else "RUN_ERROR")
+        assert any(event["type"] == "TEXT_MESSAGE_CONTENT" for event in events) == recovered
+    else:
+        assert response.status_code == (200 if recovered else 502), response.text
+
+
+@pytest.mark.parametrize("stream", [False, True])
+async def test_ollama_empty_response_recovery_never_replays_a_completed_tool(
+    runtime: Runtime, api: httpx.AsyncClient, stream: bool
+) -> None:
+    from shovel.config.model_settings import ModelProviderType
+    from shovel.db.model.memory import ChatToolInteraction
+
+    runtime.settings.model.model_provider_type = ModelProviderType.OLLAMA
+    captured: list[dict[str, Any]] = []
+
+    def model(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        captured.append(body)
+        if len(captured) == 1:
+            if stream:
+                events = [
+                    {
+                        "id": "tool-completion",
+                        "created": 1,
+                        "choices": [
+                            {
+                                "index": 0,
+                                "finish_reason": "tool_calls",
+                                "delta": {
+                                    "role": "assistant",
+                                    "tool_calls": [
+                                        {
+                                            "index": 0,
+                                            "id": "test-call",
+                                            "type": "function",
+                                            "function": {"name": "list_extensions", "arguments": "{}"},
+                                        }
+                                    ],
+                                },
+                            }
+                        ],
+                    }
+                ]
+                return httpx.Response(
+                    200,
+                    headers={"content-type": "text/event-stream"},
+                    content="".join(f"data: {json.dumps(item)}\n\n" for item in events) + "data: [DONE]\n\n",
+                )
+            return httpx.Response(
+                200,
+                json={
+                    "created": 1,
+                    "choices": [
+                        {
+                            "finish_reason": "tool_calls",
+                            "message": {
+                                "role": "assistant",
+                                "tool_calls": [
+                                    {
+                                        "id": "test-call",
+                                        "type": "function",
+                                        "function": {"name": "list_extensions", "arguments": "{}"},
+                                    }
+                                ],
+                            },
+                        }
+                    ],
+                },
+            )
+        if stream:
+            return streamed_completion("Extensions listed." if len(captured) == 3 else "")
+        return httpx.Response(
+            200,
+            json={
+                "created": 1,
+                "choices": [
+                    {
+                        "finish_reason": "stop",
+                        "message": {
+                            "role": "assistant",
+                            "content": "Extensions listed." if len(captured) == 3 else "",
+                        },
+                    }
+                ],
+            },
+        )
+
+    runtime.chat.agent._client = httpx.AsyncClient(transport=httpx.MockTransport(model))
+    conversation = (await api.post("/api/v1/conversations", json={})).json()["id"]
+    response = (
+        await api.post(
+            "/api/v1/agent",
+            json={
+                "threadId": conversation,
+                "runId": "tool-recovery-test",
+                "messages": [{"id": "question", "role": "user", "content": "List the available extensions."}],
+                "tools": [],
+                "context": [],
+                "state": {},
+                "forwardedProps": {"memory_enabled": False},
+            },
+        )
+        if stream
+        else await api.post(
+            f"/api/v1/conversations/{conversation}/messages",
+            json={"content": "List the available extensions.", "memory_enabled": False},
+        )
+    )
+    assert response.status_code == 200, response.text
+    assert len(captured) == 3
+    assert captured[0]["tools"] and captured[1]["tools"] and not captured[2].get("tools")
+    assert captured[2]["messages"] == captured[1]["messages"]
+    assert any(message["role"] == "tool" for message in captured[2]["messages"])
+    async with runtime.sessions() as session:
+        calls = list(
+            await session.scalars(
+                select(ChatToolInteraction).where(ChatToolInteraction.conversation_id == conversation)
+            )
+        )
+    assert [(call.tool_name, call.state) for call in calls] == [("list_extensions", "completed")]
+
+
+@pytest.mark.parametrize("provider,finish_reason", [("openai", "stop"), ("ollama", "length")])
+async def test_empty_response_recovery_does_not_retry_other_providers_or_truncation(
+    runtime: Runtime, api: httpx.AsyncClient, provider: str, finish_reason: str
+) -> None:
+    from shovel.config.model_settings import ModelProviderType
+
+    runtime.settings.model.model_provider_type = ModelProviderType(provider)
+    calls = 0
+
+    def model(_request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        return httpx.Response(
+            200,
+            json={
+                "created": 1,
+                "choices": [
+                    {"message": {"role": "assistant", "content": ""}, "finish_reason": finish_reason}
+                ],
+            },
+        )
+
+    runtime.chat.agent._client = httpx.AsyncClient(transport=httpx.MockTransport(model))
+    conversation = (await api.post("/api/v1/conversations", json={})).json()["id"]
+    response = await api.post(
+        f"/api/v1/conversations/{conversation}/messages",
+        json={"content": "Remember my name.", "memory_enabled": False},
+    )
+    assert response.status_code == 502 and calls == 1
+    assert (await runtime.chat.messages(conversation))[-1].state == "failed"
+
+
 @pytest.mark.parametrize("valid_citation", [True, False])
 @pytest.mark.parametrize("development", [True, False])
 async def test_agui_stream_uses_framework_and_commits_before_success(

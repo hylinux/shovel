@@ -744,7 +744,6 @@ def configure_api(
             resource_count=len(request.resource_ids),
             memory_enabled=request.memory_enabled,
             search_mode=request.search_mode,
-            interaction_mode=request.interaction_mode,
         )
 
         return StreamingResponse(

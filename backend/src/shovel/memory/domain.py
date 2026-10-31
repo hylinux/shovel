@@ -15,6 +15,14 @@ class MemoryType(StrEnum):
     PROCEDURAL = "procedural"
 
 
+PROFILE_TOPICS = {
+    "has_name": "user.name",
+    "has_role": "user.occupation",
+    "has_timezone": "user.timezone",
+    "has_language": "user.language",
+}
+
+
 class MemoryState(StrEnum):
     CANDIDATE = "candidate"
     ACTIVE = "active"
@@ -91,6 +99,7 @@ class Provenance:
     message_id: str = ""
     evidence: str = ""
     extractor_version: str = "native-v1"
+    asserted_at: int | None = None
 
 
 @dataclass(frozen=True)
@@ -114,8 +123,9 @@ class MemoryRecord:
     topic: str = ""
     superseded_by: str | None = None
     model_version: str | None = None
-    provenance: list[dict[str, str]] = field(default_factory=list)
+    provenance: list[dict[str, str | int | None]] = field(default_factory=list)
     occurred_at: int | None = None
+    asserted_at: int | None = None
 
 
 @dataclass(frozen=True)
@@ -155,10 +165,14 @@ _CORRECTION = re.compile(
 )
 
 
+def explicit_correction(evidence: str) -> bool:
+    return bool(_CORRECTION.search(evidence))
+
+
 def admissible(candidate: MemoryCandidate, source: str, min_confidence: float) -> bool:
     """Fail closed for credentials, ambiguous quotations and unsupported evidence."""
     return (
-        8 <= len(candidate.text.strip()) <= 1500
+        1 <= len(candidate.text.strip()) <= 1500
         and candidate.kind != MemoryType.PROCEDURAL
         and min_confidence <= candidate.confidence <= 1
         and 0 <= candidate.importance <= 1
@@ -168,7 +182,7 @@ def admissible(candidate: MemoryCandidate, source: str, min_confidence: float) -
             source + candidate.text + candidate.object + candidate.topic + candidate.subject
         )
         and not _EXTERNAL.search(source)
-        and (not candidate.replaces or bool(_CORRECTION.search(candidate.evidence)))
+        and (not candidate.replaces or explicit_correction(candidate.evidence))
     )
 
 
@@ -177,7 +191,10 @@ def eligible_source(source: str) -> bool:
 
 
 def same_fact(record: MemoryRecord, candidate: MemoryCandidate) -> bool:
-    return record.fingerprint == candidate.fingerprint or normalize(record.text) == normalize(candidate.text)
+    return record.kind == candidate.kind and (
+        record.fingerprint == candidate.fingerprint
+        or (candidate.kind != MemoryType.SEMANTIC and normalize(record.text) == normalize(candidate.text))
+    )
 
 
 def conflicts(record: MemoryRecord, candidate: MemoryCandidate) -> bool:

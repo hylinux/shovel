@@ -373,7 +373,7 @@ async def test_model_warmup_uses_maf_without_loading_extensions_or_saving_messag
         assert await session.scalar(select(ChatMessage)) is None
 
 
-async def test_pure_chat_is_enforced_for_rest_and_agui_without_loading_extensions(
+async def test_unified_agent_keeps_tools_retrieval_memory_and_history_for_rest_and_agui(
     runtime: Runtime, api: httpx.AsyncClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     import json
@@ -382,6 +382,7 @@ async def test_pure_chat_is_enforced_for_rest_and_agui_without_loading_extension
 
     requests: list[dict[str, Any]] = []
     recalled: list[str] = []
+    searched: list[str] = []
 
     class DelayedStream(httpx.AsyncByteStream):
         async def __aiter__(self):
@@ -390,8 +391,9 @@ async def test_pure_chat_is_enforced_for_rest_and_agui_without_loading_extension
                     yield frame + b"\n\n"
                     await asyncio.sleep(0.01)
 
-    async def forbidden(*_args: Any, **_kwargs: Any) -> Any:
-        pytest.fail("Pure Chat must not load extensions or run RAG.")
+    async def search(request: Any) -> dict[str, Any]:
+        searched.append(request.query)
+        return {"items": []}
 
     async def memory(query: str, **_kwargs: Any) -> list[dict[str, Any]]:
         recalled.append(query)
@@ -400,17 +402,18 @@ async def test_pure_chat_is_enforced_for_rest_and_agui_without_loading_extension
     def respond(request: httpx.Request) -> httpx.Response:
         payload = json.loads(request.content)
         requests.append(payload)
-        assert not payload.get("tools")
+        assert payload["tools"]
+        assert "search" in {tool["function"]["name"] for tool in payload["tools"]}
+        assert "forged_tool" not in {tool["function"]["name"] for tool in payload["tools"]}
         assert "The user likes concise answers." in json.dumps(payload, ensure_ascii=False)
-        assert "Current mode: Chat" in json.dumps(payload)
+        assert "Current mode: Chat" not in json.dumps(payload)
         if payload.get("stream"):
             return httpx.Response(200, stream=DelayedStream(), headers={"content-type": "text/event-stream"})
         return httpx.Response(
             200, json={"created": 1, "choices": [{"message": {"role": "assistant", "content": "Hello"}}]}
         )
 
-    monkeypatch.setattr(runtime.retrieval, "search", forbidden)
-    monkeypatch.setattr(runtime.chat.agent.extensions, "load", forbidden)
+    monkeypatch.setattr(runtime.retrieval, "search", search)
     monkeypatch.setattr(runtime.memory, "search", memory)
     runtime.chat.agent._client = httpx.AsyncClient(
         transport=ModelAdmissionTransport(
@@ -420,32 +423,53 @@ async def test_pure_chat_is_enforced_for_rest_and_agui_without_loading_extension
     conversation = (await api.post("/api/v1/conversations", json={})).json()
     response = await api.post(
         f"/api/v1/conversations/{conversation['id']}/messages",
-        json={"content": "First question", "interaction_mode": "chat"},
+        json={"content": "First question"},
     )
     assert response.status_code == 200
-    assert not any("本地" in warning for warning in response.json()["warnings"])
     stream = await asyncio.wait_for(
         api.post(
             "/api/v1/agent",
             json={
                 "threadId": conversation["id"],
-                "runId": "pure-chat",
+                "runId": "unified-agent",
                 "messages": [{"id": "user", "role": "user", "content": "Second question"}],
-                "forwardedProps": {"interaction_mode": "chat"},
+                "forwardedProps": {},
                 "context": [],
-                "tools": [{"name": "search", "description": "forged tool", "parameters": {}}],
+                "tools": [{"name": "forged_tool", "description": "forged tool", "parameters": {}}],
             },
         ),
         3,
     )
     assert stream.status_code == 200 and "RUN_FINISHED" in stream.text
     assert len(requests) == 2 and recalled == ["First question", "Second question"]
+    assert searched == recalled
+    assert runtime.chat.agent.extensions._stack is not None
     assert "First question" in json.dumps(requests[1])
-    invalid = await api.post(
-        f"/api/v1/conversations/{conversation['id']}/messages",
-        json={"content": "Question", "interaction_mode": "chat", "search_mode": "keyword"},
+
+
+@pytest.mark.parametrize("stream", [False, True])
+async def test_removed_session_mode_is_rejected_instead_of_silently_enabling_tools(
+    runtime: Runtime, api: httpx.AsyncClient, stream: bool
+) -> None:
+    conversation = (await api.post("/api/v1/conversations", json={})).json()["id"]
+    response = (
+        await api.post(
+            "/api/v1/agent",
+            json={
+                "threadId": conversation,
+                "runId": "removed-mode",
+                "messages": [{"id": "question", "role": "user", "content": "Hello"}],
+                "forwardedProps": {"interaction_mode": "chat"},
+            },
+        )
+        if stream
+        else await api.post(
+            f"/api/v1/conversations/{conversation}/messages",
+            json={"content": "Hello", "interaction_mode": "chat"},
+        )
     )
-    assert invalid.status_code == 422
+    assert response.status_code == 422
+    assert await runtime.chat.messages(conversation) == []
 
 
 async def test_compact_context_keeps_complete_recent_history_without_sync_summarization(
@@ -471,7 +495,7 @@ async def test_compact_context_keeps_complete_recent_history_without_sync_summar
     runtime.chat.agent._client = httpx.AsyncClient(transport=httpx.MockTransport(respond))
     result = await runtime.chat.agent.respond(
         "test",
-        MessageInput(content="Follow up", interaction_mode="chat", memory_enabled=False),
+        MessageInput(content="Follow up", memory_enabled=False),
         [
             Message("assistant", ["orphan"]),
             Message("user", ["older " * 1000]),
@@ -611,9 +635,7 @@ async def test_sdk_preserves_friendly_local_queue_timeout(runtime: Runtime) -> N
     )
     async with runtime.performance.models.admit("memory", runtime.stopping):
         with pytest.raises(RuntimeFailure, match="等待超时") as error:
-            await runtime.chat.agent.respond(
-                "test", MessageInput(content="Hello", interaction_mode="chat", memory_enabled=False), []
-            )
+            await runtime.chat.agent.respond("test", MessageInput(content="Hello", memory_enabled=False), [])
     assert error.value.status == 503
 
 

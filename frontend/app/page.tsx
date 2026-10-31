@@ -14,8 +14,23 @@ import { ApprovalCenter, ExecutionActivity } from "./platform-activity";
 import { CapabilityLibrary } from "./capabilities";
 
 const platformViews = ["Proactive Services", "Approval Center", "Activity", "Skills", "Workflows"] as const;
-const views = ["Resources", "Background tasks", "Search Documents", "Chat", ...platformViews] as const;
-type View = typeof views[number] | "Settings";
+type View = "Resources" | "Background tasks" | "Search Documents" | "Chat" | typeof platformViews[number] | "Settings";
+const navigationGroups = [
+  { id: "resource-navigation", label: "Resource Management", symbol: "▤", items: [
+    { view: "Resources", symbol: "▤" },
+    { view: "Background tasks", symbol: "≡" },
+    { view: "Search Documents", symbol: "⌕" },
+  ] },
+  { id: "service-navigation", label: "Services", symbol: "◷", items: [
+    { view: "Proactive Services", symbol: "◷" },
+    { view: "Approval Center", symbol: "✓" },
+    { view: "Activity", symbol: "↗" },
+  ] },
+  { id: "development-navigation", label: "Development", symbol: "⌘", items: [
+    { view: "Skills", symbol: "▧" },
+    { view: "Workflows", symbol: "⌘" },
+  ] },
+] as const;
 const descriptions: Record<View, string> = {
   Resources: "Choose which local documents and Outlook mail Shovel can work with.",
   "Background tasks": "Follow scans, inspect events, and recover failed operations.",
@@ -57,11 +72,14 @@ export default function Home() {
         <Link href="/" className="brand" aria-label="Shovel home"><span className="brand-mark" aria-hidden="true">S</span>Shovel</Link>
         <p className="sidebar-caption">Personal Agent Platform</p>
         <nav className="main-navigation" aria-label="Main navigation">
-          {views.map((item, index) => <button key={item} aria-current={view === item ? "page" : undefined} aria-expanded={item === "Chat" ? showSessions : undefined} aria-controls={item === "Chat" ? "session-navigation" : undefined} onClick={() => navigate(item)}><span aria-hidden="true" className="nav-symbol">{["▤", "≡", "⌕", "◇", "◷", "✓", "↗", "▧", "⌘"][index]}</span>{item}{item === "Chat" && <span className="nav-chevron" aria-hidden="true">{showSessions ? "⌄" : "›"}</span>}</button>)}
+          {navigationGroups.map((group) => <SidebarGroup key={group.id} group={group} view={view} onNavigate={navigate} />)}
+          <div className="chat-navigation" data-expanded={showSessions}>
+            <button className="navigation-button" aria-current={view === "Chat" ? "page" : undefined} aria-expanded={showSessions} aria-controls="session-navigation" onClick={() => navigate("Chat")}><span aria-hidden="true" className="nav-symbol">◇</span><span className="navigation-label">Chat</span><span className="nav-chevron" aria-hidden="true">{showSessions ? "⌄" : "›"}</span></button>
+            <section id="session-navigation" className="session-navigation" aria-label="Chat sessions" hidden={!showSessions}>
+              <SessionNavigation selected={selectedSession} active={view === "Chat"} revision={sessionRevision} onSelect={selectSession} onDeleted={() => { setSelectedSession(""); refreshSessions(); }} />
+            </section>
+          </div>
         </nav>
-        <section id="session-navigation" className="session-navigation" aria-label="Chat sessions" hidden={!showSessions}>
-          <SessionNavigation selected={selectedSession} active={view === "Chat"} revision={sessionRevision} onSelect={selectSession} onDeleted={() => { setSelectedSession(""); refreshSessions(); }} />
-        </section>
         <div className="sidebar-bottom">
           <nav className="settings-navigation" aria-label="Settings navigation"><button aria-current={view === "Settings" ? "page" : undefined} onClick={() => navigate("Settings")}><span className="nav-symbol" aria-hidden="true">⚙</span>Settings</button></nav>
           <div className="sidebar-footer"><span className={`connection-dot ${status.data && !status.error ? "connected" : ""}`} />{status.data && !status.error ? "Local runtime connected" : status.loading ? "Connecting to runtime…" : "Runtime unavailable"}<p>Your files. Your model choices.</p></div>
@@ -87,6 +105,16 @@ export default function Home() {
       </main>
     </div>
   );
+}
+
+function SidebarGroup({ group, view, onNavigate }: { group: typeof navigationGroups[number]; view: View; onNavigate: (view: View) => void }) {
+  const [open, setOpen] = useState(false);
+  return <div className="navigation-group" data-active={group.items.some((item) => item.view === view)}>
+    <button className="navigation-button navigation-group-toggle" aria-expanded={open} aria-controls={group.id} onClick={() => setOpen((current) => !current)}><span className="nav-symbol" aria-hidden="true">{group.symbol}</span><span className="navigation-label">{group.label}</span><span className="nav-chevron" aria-hidden="true">{open ? "⌄" : "›"}</span></button>
+    <div id={group.id} className="navigation-children" role="group" aria-label={`${group.label} pages`} hidden={!open}>
+      {group.items.map((item) => <button className="navigation-button" key={item.view} aria-current={view === item.view ? "page" : undefined} onClick={() => onNavigate(item.view)}><span className="nav-symbol" aria-hidden="true">{item.symbol}</span><span className="navigation-label">{item.view}</span></button>)}
+    </div>
+  </div>;
 }
 
 function SessionNavigation({ selected, active, revision, onSelect, onDeleted }: { selected: string; active: boolean; revision: number; onSelect: (identifier: string) => void; onDeleted: () => void }) {

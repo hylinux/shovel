@@ -42,6 +42,12 @@ This writes a static application to `frontend\out`. Serve those files from the b
 
 ## Workflows
 
+The sidebar has four groups in order: **Resource Management** (Resources,
+Background tasks, Search Documents), **Services** (Proactive Services, Approval
+Center, Activity), **Development** (Skills, Workflows), and **Chat** (New Session
+and session history). The first three groups are collapsed initially and expand
+independently; Chat stays expanded by default. Settings remains at the bottom.
+
 - **Resources:** add a named local folder with an optional description. Creation requests verification but never starts a scan. Verify, pause/resume, revoke, or explicitly confirm deletion. Configure incremental, full-sweep, or targeted scans; embeddings default to the runtime's configured capability. Keyword indexing works without vectors.
 - **Background tasks:** inspect scan stages, counters and document events, request cancellation, inspect/retry operations, and queue index cleanup. Resources, jobs, operations and visible events refresh about every two seconds without clearing forms. Requests are serialized per poller and cancelled on unmount. Periodic queries pause while the browser tab is hidden and refresh on return; in-flight reads may finish, and explicit actions/Agent streams are not interrupted. Resources poll only in Resources, Background tasks (for cleanup scope), and Search Documents, never in Chat or Settings.
 - **Search Documents:** an independent menu below Background tasks. Select resources, retrieval mode, Top N (1–30), and relevance/title sort direction. Sorting applies only to the returned Top N passages. Empty resource selection means all accessible resources. Search works without a chat model or Memory.

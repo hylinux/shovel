@@ -61,10 +61,21 @@ dd { margin: 0 0 8px; }
 .brand { display: inline-flex; align-items: center; gap: 10px; font-size: 24px; font-weight: 700; letter-spacing: -.04em; text-decoration: none; color: var(--foreground); padding: 0 10px; }
 .brand-mark { width: 29px; height: 29px; display: grid; place-items: center; border-radius: 6px; background: var(--accent); color: white; font-size: 19px; letter-spacing: 0; }
 .sidebar-caption { color: var(--muted); margin: 8px 10px 34px; font-size: 12px; }
-.main-navigation { display: grid; gap: 6px; flex-shrink: 0; }
-.main-navigation button, .settings-navigation button { border: 1px solid transparent; background: transparent; text-align: left; display: flex; align-items: center; gap: 11px; min-height: 44px; }
-.main-navigation button[aria-current="page"], .settings-navigation button[aria-current="page"] { background: #e0ebed; color: #095d64; }
-.nav-symbol { width: 20px; font-size: 21px; text-align: center; line-height: 1; }
+.main-navigation { display: flex; flex-direction: column; gap: 6px; flex: 1; min-height: 0; overflow-y: auto; overscroll-behavior: contain; scrollbar-gutter: stable; }
+.main-navigation .navigation-button, .settings-navigation button { width: 100%; border: 1px solid transparent; background: transparent; text-align: left; display: flex; align-items: center; gap: 11px; min-height: 44px; }
+.main-navigation .navigation-button[aria-current="page"], .settings-navigation button[aria-current="page"] { background: #e0ebed; color: #095d64; }
+.navigation-group { flex-shrink: 0; min-width: 0; }
+.navigation-group-toggle { font-weight: 650; }
+.navigation-group[data-active="true"] > .navigation-group-toggle { color: var(--accent); }
+.navigation-label { flex: 1; min-width: 0; }
+.navigation-children { display: grid; gap: 4px; margin: 4px 0 6px 20px; padding-left: 10px; border-left: 1px solid #c5d3dd; }
+.navigation-children[hidden] { display: none; }
+.main-navigation .navigation-children button { gap: 8px; padding: 8px 9px; font-size: 13px; }
+.navigation-children .nav-symbol { width: 16px; font-size: 18px; }
+.chat-navigation { display: flex; flex-direction: column; flex: 1; min-height: 44px; }
+.chat-navigation[data-expanded="true"] { min-height: 180px; }
+.chat-navigation > button { flex-shrink: 0; }
+.nav-symbol { width: 20px; flex-shrink: 0; font-size: 21px; text-align: center; line-height: 1; }
 .nav-chevron { margin-left: auto; font-size: 18px; }
 .session-navigation { display: flex; flex: 1; flex-direction: column; min-height: 0; margin: 4px 0 0 20px; padding: 8px 0 0 13px; border-left: 1px solid #c5d3dd; }
 .session-navigation[hidden] { display: none; }
@@ -295,8 +306,9 @@ progress::-moz-progress-bar { background: var(--accent); }
   .sidebar { position: static; height: auto; padding: 17px 18px 0; border-right: 0; border-bottom: 1px solid var(--border); }
   .brand { font-size: 21px; padding: 0; }
   .sidebar-caption, .sidebar-footer { display: none; }
-  .main-navigation { display: flex; gap: 3px; margin-top: 17px; overflow-x: auto; }
-  .main-navigation button { white-space: nowrap; font-size: 12px; padding: 8px 10px; border-radius: 5px 5px 0 0; flex: 1; justify-content: center; }
+  .main-navigation { gap: 3px; flex: none; margin-top: 17px; overflow: visible; }
+  .main-navigation .navigation-button { white-space: normal; font-size: 12px; padding: 8px 10px; border-radius: 5px; }
+  .chat-navigation, .chat-navigation[data-expanded="true"] { flex: none; min-height: 0; }
   .nav-chevron { font-size: 15px; }
   .session-navigation { flex: none; margin-top: 8px; padding-top: 8px; padding-bottom: 10px; }
   .session-history { flex: none; max-height: min(26dvh, 220px); }

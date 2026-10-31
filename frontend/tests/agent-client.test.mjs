@@ -42,6 +42,19 @@ test("AG-UI terminal failure is not treated as a saved answer", async (t) => {
     () => {}, () => {}), /Citation validation failed/);
 });
 
+test("explicit Chat mode reaches the server without changing legacy requests", async (t) => {
+  let captured;
+  t.mock.method(globalThis, "fetch", async (_url, options) => {
+    captured = JSON.parse(options.body);
+    return response(captured);
+  });
+  await runAgentMessage("/api/v1/agent", "conversation",
+    { content: "Hello", resource_ids: [], memory_enabled: true, search_mode: "auto", interaction_mode: "chat" },
+    new AbortController().signal, () => {}, () => {});
+  assert.deepEqual(captured.forwardedProps,
+    { resource_ids: [], memory_enabled: true, search_mode: "auto", interaction_mode: "chat" });
+});
+
 test("AG-UI renders incremental text before the response body and durable run finish", { timeout: 5000 }, async (t) => {
   let controller;
   let closed = false;

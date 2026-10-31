@@ -90,9 +90,10 @@ class ChatService:
             raise RuntimeFailure("Agent 无法预热,请先完成重启。", status=503)
         self._active_runs += 1
         try:
-            response = await self.agent.client().get_response(
-                [Message("user", ["Ready"])], options=self.agent.output_options(1)
-            )
+            with self.runtime.performance.models.source("warmup"):
+                response = await self.agent.client().get_response(
+                    [Message("user", ["Ready"])], options=self.agent.output_options(1)
+                )
             if not isinstance(response, ChatResponse):
                 raise RuntimeFailure("模型预热未返回有效响应。", status=502)
         finally:

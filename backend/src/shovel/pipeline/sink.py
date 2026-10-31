@@ -109,9 +109,17 @@ class ZvecChunkSink:
         self._io_lock = threading.RLock()
 
     async def _io[T](self, action: Callable[[], T]) -> T:
+        from shovel.runtime.diagnostics import trace, trace_duration
+
+        queued = perf_counter()
+
         def locked() -> T:
+            trace("index.io.worker.started", queue_ms=round((perf_counter() - queued) * 1000, 2))
+            locking = perf_counter()
             with self._io_lock:
-                return action()
+                trace("index.io.lock.acquired", wait_ms=round((perf_counter() - locking) * 1000, 2))
+                with trace_duration("index.io.native.completed"):
+                    return action()
 
         task = asyncio.create_task(asyncio.to_thread(locked))
         try:

@@ -468,10 +468,12 @@ in memory. A chat submitted before warmup completes can still pay startup cost.
 warm_index = true
 warm_local_models = true
 max_foreground_runs = 0
+max_local_model_requests = 1
 foreground_queue_seconds = 120
 background_idle_seconds = 5
 embedding_cache_entries = 128
 embedding_cache_seconds = 300
+context_profile = "default" # opt in to "compact" for bounded CPU-oriented context
 ```
 
 `max_foreground_runs = 0` selects one concurrent foreground run for Ollama and
@@ -486,9 +488,81 @@ The extraction worker remains single-concurrency/FIFO and starts tasks only
 after all foreground runs finish and the idle window expires. It checks again
 before inference. Already-running extraction/warmup is not preempted: cancelling
 a client process does not guarantee that a model server stops computing.
-Foreground requests never wait for the background LLM to release a global lock.
-Use a separate, smaller `[memory.llm]` model or separate compute if this remaining
-contention matters; Shovel does not download/change models or hardware settings.
+Local Ollama generation requests from Main Agent, platform Skill/Agent, Memory
+and model warmup share `max_local_model_requests` slots. The lease covers the
+actual HTTP response body, not an entire Agent run: a parent releases its slot
+before invoking a child model tool. Interactive requests precede queued platform,
+Memory and warmup requests; requests waiting at least 30 seconds receive FIFO
+priority to prevent starvation. The queue holds at most 64 waiting requests and
+uses `foreground_queue_seconds` as its timeout. Already-running inference is not
+preempted, so a foreground request can wait for a background call to finish.
+Remote/cloud providers are excluded. Query embedding reads remain independently
+parallel rather than being unconditionally serialized with generation.
+Chat model warmup precedes index and embedding warmup; the index still opens
+once, safely off the event loop, and Agent retrieval can await that same handle.
+
+The composer defaults to **Agent**, retaining existing automatic retrieval and
+tools. Explicit **Chat** mode retains Memory/history/summary but skips automatic
+RAG, all tools, and workspace extension loading. Switch back to Agent for
+document questions and actions. The server enforces this for both message REST
+and AG-UI requests through `interaction_mode = "chat"`; omitted mode means
+`"agent"`. Chat rejects resource selection or an explicit non-auto search mode.
+This is not a safety-approval preference and cannot grant permissions.
+
+`context_profile = "compact"` is opt-in. It caps serialized source allocation at
+2500 characters, Memory at 1000, summary at 1000, and complete recent user-led
+history groups at 4000, subject to the existing total budget. Instructions are
+retained, no synchronous summary model is introduced, and stored history is not
+deleted. Compact mode also reserves serialized tool-schema space and checks it
+at the final call; if tools exceed the budget, it fails explicitly rather than
+dropping tools. Use Chat, the default profile or a larger character budget.
+Smaller budgets can reduce continuity or evidence detail: validate
+quality before enabling them. The default profile and retrieval candidate count
+remain unchanged. RAG metadata is read in batches, and concurrent identical
+embedding misses share bounded work with independent cancellation; retrieval
+results and permission decisions are never cached.
+
+Development logs separately time scope/keyword/embedding/index/search,
+SQLite revalidation, metadata hydration, persistence and summary/status reads.
+Model diagnostics distinguish message characters from serialized tool-schema
+size and provider token usage, including instructions carried separately in MAF
+options. The final character guard includes those instructions; they do not log
+prompts, sources or credentials.
+Event-loop delay is sampled only during development chats.
+
+#### CPU-only deployment and measurement
+
+Use `run prd` with the existing static frontend to avoid Next.js development/HMR
+overhead during normal desktop use. Do not assume a GPU or automatically change
+models. As starting candidates, an 8 GB machine may need a roughly 1–3B quantized
+model; 16 GB can compare small models against roughly 3–8B quantized candidates;
+32 GB offers more residency headroom but does not guarantee faster generation.
+Measure RAM pressure and Chinese/tool/structured-output quality, not just model
+names. Smaller context and one generation slot can avoid oversubscription.
+Ollama thread/context/residency options belong to supported Ollama configuration,
+not invented `[model]` keys. Shovel neither installs models nor changes OS settings.
+
+`[memory.llm]` already defaults to `[model]`, which can reduce duplicate model
+residency; a separate small model is optional and competes for the same CPU/RAM.
+Changing knowledge or Memory embeddings requires rebuilding that respective
+index with the matching model/dimension, never mixing vector versions in place.
+
+The optional local comparison uses an isolated SQLite/workspace/index and the
+committed test corpus, rejects remote/cloud model providers, and never loads
+your workspace extensions. It explicitly disables Memory per benchmark request
+to isolate model/context/RAG costs; Memory and background contention are covered
+by offline correctness tests, not measured by this comparison. It reports
+backend first-text and durable-completion P50/P95 and output size for Agent/Chat
+and default/compact profiles. Small samples are exploratory, not a speed or
+quality guarantee; compare citations and answers separately, and use the existing
+live knowledge baseline when appropriate.
+
+```powershell
+$env:SHOVEL_RUN_CPU_BENCHMARK = "1"
+$env:SHOVEL_CPU_CONFIG = "C:\path\to\settings.toml"
+$env:SHOVEL_CPU_SAMPLES = "3"
+uv run pytest backend\tests\test_cpu_performance.py -m live --no-cov -s
+```
 
 Only successful, valid embedding vectors are cached in bounded, expiring,
 process-local caches. Memory and RAG caches are separate; both use keys derived

@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import asyncio
 import re
 from collections import defaultdict
+from dataclasses import dataclass
 from time import perf_counter
 from typing import TYPE_CHECKING, Any
 
-from sqlalchemy import and_, column, or_, select, table, text
+from sqlalchemy import and_, column, or_, select, table, text, tuple_
 
 from shovel.db.model.config import Resource
 from shovel.db.model.content import Chunk, Document
@@ -21,7 +23,7 @@ from shovel.domain.enums import (
 )
 from shovel.pipeline.embedder import Embedder, build_embedder
 from shovel.pipeline.embedding_cache import EmbeddingCache
-from shovel.runtime.diagnostics import trace
+from shovel.runtime.diagnostics import trace, trace_duration
 from shovel.runtime.errors import RuntimeFailure
 from shovel.runtime.schemas import SearchInput
 
@@ -34,12 +36,20 @@ _READABLE = (ResourceState.ACTIVE, ResourceState.DEGRADED, ResourceState.PAUSED,
 _FTS = table("chunk_search", column("chunk_id"), column("rank"))
 
 
+@dataclass
+class _EmbeddingRead:
+    task: asyncio.Task[list[float]]
+    readers: int = 0
+
+
 class RetrievalService:
     def __init__(self, runtime: Runtime) -> None:
         self.runtime = runtime
         self._embedder: Embedder | None = None
         settings = runtime.settings.performance
         self._embeddings = EmbeddingCache(settings.embedding_cache_entries, settings.embedding_cache_seconds)
+        self._embedding_reads: dict[str, _EmbeddingRead] = {}
+        self._embedding_slots = asyncio.Semaphore(64)
 
     async def embed_query(self, query: str) -> tuple[list[float], str]:
         if self._embedder is None:
@@ -48,19 +58,56 @@ class RetrievalService:
             )
         embedder = self._embedder
         version = embedder.model_version
-        key = self._embeddings.key([version, query], {})
+        key = self._embeddings.key(
+            [version, self.runtime.settings.embedding.base_url, embedder.dimension, query], {}
+        )
         vector = self._embeddings.get(key)
         if vector is not None:
             trace("retrieval.embedding.cached")
             return vector, version
-        started = perf_counter()
-        trace("retrieval.embedding.started", provider=self.runtime.settings.embedding.provider)
-        vector = (await embedder.embed([query]))[0]
-        self._embeddings.put(key, vector)
-        trace("retrieval.embedding.completed", elapsed_ms=round((perf_counter() - started) * 1000, 2))
-        return vector, version
+
+        async def embed() -> list[float]:
+            trace("retrieval.embedding.started", provider=self.runtime.settings.embedding.provider)
+            with trace_duration("retrieval.embedding.completed"):
+                result = (await embedder.embed([query]))[0]
+                self._embeddings.put(key, result)
+                return result
+
+        read = self._embedding_reads.get(key)
+        if read is None:
+            await self._embedding_slots.acquire()
+            vector = self._embeddings.get(key)
+            if vector is not None:
+                self._embedding_slots.release()
+                return vector, version
+            read = self._embedding_reads.get(key)
+            if read is None:
+                read = _EmbeddingRead(asyncio.create_task(embed()))
+                self._embedding_reads[key] = read
+            else:
+                self._embedding_slots.release()
+        else:
+            trace("retrieval.embedding.shared")
+        read.readers += 1
+        try:
+            with trace_duration("retrieval.embedding.wait.completed"):
+                return list(await asyncio.shield(read.task)), version
+        finally:
+            read.readers -= 1
+            if not read.readers:
+                self._embedding_reads.pop(key)
+                if not read.task.done():
+                    read.task.cancel()
+                try:
+                    await asyncio.gather(read.task, return_exceptions=True)
+                finally:
+                    self._embedding_slots.release()
 
     async def close(self) -> None:
+        tasks = [read.task for read in self._embedding_reads.values()]
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
         if self._embedder is not None:
             await self._embedder.aclose()
             self._embedder = None
@@ -120,7 +167,8 @@ class RetrievalService:
 
     async def search(self, request: SearchInput) -> dict[str, Any]:
         started = perf_counter()
-        scope = await self._scope(request.resource_ids)
+        with trace_duration("retrieval.scope.completed"):
+            scope = await self._scope(request.resource_ids)
         mode = request.mode
         if mode == "auto":
             mode = "hybrid" if self.runtime.settings.embedding.is_configured else "keyword"
@@ -130,47 +178,85 @@ class RetrievalService:
         candidate_count = min(300, request.limit * 10)
         rankings: list[list[str]] = []
         if scope and mode in {"keyword", "hybrid"}:
-            rankings.append(await self._keyword(request, scope, candidate_count))
+            with trace_duration("retrieval.keyword.query.completed"):
+                rankings.append(await self._keyword(request, scope, candidate_count))
             trace("retrieval.keyword.completed", candidates=len(rankings[-1]))
         model_version: str | None = None
         if scope and mode in {"vector", "hybrid"}:
             vector, model_version = await self.embed_query(request.query)
-            matches = await (await self.runtime.sink()).search(
-                vector,
-                resource_ids=scope,
-                model_version=model_version,
-                limit=candidate_count,
-            )
+            with trace_duration("retrieval.index.ready"):
+                sink = await self.runtime.sink()
+            with trace_duration("retrieval.vector.search.completed"):
+                matches = await sink.search(
+                    vector, resource_ids=scope, model_version=model_version, limit=candidate_count
+                )
             identifiers = [identifier for identifier, _score in matches]
             # Vectors are an acceleration structure, never an authority or permission source.
             async with self.runtime.sessions() as session:
-                valid = set(
-                    await session.scalars(
-                        self._chunks(scope)
-                        .with_only_columns(Chunk.id)
-                        .where(
-                            Chunk.id.in_(identifiers),
-                            Chunk.vector_state == VectorState.INDEXED,
-                            Chunk.model_version == model_version,
-                            Document.pipe_state == DocumentPipeState.INDEXED,
-                            Document.indexed_hash == Document.content_hash,
+                with trace_duration("retrieval.vector.revalidated"):
+                    valid = set(
+                        await session.scalars(
+                            self._chunks(scope)
+                            .with_only_columns(Chunk.id)
+                            .where(
+                                Chunk.id.in_(identifiers),
+                                Chunk.vector_state == VectorState.INDEXED,
+                                Chunk.model_version == model_version,
+                                Document.pipe_state == DocumentPipeState.INDEXED,
+                                Document.indexed_hash == Document.content_hash,
+                            )
                         )
                     )
-                )
             rankings.append([identifier for identifier in identifiers if identifier in valid])
             trace("retrieval.vector.completed", candidates=len(rankings[-1]))
-        scores: defaultdict[str, float] = defaultdict(float)
-        for ranking in rankings:
-            for rank, identifier in enumerate(ranking, 1):
-                scores[identifier] += 1 / (60 + rank)
-        ordered = sorted(scores, key=lambda identifier: (-scores[identifier], identifier))
+        with trace_duration("retrieval.ranks.completed"):
+            scores: defaultdict[str, float] = defaultdict(float)
+            for ranking in rankings:
+                for rank, identifier in enumerate(ranking, 1):
+                    scores[identifier] += 1 / (60 + rank)
+            ordered = sorted(scores, key=lambda identifier: (-scores[identifier], identifier))
         hits: list[dict[str, Any]] = []
         seen: set[str] = set()
         if ordered:
+            hydration_started = perf_counter()
             async with self.runtime.sessions() as session:
                 # Re-check scope and lifecycle after embedding/network I/O.
                 rows = await session.scalars(self._chunks(scope).where(Chunk.id.in_(ordered)))
                 chunks = {chunk.id: chunk for chunk in rows}
+                parent_ids = {chunk.parent_chunk_id for chunk in chunks.values() if chunk.parent_chunk_id}
+                parents = (
+                    {
+                        chunk.id: chunk
+                        for chunk in await session.scalars(select(Chunk).where(Chunk.id.in_(parent_ids)))
+                    }
+                    if parent_ids
+                    else {}
+                )
+                document_keys = {(chunk.doc_uri, chunk.resource_id) for chunk in chunks.values()}
+                documents = (
+                    {
+                        (document.uri, document.resource_id): document
+                        for document in await session.scalars(
+                            select(Document).where(
+                                tuple_(Document.uri, Document.resource_id).in_(document_keys)
+                            )
+                        )
+                    }
+                    if document_keys
+                    else {}
+                )
+                resources = (
+                    {
+                        resource.id: resource
+                        for resource in await session.scalars(
+                            select(Resource).where(
+                                Resource.id.in_({chunk.resource_id for chunk in chunks.values()})
+                            )
+                        )
+                    }
+                    if chunks
+                    else {}
+                )
                 for identifier in ordered:
                     chunk = chunks.get(identifier)
                     if chunk is None:
@@ -179,15 +265,15 @@ class RetrievalService:
                     if key in seen:
                         continue
                     seen.add(key)
-                    parent = await session.get(Chunk, key) if chunk.parent_chunk_id else None
+                    parent = parents.get(key) if chunk.parent_chunk_id else None
                     if parent is not None and (
                         parent.resource_id != chunk.resource_id
                         or parent.doc_uri != chunk.doc_uri
                         or parent.rev != chunk.rev
                     ):
                         parent = None
-                    document = await session.get(Document, (chunk.doc_uri, chunk.resource_id))
-                    resource = await session.get(Resource, chunk.resource_id)
+                    document = documents.get((chunk.doc_uri, chunk.resource_id))
+                    resource = resources.get(chunk.resource_id)
                     if document is None or resource is None:
                         continue
                     hits.append(
@@ -214,6 +300,12 @@ class RetrievalService:
                     )
                     if len(hits) >= request.limit:
                         break
+            trace(
+                "retrieval.hydration.completed",
+                elapsed_ms=round((perf_counter() - hydration_started) * 1000, 2),
+                candidates=len(chunks),
+                hits=len(hits),
+            )
         async with self.runtime.sessions() as session:
             log = RetrievalLog(
                 query_text=request.query,
@@ -226,7 +318,8 @@ class RetrievalService:
                 top_score=hits[0]["score"] if hits else None,
             )
             session.add(log)
-            await session.commit()
+            with trace_duration("retrieval.log.persisted"):
+                await session.commit()
         trace(
             "retrieval.completed",
             retrieval_id=log.id,

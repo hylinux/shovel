@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from typing import Any, Literal
 
 import httpx
@@ -63,8 +63,13 @@ class ExtractionOutput(BaseModel):
 
 
 class AgentFrameworkMemoryExtractor:
-    def __init__(self, settings: DefaultAgentModelSettings) -> None:
+    def __init__(
+        self,
+        settings: DefaultAgentModelSettings,
+        transport: Callable[[], httpx.AsyncBaseTransport | None] | None = None,
+    ) -> None:
         self.settings = settings
+        self._transport = transport
         self._http: httpx.AsyncClient | None = None
         self._sdk: Any = None
         self._framework: Any = None
@@ -73,7 +78,10 @@ class AgentFrameworkMemoryExtractor:
         if not self.settings.is_configured:
             raise ValueError("Configure [model] or [memory.llm] for memory extraction.")
         if self._framework is None:
-            self._http = httpx.AsyncClient(timeout=httpx.Timeout(self.settings.timeout_seconds, connect=10))
+            self._http = httpx.AsyncClient(
+                timeout=httpx.Timeout(self.settings.timeout_seconds, connect=10),
+                transport=self._transport() if self._transport is not None else None,
+            )
             self._sdk, self._framework = create_framework_client(self.settings, self._http, max_iterations=1)
         return self._framework
 

@@ -2,9 +2,10 @@ from __future__ import annotations
 
 import json
 from collections.abc import Awaitable, Callable, Mapping
+from contextlib import AbstractContextManager, nullcontext
 from typing import Any
 
-from agent_framework import Agent, AgentSession, SupportsChatGetResponse
+from agent_framework import Agent, AgentSession, ChatOptions, SupportsChatGetResponse
 
 from shovel.capability.domain import AgentImplementation, FunctionImplementation, SkillImplementation
 from shovel.execution.domain import BudgetUsage, ExecutorResult
@@ -30,8 +31,15 @@ class FunctionExecutor:
 
 
 class SkillExecutor:
-    def __init__(self, client: Callable[[], SupportsChatGetResponse[Any]] | None = None) -> None:
+    def __init__(
+        self,
+        client: Callable[[], SupportsChatGetResponse[Any]] | None = None,
+        *,
+        model_scope: Callable[[], AbstractContextManager[None]] | None = None,
+        options: Callable[[], ChatOptions[None]] | None = None,
+    ) -> None:
         self._client = client
+        self._model_scope, self._options = model_scope, options
 
     async def execute(self, context: ExecutorContext) -> ExecutorResult:
         implementation = context.execution.snapshot.capability.content.implementation
@@ -43,17 +51,26 @@ class SkillExecutor:
             name="capability_skill",
             instructions=implementation.instructions,
             tools=[],
+            default_options=self._options() if self._options is not None else None,
         )
-        response = await agent.run(
-            json.dumps(context.execution.input, ensure_ascii=False),
-            session=AgentSession(session_id=context.execution.id),
-        )
+        with self._model_scope() if self._model_scope is not None else nullcontext():
+            response = await agent.run(
+                json.dumps(context.execution.input, ensure_ascii=False),
+                session=AgentSession(session_id=context.execution.id),
+            )
         return ExecutorResult(output={"text": response.text})
 
 
 class AgentExecutor:
-    def __init__(self, client: Callable[[], SupportsChatGetResponse[Any]]) -> None:
+    def __init__(
+        self,
+        client: Callable[[], SupportsChatGetResponse[Any]],
+        *,
+        model_scope: Callable[[], AbstractContextManager[None]] | None = None,
+        options: Callable[[], ChatOptions[None]] | None = None,
+    ) -> None:
         self._client = client
+        self._model_scope, self._options = model_scope, options
 
     async def execute(self, context: ExecutorContext) -> ExecutorResult:
         implementation = context.execution.snapshot.capability.content.implementation
@@ -66,9 +83,11 @@ class AgentExecutor:
             name="capability_agent",
             instructions=implementation.instructions,
             tools=[],
+            default_options=self._options() if self._options is not None else None,
         )
-        response = await agent.run(
-            json.dumps(context.execution.input, ensure_ascii=False),
-            session=AgentSession(session_id=context.execution.id),
-        )
+        with self._model_scope() if self._model_scope is not None else nullcontext():
+            response = await agent.run(
+                json.dumps(context.execution.input, ensure_ascii=False),
+                session=AgentSession(session_id=context.execution.id),
+            )
         return ExecutorResult(output={"text": response.text})

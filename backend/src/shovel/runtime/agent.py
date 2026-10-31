@@ -22,6 +22,7 @@ from agent_framework import (
     ContextProvider,
     FunctionInvocationContext,
     FunctionMiddleware,
+    FunctionTool,
     Message,
     SessionContext,
     SlidingWindowStrategy,
@@ -40,7 +41,7 @@ from shovel.runtime.agent_instructions import (
     AgentInstructionsView,
     compose_instructions,
 )
-from shovel.runtime.diagnostics import trace
+from shovel.runtime.diagnostics import diagnostics_enabled, trace, trace_duration
 from shovel.runtime.errors import RuntimeFailure
 from shovel.runtime.schemas import MessageInput, SearchInput
 
@@ -48,6 +49,19 @@ if TYPE_CHECKING:
     from shovel.runtime.service import Runtime
 
 EventSink = Callable[[BaseEvent], Awaitable[None]]
+_CHAT_MODE = (
+    "\nCurrent mode: Chat. No tools or document retrieval are available. "
+    "Do not claim to have performed actions. Ask the user to switch to Agent mode for tools."
+)
+
+
+def tool_schema_size(tools: list[Any]) -> tuple[int, int]:
+    schemas = [
+        item.to_json_schema_spec() if isinstance(item, FunctionTool) else item
+        for item in tools
+        if isinstance(item, (FunctionTool, dict))
+    ]
+    return (len(json.dumps(schemas, ensure_ascii=False)) if schemas else 0, len(schemas))
 
 
 class ModelOptions(ChatOptions[None], total=False):
@@ -160,6 +174,7 @@ class ShovelContextProvider(ContextProvider):
         self.instructions = instructions
         self.result = AgentResult()
         self.standalone_greeting = standalone_greeting(request, history)
+        self.automatic_search = request.interaction_mode == "agent" and not self.standalone_greeting
 
     async def search(self, query: str) -> dict[str, Any]:
         """Search accessible local knowledge within this request's resource scope."""
@@ -210,6 +225,23 @@ class ShovelContextProvider(ContextProvider):
         if budget < 500:
             raise RuntimeFailure("问题超过此模型的上下文预算,请缩短问题或调整 model.max_input_chars。")
         memory_context: list[dict[str, Any]] = []
+        compact = self.runtime.settings.performance.context_profile == "compact"
+        tool_chars = 0
+        if compact:
+            tool_chars, known_tools = tool_schema_size(context.tools)
+            if known_tools != len(context.tools):
+                raise RuntimeFailure("Compact context cannot budget an unknown tool schema.", status=503)
+            budget -= tool_chars
+            if budget < 500:
+                raise RuntimeFailure(
+                    "工具声明超过紧凑上下文预算;请切换 Chat、default profile 或增加 model.max_input_chars。"
+                )
+
+        async def summary_read() -> str:
+            with trace_duration("agent.summary.completed"):
+                return await self.runtime.memory.summary(self.identifier)
+
+        summary_task = asyncio.create_task(summary_read())
         memory_task = (
             asyncio.create_task(self.runtime.memory.search(request.content, conversation_id=self.identifier))
             if request.memory_enabled
@@ -226,10 +258,10 @@ class ShovelContextProvider(ContextProvider):
                     )
                 )
             )
-            if not self.standalone_greeting
+            if self.automatic_search
             else None
         )
-        tasks = [task for task in (memory_task, search_task) if task is not None]
+        tasks = [task for task in (memory_task, search_task, summary_task) if task is not None]
         try:
             await asyncio.gather(*tasks)
         finally:
@@ -241,6 +273,8 @@ class ShovelContextProvider(ContextProvider):
             assert memory_task is not None
             memories = memory_task.result()
             memory_budget = min(self.runtime.settings.memory.context_max_chars, budget // 4)
+            if compact:
+                memory_budget = min(memory_budget, 1000)
             for item in memories:
                 fact = item.get("memory")
                 if not isinstance(fact, str):
@@ -254,37 +288,63 @@ class ShovelContextProvider(ContextProvider):
                 used = len(json.dumps(entry, ensure_ascii=False)) + 20
                 budget -= used
                 memory_budget -= used
-        if self.standalone_greeting:
-            trace("retrieval.skipped", reason="standalone_greeting")
+        if not self.automatic_search:
+            trace(
+                "retrieval.skipped",
+                reason="chat_mode" if request.interaction_mode == "chat" else "standalone_greeting",
+            )
             sources = []
         else:
             assert search_task is not None
             sources = search_task.result()["items"]
         source_budget = budget * 3 // 4
+        if compact:
+            source_budget = min(2500, budget // 3)
         for source in sources:
             candidate = {"index": len(self.result.sources) + 1, **source}
             metadata = len(json.dumps({**candidate, "text": ""}, ensure_ascii=False))
             if source_budget - metadata < 150:
                 break
-            candidate["text"] = text_within_json_budget(
-                str(source["text"])[:4000], source_budget - metadata - 50
+            text = str(source["text"])[:4000]
+            candidate["text"] = (
+                text
+                if len(json.dumps(text, ensure_ascii=False)) <= source_budget - metadata - 50
+                else text_within_json_budget(text, source_budget - metadata - 50)
             )
             self.result.sources.append(candidate)
             used = len(json.dumps(candidate, ensure_ascii=False)) + 50
             budget -= used
             source_budget -= used
-        summary = await self.runtime.memory.summary(self.identifier)
+        summary = summary_task.result()
         if summary:
-            summary = text_within_json_budget(summary, min(budget // 3, 2500))
+            summary = text_within_json_budget(summary, min(budget // 3, 1000 if compact else 2500))
             budget -= len(json.dumps(summary, ensure_ascii=False)) + 50
         if request.memory_enabled:
-            self.result.warnings.extend(await self.runtime.memory.warnings())
+            # Recall updates index-error state, so warnings must follow it.
+            with trace_duration("agent.memory_status.completed"):
+                self.result.warnings.extend(await self.runtime.memory.warnings())
         history: list[Message] = []
-        for message in reversed(self.history):
-            if len(message.text) > budget:
-                break
-            history.append(message)
-            budget -= len(message.text)
+        if compact:
+            groups: list[list[Message]] = []
+            for message in self.history:
+                if message.role == "user":
+                    groups.append([message])
+                elif groups:
+                    groups[-1].append(message)
+            history_budget = min(budget, 4000)
+            for group in reversed(groups):
+                used = sum(len(message.text) for message in group)
+                if used > history_budget:
+                    break
+                history.extend(reversed(group))
+                history_budget -= used
+                budget -= used
+        else:
+            for message in reversed(self.history):
+                if len(message.text) > budget:
+                    break
+                history.append(message)
+                budget -= len(message.text)
         context.extend_messages(self, list(reversed(history)))
         evidence = json.dumps(
             {"sources": self.result.sources, "memory": memory_context, "session_summary": summary},
@@ -298,6 +358,13 @@ class ShovelContextProvider(ContextProvider):
             memories=len(memory_context),
             remaining_chars=budget,
             elapsed_ms=round((perf_counter() - started) * 1000, 2),
+            instructions_chars=len(self.instructions),
+            history_chars=sum(len(message.text) for message in history),
+            evidence_json_chars=len(evidence),
+            memory_json_chars=len(json.dumps(memory_context, ensure_ascii=False)),
+            summary_chars=len(summary),
+            context_profile=self.runtime.settings.performance.context_profile,
+            reserved_tool_schema_chars=tool_chars,
         )
 
     async def after_run(
@@ -326,7 +393,7 @@ class ShovelContextProvider(ContextProvider):
         references = {int(value) for value in re.findall(r"\[(\d+)\]", self.result.content)}
         if not references.issubset({source["index"] for source in self.result.sources}):
             raise RuntimeFailure("模型返回了未提供的引用编号,回答未标记为成功。", status=502)
-        if not self.result.sources and not self.standalone_greeting:
+        if not self.result.sources and self.automatic_search:
             self.result.warnings.append("未检索到匹配的本地资料;回答不能视为有本地来源支持的结论。")
         elif self.result.sources and not references:
             self.result.warnings.append("模型未标注本地引用;请自行核实回答。")
@@ -346,20 +413,31 @@ class ShovelContextProvider(ContextProvider):
 
 
 class ContextBudgetMiddleware(ChatMiddleware):
-    def __init__(self, limit: int, *, provider: str = "", model: str = "") -> None:
+    def __init__(
+        self, limit: int, *, provider: str = "", model: str = "", include_tool_schema: bool = False
+    ) -> None:
         self.limit = limit
         self.provider, self.model = provider, model
+        self.include_tool_schema = include_tool_schema
 
     async def process(self, context: ChatContext, call_next: Callable[[], Awaitable[None]]) -> None:
         started = perf_counter()
         call_id = uuid4().hex
-        size = sum(
+        message_chars = sum(
             len(content.text or "")
             if content.type == "text"
             else len(json.dumps(content.to_dict(), ensure_ascii=False))
             for message in context.messages
             for content in message.contents
         )
+        instructions_chars = len((context.options or {}).get("instructions") or "")
+        tools = (context.options or {}).get("tools") or []
+        schema_chars, known_tools = (
+            tool_schema_size(tools) if self.include_tool_schema or diagnostics_enabled() else (0, 0)
+        )
+        if self.include_tool_schema and known_tools != len(tools):
+            raise RuntimeFailure("Compact context cannot budget an unknown tool schema.", status=503)
+        size = message_chars + instructions_chars + (schema_chars if self.include_tool_schema else 0)
         if size > self.limit:
             trace("model.call.rejected", model_call_id=call_id, input_chars=size, limit=self.limit)
             raise RuntimeFailure(
@@ -375,6 +453,15 @@ class ContextBudgetMiddleware(ChatMiddleware):
             model=self.model,
             tools=len((context.options or {}).get("tools") or []),
         )
+        if diagnostics_enabled():
+            trace(
+                "model.context.size",
+                message_chars=message_chars,
+                instructions_chars=instructions_chars,
+                tool_schema_json_chars=schema_chars,
+                known_tool_schemas=known_tools,
+                tool_count=len(tools),
+            )
 
         first_text: float | None = None
 
@@ -499,7 +586,12 @@ class ShovelAgent:
         if self._framework is None:
             settings = self.runtime.settings.model
             if self._client is None:
-                self._client = httpx.AsyncClient(timeout=httpx.Timeout(settings.timeout_seconds, connect=10))
+                self._client = httpx.AsyncClient(
+                    timeout=httpx.Timeout(settings.timeout_seconds, connect=10),
+                    transport=self.runtime.performance.model_transport(
+                        settings, "foreground", self.runtime.stopping
+                    ),
+                )
             self._sdk, self._framework = create_framework_client(
                 settings,
                 self._client,
@@ -519,17 +611,24 @@ class ShovelAgent:
         started = perf_counter()
         await self.load_instructions()
         client = self.client()
-        extensions_started = perf_counter()
-        trace("agent.extensions.started")
-        await self.extensions.load(client)
-        trace(
-            "agent.extensions.ready",
-            tools=len(self.extensions.tools),
-            skills_enabled=self.extensions.skills is not None,
-            elapsed_ms=round((perf_counter() - extensions_started) * 1000, 2),
-        )
+        if request.interaction_mode == "agent":
+            extensions_started = perf_counter()
+            trace("agent.extensions.started")
+            await self.extensions.load(client)
+            trace(
+                "agent.extensions.ready",
+                tools=len(self.extensions.tools),
+                skills_enabled=self.extensions.skills is not None,
+                elapsed_ms=round((perf_counter() - extensions_started) * 1000, 2),
+            )
         knowledge = ShovelContextProvider(
-            self.runtime, identifier, request, history, instructions=self.instructions
+            self.runtime,
+            identifier,
+            request,
+            history,
+            instructions=self.instructions + _CHAT_MODE
+            if request.interaction_mode == "chat"
+            else self.instructions,
         )
 
         async def list_resources() -> dict[str, Any]:
@@ -555,25 +654,28 @@ class ShovelAgent:
             }
 
         providers: list[ContextProvider] = [knowledge]
-        if self.extensions.skills is not None:
+        if request.interaction_mode == "agent" and self.extensions.skills is not None:
             providers.append(self.extensions.skills)
         agent = Agent(
             client=client,
             name="shovel",
-            instructions=self.instructions,
+            instructions=knowledge.instructions,
             tools=[
                 knowledge.search,
                 list_resources,
                 list_extensions,
                 *agent_tools(self.runtime.platform),
                 *self.extensions.tools,
-            ],
+            ]
+            if request.interaction_mode == "agent"
+            else [],
             context_providers=providers,
             middleware=[
                 ContextBudgetMiddleware(
                     self.runtime.settings.model.max_input_chars,
                     provider=self.runtime.settings.model.model_provider_type.value,
                     model=self.runtime.settings.model.model_name,
+                    include_tool_schema=self.runtime.settings.performance.context_profile == "compact",
                 ),
                 ToolDiagnosticsMiddleware(self.runtime, identifier, run_id),
             ],
@@ -604,6 +706,11 @@ class ShovelAgent:
             trace("model.completed", elapsed_ms=round((perf_counter() - started) * 1000, 2))
             return knowledge.result
         except (APIError, ChatClientException) as exc:
+            cause: BaseException | None = exc
+            while cause is not None:
+                if isinstance(cause, RuntimeFailure):
+                    raise cause from None
+                cause = cause.__cause__
             raise RuntimeFailure("Agent 模型请求失败;请检查模型端点、凭据和服务日志。", status=502) from exc
 
     async def close(self) -> None:

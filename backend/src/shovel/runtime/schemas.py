@@ -223,6 +223,13 @@ class MessageInput(InputModel):
     resource_ids: list[str] = Field(default_factory=list, max_length=200)
     memory_enabled: bool = True
     search_mode: SearchMode = "auto"
+    interaction_mode: Literal["agent", "chat"] = "agent"
+
+    @model_validator(mode="after")
+    def validate_interaction_mode(self) -> MessageInput:
+        if self.interaction_mode == "chat" and (self.resource_ids or self.search_mode != "auto"):
+            raise ValueError("Chat mode does not accept resource_ids or an explicit search_mode.")
+        return self
 
 
 class CredentialInput(InputModel):

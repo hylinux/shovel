@@ -55,6 +55,27 @@ def trace(event: str, **fields: object) -> None:
         logger.debug(event, **fields)
 
 
+def diagnostics_enabled() -> bool:
+    return _logger.get() is not None
+
+
+@contextmanager
+def trace_duration(event: str, **fields: object) -> Iterator[None]:
+    started = perf_counter()
+    try:
+        yield
+    except BaseException as exc:
+        trace(
+            event,
+            elapsed_ms=round((perf_counter() - started) * 1000, 2),
+            error_type=type(exc).__name__,
+            **fields,
+        )
+        raise
+    else:
+        trace(event, elapsed_ms=round((perf_counter() - started) * 1000, 2), **fields)
+
+
 class DevelopmentRequestLogging:
     def __init__(self, app: ASGIApp) -> None:
         self.app = app

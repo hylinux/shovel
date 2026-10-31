@@ -126,9 +126,17 @@ class Runtime:
             self.invocations,
             {
                 CapabilityKind.FUNCTION: FunctionExecutor({}),
-                CapabilityKind.SKILL: SkillExecutor(lambda: self.chat.agent.client()),
+                CapabilityKind.SKILL: SkillExecutor(
+                    lambda: self.chat.agent.client(),
+                    model_scope=lambda: self.performance.models.source("platform"),
+                    options=lambda: self.chat.agent.output_options(self.settings.model.max_output_tokens),
+                ),
                 CapabilityKind.WORKFLOW: WorkflowExecutor(),
-                CapabilityKind.AGENT: AgentExecutor(lambda: self.chat.agent.client()),
+                CapabilityKind.AGENT: AgentExecutor(
+                    lambda: self.chat.agent.client(),
+                    model_scope=lambda: self.performance.models.source("platform"),
+                    options=lambda: self.chat.agent.output_options(self.settings.model.max_output_tokens),
+                ),
             },
             workflow_context=self.workflows.bind,
             wakeups=self.wakeups,
@@ -148,7 +156,15 @@ class Runtime:
         )
         self.operations: OperationService = OperationService(self)
         self.retrieval: RetrievalService = RetrievalService(self)
-        self.memory: MemoryService = MemoryService(settings, sessions)
+        self.memory: MemoryService = MemoryService(
+            settings,
+            sessions,
+            model_transport=lambda: self.performance.model_transport(
+                settings.memory.llm if settings.memory.llm.is_configured else settings.model,
+                "memory",
+                self.stopping,
+            ),
+        )
         self.memory_tasks: MemoryTaskService = MemoryTaskService(self)
         self.instructions: AgentInstructionsService = AgentInstructionsService(
             settings.agent.workspace, settings.model.max_input_chars

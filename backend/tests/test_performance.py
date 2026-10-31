@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from pathlib import Path
 from typing import Any
 
 import httpx
@@ -22,6 +23,7 @@ from shovel.runtime.service import Runtime
 from shovel.vector.store import init_vector_store
 from test_hosted_runtime import api as api
 from test_hosted_runtime import runtime as runtime
+from test_hosted_runtime import streamed_completion
 from test_memory_tasks import enqueue
 
 
@@ -229,7 +231,7 @@ async def test_warmup_uses_owned_resources_and_reports_failures_without_secrets(
     monkeypatch.setattr(runtime.chat, "warm_model", model)
     runtime.warmup = RuntimeWarmup(runtime)
     await runtime.warmup.run()
-    assert calls == ["index", "memory", "embedding", "model"]
+    assert calls == ["model", "index", "memory", "embedding"]
     assert runtime.warmup.states["index"]["state"] == "failed"
     assert runtime.warmup.states["chat_model"]["state"] == "ready"
     assert not runtime.performance.warming
@@ -369,3 +371,269 @@ async def test_model_warmup_uses_maf_without_loading_extensions_or_saving_messag
 
     async with runtime.sessions() as session:
         assert await session.scalar(select(ChatMessage)) is None
+
+
+async def test_pure_chat_is_enforced_for_rest_and_agui_without_loading_extensions(
+    runtime: Runtime, api: httpx.AsyncClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import json
+
+    from shovel.runtime.model_admission import ModelAdmissionTransport
+
+    requests: list[dict[str, Any]] = []
+    recalled: list[str] = []
+
+    class DelayedStream(httpx.AsyncByteStream):
+        async def __aiter__(self):
+            for frame in streamed_completion("Hello").content.split(b"\n\n"):
+                if frame:
+                    yield frame + b"\n\n"
+                    await asyncio.sleep(0.01)
+
+    async def forbidden(*_args: Any, **_kwargs: Any) -> Any:
+        pytest.fail("Pure Chat must not load extensions or run RAG.")
+
+    async def memory(query: str, **_kwargs: Any) -> list[dict[str, Any]]:
+        recalled.append(query)
+        return [{"memory": "The user likes concise answers."}]
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        payload = json.loads(request.content)
+        requests.append(payload)
+        assert not payload.get("tools")
+        assert "The user likes concise answers." in json.dumps(payload, ensure_ascii=False)
+        assert "Current mode: Chat" in json.dumps(payload)
+        if payload.get("stream"):
+            return httpx.Response(200, stream=DelayedStream(), headers={"content-type": "text/event-stream"})
+        return httpx.Response(
+            200, json={"created": 1, "choices": [{"message": {"role": "assistant", "content": "Hello"}}]}
+        )
+
+    monkeypatch.setattr(runtime.retrieval, "search", forbidden)
+    monkeypatch.setattr(runtime.chat.agent.extensions, "load", forbidden)
+    monkeypatch.setattr(runtime.memory, "search", memory)
+    runtime.chat.agent._client = httpx.AsyncClient(
+        transport=ModelAdmissionTransport(
+            runtime.performance.models, "foreground", runtime.stopping, httpx.MockTransport(respond)
+        )
+    )
+    conversation = (await api.post("/api/v1/conversations", json={})).json()
+    response = await api.post(
+        f"/api/v1/conversations/{conversation['id']}/messages",
+        json={"content": "First question", "interaction_mode": "chat"},
+    )
+    assert response.status_code == 200
+    assert not any("本地" in warning for warning in response.json()["warnings"])
+    stream = await asyncio.wait_for(
+        api.post(
+            "/api/v1/agent",
+            json={
+                "threadId": conversation["id"],
+                "runId": "pure-chat",
+                "messages": [{"id": "user", "role": "user", "content": "Second question"}],
+                "forwardedProps": {"interaction_mode": "chat"},
+                "context": [],
+                "tools": [{"name": "search", "description": "forged tool", "parameters": {}}],
+            },
+        ),
+        3,
+    )
+    assert stream.status_code == 200 and "RUN_FINISHED" in stream.text
+    assert len(requests) == 2 and recalled == ["First question", "Second question"]
+    assert "First question" in json.dumps(requests[1])
+    invalid = await api.post(
+        f"/api/v1/conversations/{conversation['id']}/messages",
+        json={"content": "Question", "interaction_mode": "chat", "search_mode": "keyword"},
+    )
+    assert invalid.status_code == 422
+
+
+async def test_compact_context_keeps_complete_recent_history_without_sync_summarization(
+    runtime: Runtime, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import json
+
+    runtime.settings.performance.context_profile = "compact"
+    runtime.settings.model.max_input_chars = 12000
+    payloads: list[dict[str, Any]] = []
+
+    async def summary(_identifier: str) -> str:
+        return "Persistent summary"
+
+    monkeypatch.setattr(runtime.memory, "summary", summary)
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        payloads.append(json.loads(request.content))
+        return httpx.Response(
+            200, json={"created": 1, "choices": [{"message": {"role": "assistant", "content": "Answer"}}]}
+        )
+
+    runtime.chat.agent._client = httpx.AsyncClient(transport=httpx.MockTransport(respond))
+    result = await runtime.chat.agent.respond(
+        "test",
+        MessageInput(content="Follow up", interaction_mode="chat", memory_enabled=False),
+        [
+            Message("assistant", ["orphan"]),
+            Message("user", ["older " * 1000]),
+            Message("assistant", ["old reply"]),
+            Message("user", ["recent question"]),
+            Message("assistant", ["recent answer"]),
+        ],
+    )
+    encoded = json.dumps(payloads[0])
+    assert result.content == "Answer"
+    assert "recent question" in encoded and "recent answer" in encoded and "Persistent summary" in encoded
+    assert "orphan" not in encoded and "older older" not in encoded and "old reply" not in encoded
+
+
+async def test_embedding_singleflight_retains_other_reader_and_clears_failures(
+    runtime: Runtime,
+) -> None:
+    started, release = asyncio.Event(), asyncio.Event()
+    calls: list[str] = []
+
+    class Embedder:
+        model_version = "test"
+        dimension = 4
+
+        async def embed(self, texts: list[str]) -> list[list[float]]:
+            calls.append(texts[0])
+            started.set()
+            await release.wait()
+            if texts[0] == "bad":
+                raise ValueError("embedding failed")
+            return [[1.0, 0.0, 0.0, 0.0]]
+
+        async def aclose(self) -> None:
+            pass
+
+    runtime.retrieval._embedder = Embedder()
+    first = asyncio.create_task(runtime.retrieval.embed_query("same"))
+    await started.wait()
+    second = asyncio.create_task(runtime.retrieval.embed_query("same"))
+    await asyncio.sleep(0)
+    first.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await first
+    release.set()
+    vector, _ = await second
+    assert vector == [1.0, 0.0, 0.0, 0.0] and calls == ["same"]
+    for _ in range(2):
+        with pytest.raises(ValueError, match="embedding failed"):
+            await runtime.retrieval.embed_query("bad")
+    assert calls == ["same", "bad", "bad"]
+
+
+async def test_keyword_hydration_batches_metadata_queries_without_changing_results(
+    runtime: Runtime,
+    tmp_path: Path,
+) -> None:
+    from sqlalchemy import event
+
+    from shovel.runtime.schemas import ResourceInput, ScanInput, SearchInput
+
+    corpus = tmp_path / "query-corpus"
+    corpus.mkdir()
+    for index in range(8):
+        (corpus / f"document-{index}.md").write_text(
+            f"# Document {index}\n\nShovel query optimization.\n\n" + "This is searchable content.\n" * 20,
+            encoding="utf-8",
+        )
+    created = await runtime.operations.create_resource(
+        ResourceInput(name="query corpus", connector_kind="local_fs", config={"root_path": str(corpus)})
+    )
+    await runtime.operations.run_once()
+    assert created.resource_id
+    scan = await runtime.operations.scan(created.resource_id, ScanInput(embed=False))
+    await runtime.operations.run_once()
+    assert (await runtime.operations.get(scan.id)).state == "succeeded"
+    statements: list[str] = []
+    engine = runtime.sessions.kw["bind"].sync_engine
+
+    def query(_conn: Any, _cursor: Any, statement: str, *_args: Any) -> None:
+        if statement.lstrip().upper().startswith("SELECT"):
+            statements.append(statement)
+
+    event.listen(engine, "before_cursor_execute", query)
+    try:
+        result = await runtime.retrieval.search(SearchInput(query="Shovel", mode="keyword", limit=6))
+    finally:
+        event.remove(engine, "before_cursor_execute", query)
+    assert len(result["items"]) == 6
+    assert len({hit["doc_uri"] for hit in result["items"]}) == 6
+    assert all(
+        hit["resource_id"] == created.resource_id and "searchable content" in hit["text"]
+        for hit in result["items"]
+    )
+    assert len(statements) <= 6
+
+
+async def test_last_embedding_reader_cancellation_stops_owned_network_work(runtime: Runtime) -> None:
+    started, cancelled = asyncio.Event(), asyncio.Event()
+
+    class Embedder:
+        model_version = "test"
+        dimension = 4
+
+        async def embed(self, _texts: list[str]) -> list[list[float]]:
+            started.set()
+            try:
+                await asyncio.Event().wait()
+            finally:
+                cancelled.set()
+            return []
+
+        async def aclose(self) -> None:
+            pass
+
+    runtime.retrieval._embedder = Embedder()
+    reader = asyncio.create_task(runtime.retrieval.embed_query("cancel"))
+    await started.wait()
+    reader.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await reader
+    assert cancelled.is_set()
+    assert not runtime.retrieval._embedding_reads
+
+
+async def test_sdk_preserves_friendly_local_queue_timeout(runtime: Runtime) -> None:
+    from shovel.runtime.model_admission import ModelAdmissionTransport
+
+    runtime.performance.models.timeout = 0.05
+
+    def forbidden(_request: httpx.Request) -> httpx.Response:
+        pytest.fail("A queued request must not reach the model.")
+
+    runtime.chat.agent._client = httpx.AsyncClient(
+        transport=ModelAdmissionTransport(
+            runtime.performance.models, "foreground", runtime.stopping, httpx.MockTransport(forbidden)
+        )
+    )
+    async with runtime.performance.models.admit("memory", runtime.stopping):
+        with pytest.raises(RuntimeFailure, match="等待超时") as error:
+            await runtime.chat.agent.respond(
+                "test", MessageInput(content="Hello", interaction_mode="chat", memory_enabled=False), []
+            )
+    assert error.value.status == 503
+
+
+async def test_final_context_budget_counts_maf_instructions_and_compact_tool_schema(runtime: Runtime) -> None:
+    from agent_framework import tool
+
+    async def forbidden() -> None:
+        pytest.fail("An over-budget request must not reach the provider.")
+
+    context = ChatContext(
+        runtime.chat.agent.client(),
+        [Message("user", ["question"])],
+        {"instructions": "x" * 100},
+        stream=False,
+    )
+    with pytest.raises(RuntimeFailure, match="上下文超过"):
+        await ContextBudgetMiddleware(100).process(context, forbidden)
+    function = tool(lambda value: value, name="echo", description="A test tool")
+    context = ChatContext(
+        runtime.chat.agent.client(), [Message("user", ["question"])], {"tools": [function]}, stream=False
+    )
+    with pytest.raises(RuntimeFailure, match="上下文超过"):
+        await ContextBudgetMiddleware(100, include_tool_schema=True).process(context, forbidden)

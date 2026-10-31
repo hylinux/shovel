@@ -5,14 +5,14 @@ from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from time import monotonic, perf_counter
 from typing import TYPE_CHECKING, Any
-from urllib.parse import urlsplit
 
 import structlog
 
-from shovel.config.model_settings import ModelProviderType
+from shovel.config.model_settings import DefaultAgentModelSettings, ModelProviderType
 from shovel.config.settings import AppSettings
-from shovel.runtime.diagnostics import trace
+from shovel.runtime.diagnostics import diagnostics_enabled, trace
 from shovel.runtime.errors import RuntimeFailure
+from shovel.runtime.model_admission import LocalModelAdmission, ModelAdmissionTransport, local_ollama
 
 if TYPE_CHECKING:
     from shovel.runtime.service import Runtime
@@ -29,6 +29,16 @@ class RuntimePerformance:
         self.running = 0
         self.last_foreground = float("-inf")
         self.warming = False
+        self.models = LocalModelAdmission(
+            self.settings.max_local_model_requests, self.settings.foreground_queue_seconds
+        )
+
+    def model_transport(
+        self, settings: DefaultAgentModelSettings, source: str, stopping: asyncio.Event
+    ) -> ModelAdmissionTransport | None:
+        if local_ollama(settings.model_provider_type, settings.base_endpoint, settings.model_name):
+            return ModelAdmissionTransport(self.models, source, stopping)
+        return None
 
     @asynccontextmanager
     async def admit(self, stopping: asyncio.Event) -> AsyncIterator[None]:
@@ -45,10 +55,28 @@ class RuntimePerformance:
                 raise RuntimeFailure("Host 正在停止。", status=503)
             self.running += 1
             trace("chat.admitted", queue_ms=round((perf_counter() - started) * 1000, 2))
+            lag = 0.0
+            samples = 0
+
+            async def sample_loop() -> None:
+                nonlocal lag, samples
+                while True:
+                    tick = monotonic()
+                    await asyncio.sleep(0.1)
+                    lag = max(lag, monotonic() - tick - 0.1)
+                    samples += 1
+
+            sampler = asyncio.create_task(sample_loop()) if diagnostics_enabled() else None
             try:
                 yield
             finally:
-                self.running -= 1
+                try:
+                    if sampler is not None:
+                        sampler.cancel()
+                        await asyncio.gather(sampler, return_exceptions=True)
+                        trace("chat.loop_delay", max_ms=round(lag * 1000, 2), samples=samples)
+                finally:
+                    self.running -= 1
         finally:
             if acquired:
                 self._slots.release()
@@ -79,15 +107,6 @@ class RuntimeWarmup:
     def __init__(self, runtime: Runtime) -> None:
         self.runtime = runtime
         settings = runtime.settings
-
-        def local_ollama(provider: str, endpoint: str, model: str) -> bool:
-            target = urlsplit(endpoint or "http://127.0.0.1:11434")
-            return (
-                provider == "ollama"
-                and target.scheme == "http"
-                and target.hostname in {"127.0.0.1", "localhost", "::1"}
-                and not model.endswith(("-cloud", ":cloud"))
-            )
 
         local_memory = local_ollama(
             settings.memory.embedder.provider,
@@ -129,10 +148,10 @@ class RuntimeWarmup:
 
     async def run(self) -> None:
         actions: dict[str, Callable[[], Awaitable[object]]] = {
+            "chat_model": self.runtime.chat.warm_model,
             "index": self.runtime.sink,
             "memory_embedding": self.runtime.memory.warmup,
             "rag_embedding": lambda: self.runtime.retrieval.embed_query("Shovel warmup"),
-            "chat_model": self.runtime.chat.warm_model,
         }
         for component, action in actions.items():
             if self.states[component]["state"] != "cold":

@@ -5,10 +5,12 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+from collections.abc import Callable
 from dataclasses import replace
 from time import perf_counter
 from typing import Any
 
+import httpx
 import structlog
 from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -41,13 +43,18 @@ _INDEX_ERRORS = (EmbeddingError, VectorSinkError, OSError, RuntimeError, ValueEr
 
 
 class MemoryService:
-    def __init__(self, settings: AppSettings, sessions: async_sessionmaker[AsyncSession]) -> None:
+    def __init__(
+        self,
+        settings: AppSettings,
+        sessions: async_sessionmaker[AsyncSession],
+        model_transport: Callable[[], httpx.AsyncBaseTransport | None] | None = None,
+    ) -> None:
         self.settings, self.sessions = settings, sessions
         workspace = hashlib.sha256(str(settings.agent.workspace.resolve()).encode()).hexdigest()[:24]
         self.owner = MemoryScope(workspace)
         self.repository = SQLiteMemoryRepository(sessions)
         model = settings.memory.llm if settings.memory.llm.is_configured else settings.model
-        self.extractor = AgentFrameworkMemoryExtractor(model)
+        self.extractor = AgentFrameworkMemoryExtractor(model, model_transport)
         self.index = (
             ZvecMemoryIndex(
                 settings.memory,

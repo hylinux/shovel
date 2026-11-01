@@ -8,6 +8,9 @@ a Git commit; no sibling checkout is required. On Windows, use x64 Python for
 the native Zvec dependency, including under x64 emulation on ARM64:
 `uv sync --python 3.14-x86_64 --locked --all-extras --dev`.
 Keep Windows and WSL environments separate.
+The local uv default index is configured in `pyproject.toml`; CI/release override
+it with `UV_DEFAULT_INDEX=https://pypi.org/simple`. Preserve the committed lock
+when using a different package index.
 
 Run Python commands from the repository root:
 
@@ -89,6 +92,9 @@ in `.github\workflows\ci.yml`.
   it, including child calls. The durable root reuses physical `operation`, not
   parallel SkillTask/WorkflowTask/ProactiveTask tables. Legacy Job/Chat/Memory
   lifecycles have not all migrated into this engine.
+  Legacy Operation reads must exclude rows whose `capability_version_id` or
+  `execution_data` is non-null; use `db\operation_repository.py`'s reader rather
+  than mixing platform Executions into legacy task queries.
 - `automation\` matches revisioned Proactive configuration and declarative
   conditions/input mappings, then invokes a capability. ScheduleTriggerService
   only publishes NormalizedEvents. The bounded in-process EventBus is not durable:
@@ -136,8 +142,12 @@ in `.github\workflows\ci.yml`.
 - Before frontend changes, follow `frontend\AGENTS.md` (also imported by
   `frontend\CLAUDE.md`) and read the relevant installed Next.js guide under
   `frontend\node_modules\next\dist\docs`. This project uses a canary release.
+  The marked Next.js block in `frontend\AGENTS.md` is maintained by `next dev`;
+  removing it only causes it to be regenerated.
   Preserve static export: backend functionality belongs in FastAPI, not
   server actions or production Next.js routes.
+- Use **Session**, not Conversation, in frontend UI text and types. Preserve
+  `/conversations` REST paths and `conversation_id` wire fields for compatibility.
 - REST routes use `/api/v1`; collections return `{"items": [...]}`. Durable
   resource/scan/cleanup and Memory create/update/rebuild mutations return HTTP 202
   plus an Operation, not the completed resource. Preserve `Idempotency-Key` across lost responses and
@@ -156,6 +166,10 @@ in `.github\workflows\ci.yml`.
   Risk, Policy and Approval and is rechecked at dispatch/after approval; approval
   never supplies a missing grant. Any applicable approval requirement wins,
   including explicit Workflow Approval nodes and platform minimums.
+- `SecurityPolicyProvider.load` must remain read-only and must not acquire
+  database write locks. Execution dispatch and approval decisions call the gate
+  inside `db\unit_of_work.py`'s `sqlite_write` (`BEGIN IMMEDIATE`); opening another
+  write transaction from policy resolution would contend with that transaction.
 - Capability publishing, service enable/resume, global automation resume,
   approval/rejection and input require an exact server preview (`prepare: true`)
   followed by the same intent and `confirmation_id`. Tickets are process-local,
@@ -218,6 +232,13 @@ in `.github\workflows\ci.yml`.
   instructions, serialized references, history and tool results; the final
   `ContextBudgetMiddleware` rejects overflow. Main instructions do not replace
   the isolated Memory extractor/summarizer prompts.
+- Loopback Ollama generation shares `RuntimePerformance.models` admission across
+  Main Agent, platform Skill/Agent, Memory and warmup. Reuse
+  `runtime\model_admission.py`'s transport: its lease covers the HTTP response
+  body, not an entire Agent run, so parent tool calls do not hold a slot while
+  waiting for a child model. Remote providers are excluded; query embeddings
+  remain independently parallel. Background extraction waits for foreground
+  idle, but already-running inference is not preempted.
 - Connector configuration is persisted; capabilities and implementations live
   in `services\connector_registry.py`. Connectors implement the Protocol and
   exchange plain data, without database sessions or ORM objects.

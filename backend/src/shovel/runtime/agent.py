@@ -92,6 +92,32 @@ _PERSONAL_MEMORY_QUESTION = re.compile(
     r"(?:name|occupation|profession|job|timezone|language|background))*)",
     re.IGNORECASE,
 )
+_LOCAL_CITATION = re.compile(
+    r"```[\s\S]*?(?:```|$)|`[^`\n]*`|"
+    r"(?P<opening>[\[【\uff3b])\s*(?:(?:sources?|来源|资料)\s*[:\uff1a]?\s*)?"
+    r"(?P<indices>\d+(?:\s*[,\uff0c、]\s*\d+)*)\s*(?P<closing>[\]】\uff3d])",
+    re.IGNORECASE,
+)
+
+
+def normalize_local_citations(content: str, available: set[int]) -> tuple[str, set[int]]:
+    references: set[int] = set()
+    pairs = {"[": "]", "【": "】", "\uff3b": "\uff3d"}
+
+    def normalize(match: re.Match[str]) -> str:
+        opening = match.group("opening")
+        if opening is None or pairs[opening] != match.group("closing"):
+            return match.group(0)
+        try:
+            indices = [int(value) for value in re.findall(r"\d+", match.group("indices"))]
+        except ValueError as exc:
+            raise RuntimeFailure("模型返回了无效的引用编号,回答未标记为成功。", status=502) from exc
+        if not set(indices).issubset(available):
+            raise RuntimeFailure("模型返回了未提供的引用编号,回答未标记为成功。", status=502)
+        references.update(indices)
+        return "".join(f"[{index}]" for index in dict.fromkeys(indices))
+
+    return _LOCAL_CITATION.sub(normalize, content), references
 
 
 def standalone_greeting(request: MessageInput, history: list[Message]) -> bool:
@@ -205,6 +231,7 @@ class ShovelContextProvider(ContextProvider):
         self.runtime, self.identifier, self.request, self.history = runtime, identifier, request, history
         self.instructions = instructions
         self.result = AgentResult()
+        self.has_retrieval_matches = False
         self.standalone_greeting = standalone_greeting(request, history)
         self.personal_memory_question = personal_memory_question(request)
         self.automatic_search = not (self.standalone_greeting or self.personal_memory_question)
@@ -219,6 +246,7 @@ class ShovelContextProvider(ContextProvider):
                 limit=6,
             )
         )
+        self.has_retrieval_matches |= bool(found["items"])
         # Tool searches share the citation registry with automatic RAG grounding.
         budget = min(8000, self.runtime.settings.model.max_input_chars // 3)
         items: list[dict[str, Any]] = []
@@ -334,6 +362,7 @@ class ShovelContextProvider(ContextProvider):
         else:
             assert search_task is not None
             sources = search_task.result()["items"]
+        self.has_retrieval_matches |= bool(sources)
         source_budget = budget * 3 // 4
         if compact:
             source_budget = min(2500, budget // 3)
@@ -442,13 +471,20 @@ class ShovelContextProvider(ContextProvider):
         )
         if not self.result.content:
             raise RuntimeFailure("Agent 未返回有效的文本回答。", status=502)
-        references = {int(value) for value in re.findall(r"\[(\d+)\]", self.result.content)}
-        if not references.issubset({source["index"] for source in self.result.sources}):
-            raise RuntimeFailure("模型返回了未提供的引用编号,回答未标记为成功。", status=502)
-        if not self.result.sources and self.automatic_search:
-            self.result.warnings.append("未检索到匹配的本地资料;回答不能视为有本地来源支持的结论。")
+        self.result.content, references = normalize_local_citations(
+            self.result.content, {source["index"] for source in self.result.sources}
+        )
+        if not self.result.sources and (self.automatic_search or self.has_retrieval_matches):
+            self.result.warnings.append(
+                "已检索到本地资料,但上下文预算不足以提供可引用内容;回答不能视为有本地来源支持的结论。"
+                if self.has_retrieval_matches
+                else "未检索到匹配的本地资料;回答不能视为有本地来源支持的结论。"
+            )
         elif self.result.sources and not references:
-            self.result.warnings.append("模型未标注本地引用;请自行核实回答。")
+            self.result.warnings.append(
+                f"本轮已检索并提供 {len(self.result.sources)} 条本地参考资料,但模型未标注有效引用;"
+                "未引用的资料不能视为本回答的来源,请自行核实。"
+            )
         self.result.sources = [item for item in self.result.sources if item["index"] in references]
         trace(
             "agent.response.validated",

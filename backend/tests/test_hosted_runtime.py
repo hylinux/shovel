@@ -1007,13 +1007,31 @@ async def test_real_vector_search_reads_authoritative_scoped_chunks(
     monkeypatch.setattr(HttpEmbedder, "_ensure_client", original)
 
 
+@pytest.mark.parametrize(
+    ("marker", "normalized", "indices"),
+    [
+        ("[1]", "[1]", [1]),
+        ("【1】", "[1]", [1]),
+        ("\uff3b\uff11\uff3d", "[1]", [1]),
+        ("[1, 2]", "[1][2]", [1, 2]),
+        ("【来源\uff1a1、2】", "[1][2]", [1, 2]),
+        ("[Sources: 1, 2]", "[1][2]", [1, 2]),
+        ("【2】", "[2]", [2]),
+    ],
+)
 async def test_chat_citations_persist_without_memory(
     runtime: Runtime,
     api: httpx.AsyncClient,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    marker: str,
+    normalized: str,
+    indices: list[int],
 ) -> None:
     identifier = await index_notes(runtime, tmp_path / "notes")
+    resource_ids = [identifier]
+    if max(indices) == 2:
+        resource_ids.append(await index_notes(runtime, tmp_path / "more-notes", "more-notes"))
     captured: list[dict[str, Any]] = []
 
     def response(request: httpx.Request) -> httpx.Response:
@@ -1024,7 +1042,7 @@ async def test_chat_citations_persist_without_memory(
             json={
                 "created": 1,
                 "choices": [
-                    {"message": {"role": "assistant", "content": "Shovel uses a durable queue [1]."}}
+                    {"message": {"role": "assistant", "content": f"Shovel uses a durable queue {marker}."}}
                 ],
             },
         )
@@ -1040,7 +1058,7 @@ async def test_chat_citations_persist_without_memory(
         f"/api/v1/conversations/{conversation['id']}/messages",
         json={
             "content": "How does the Shovel queue work?",
-            "resource_ids": [identifier],
+            "resource_ids": resource_ids,
             "search_mode": "keyword",
             "memory_enabled": False,
         },
@@ -1048,8 +1066,13 @@ async def test_chat_citations_persist_without_memory(
     assert response.status_code == 200, response.text
     answer = response.json()
     assert answer["state"] == "completed"
-    assert answer["citations"][0]["resource_id"] == identifier
-    assert answer["citations"][0]["index"] == 1
+    assert answer["content"] == f"Shovel uses a durable queue {normalized}."
+    assert [citation["index"] for citation in answer["citations"]] == indices
+    evidence = json.loads(captured[0]["messages"][-2]["content"].split("\n", 1)[1])
+    assert answer["citations"] == [item for item in evidence["sources"] if item["index"] in indices]
+    assert {item["resource_id"] for item in evidence["sources"]} == set(resource_ids)
+    assert not answer["warnings"]
+    assert "根据资料作出的结论必须就近标注" in captured[0]["messages"][0]["content"]
     assert "durable" in captured[0]["messages"][-2]["content"]
     assert captured[0]["messages"][-1]["role"] == "user"
     history = (await api.get(f"/api/v1/conversations/{conversation['id']}/messages")).json()["items"]
@@ -1057,9 +1080,11 @@ async def test_chat_citations_persist_without_memory(
     assert history[-1]["citations"] == answer["citations"]
 
 
+@pytest.mark.parametrize("marker", ["[99]", "【99】", "[1, 99]", "【来源\uff1a99】"])
 async def test_invalid_model_citations_are_explicit_persisted_failure(
     runtime: Runtime,
     tmp_path: Path,
+    marker: str,
 ) -> None:
     identifier = await index_notes(runtime, tmp_path / "notes")
     runtime.chat.agent._client = httpx.AsyncClient(
@@ -1068,7 +1093,7 @@ async def test_invalid_model_citations_are_explicit_persisted_failure(
                 200,
                 json={
                     "created": 1,
-                    "choices": [{"message": {"role": "assistant", "content": "Invented [99]."}}],
+                    "choices": [{"message": {"role": "assistant", "content": f"Invented {marker}."}}],
                 },
             )
         )
@@ -1087,6 +1112,88 @@ async def test_invalid_model_citations_are_explicit_persisted_failure(
     history = await runtime.chat.messages(conversation.id)
     assert history[-1].state == "failed"
     assert not history[-1].citations
+
+
+@pytest.mark.parametrize("protocol", ["rest", "agui"])
+@pytest.mark.parametrize(
+    "model_content",
+    ["General answer without citations.", "Example: `items[99]`.\n```python\nvalues = [1, 99]\n```"],
+)
+async def test_uncited_answers_distinguish_retrieval_from_citations(
+    runtime: Runtime, api: httpx.AsyncClient, tmp_path: Path, protocol: str, model_content: str
+) -> None:
+    resource_id = await index_notes(runtime, tmp_path / "notes")
+    prompts: list[dict[str, Any]] = []
+
+    def complete(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        prompts.append(body)
+        if body.get("stream"):
+            return streamed_completion(model_content)
+        return httpx.Response(
+            200,
+            json={
+                "created": 1,
+                "choices": [{"message": {"role": "assistant", "content": model_content}}],
+            },
+        )
+
+    runtime.chat.agent._client = httpx.AsyncClient(transport=httpx.MockTransport(complete))
+    conversation = (await api.post("/api/v1/conversations", json={})).json()["id"]
+    payload = {"content": "Shovel queue", "resource_ids": [resource_id], "memory_enabled": False}
+    if protocol == "rest":
+        response = await api.post(f"/api/v1/conversations/{conversation}/messages", json=payload)
+        assert response.status_code == 200, response.text
+    else:
+        events = [
+            event
+            async for event in runtime.chat.stream(
+                conversation, MessageInput.model_validate(payload), "uncited-run"
+            )
+        ]
+        assert events[-1].type == "RUN_FINISHED"
+    saved = (await runtime.chat.messages(conversation))[-1]
+    evidence = json.loads(prompts[0]["messages"][-2]["content"].split("\n", 1)[1])
+    assert evidence["sources"][0]["resource_id"] == resource_id
+    assert saved.content == model_content and saved.state == "completed"
+    assert not saved.citations and not saved.memory_operation_id
+    assert len(prompts) == 1
+    assert any("已检索并提供" in warning and "不能视为" in warning for warning in saved.warnings)
+    assert not any("未检索到" in warning for warning in saved.warnings)
+
+
+async def test_retrieved_evidence_dropped_by_budget_is_not_reported_as_no_matches(
+    runtime: Runtime, api: httpx.AsyncClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    resource_id = await index_notes(runtime, tmp_path / "notes")
+    found = await runtime.retrieval.search(SearchInput(query="Shovel"))
+    found["items"][0]["title"] = "x" * 8000
+    runtime.settings.model.max_input_chars = 2000
+
+    async def search(_request: SearchInput) -> dict[str, Any]:
+        return found
+
+    def complete(request: httpx.Request) -> httpx.Response:
+        evidence = json.loads(json.loads(request.content)["messages"][-2]["content"].split("\n", 1)[1])
+        assert evidence["sources"] == []
+        return httpx.Response(
+            200,
+            json={
+                "created": 1,
+                "choices": [{"message": {"role": "assistant", "content": "No usable evidence."}}],
+            },
+        )
+
+    monkeypatch.setattr(runtime.retrieval, "search", search)
+    runtime.chat.agent._client = httpx.AsyncClient(transport=httpx.MockTransport(complete))
+    conversation = (await api.post("/api/v1/conversations", json={})).json()["id"]
+    response = await api.post(
+        f"/api/v1/conversations/{conversation}/messages",
+        json={"content": "Shovel", "resource_ids": [resource_id], "memory_enabled": False},
+    )
+    assert response.status_code == 200, response.text
+    assert not response.json()["citations"]
+    assert any("上下文预算不足" in warning for warning in response.json()["warnings"])
 
 
 def streamed_completion(content: str) -> httpx.Response:
@@ -1332,12 +1439,14 @@ async def test_empty_response_recovery_does_not_retry_other_providers_or_truncat
 
 @pytest.mark.parametrize("valid_citation", [True, False])
 @pytest.mark.parametrize("development", [True, False])
+@pytest.mark.parametrize("brackets", ["ascii", "chinese"])
 async def test_agui_stream_uses_framework_and_commits_before_success(
     runtime: Runtime,
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
     valid_citation: bool,
     development: bool,
+    brackets: str,
 ) -> None:
     resource_id = await index_notes(runtime, tmp_path / "notes")
     captured: list[dict[str, Any]] = []
@@ -1347,7 +1456,9 @@ async def test_agui_stream_uses_framework_and_commits_before_success(
         captured.append(body)
         assert body["stream"] is True
         assert "client-injected-system" not in request.content.decode()
-        return streamed_completion("private-answer [1]." if valid_citation else "private-answer [99].")
+        index = 1 if valid_citation else 99
+        marker = f"[{index}]" if brackets == "ascii" else f"【{index}】"
+        return streamed_completion(f"private-answer {marker}.")
 
     runtime.chat.agent._client = httpx.AsyncClient(transport=httpx.MockTransport(model))
     runtime.settings.memory.embedder.model = "test-memory"
@@ -1449,6 +1560,8 @@ async def test_agui_stream_uses_framework_and_commits_before_success(
         assert events[-1]["type"] == "RUN_FINISHED"
         saved = next(event["value"] for event in events if event.get("name") == "shovel.message")
         assert saved["id"] == history[-1].id
+        assert saved["content"] == history[-1].content == "private-answer [1]."
+        assert saved["citations"] == history[-1].citations
         assert history[-1].state == "completed" and history[-1].citations
     else:
         assert events[-1]["type"] == "RUN_ERROR"

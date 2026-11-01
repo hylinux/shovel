@@ -73,7 +73,7 @@ function CreateWebResource({ onCreated }: { onCreated: () => void }) {
     <label>Download limit (MiB)<input type="number" name="max_total_mb" min="1" max="1024" step="1" defaultValue="100" required disabled={action.busy} /></label>
     <label>Time limit (minutes)<input type="number" name="max_duration_minutes" min="1" max="1440" step="1" defaultValue="60" required disabled={action.busy} /></label>
     <div className="full"><label className="check"><input type="checkbox" name="include_query_urls" disabled={action.busy} />Include query URLs (may create duplicate pages or crawl traps)</label>
-      <p className="warning">Only crawl sites you are permitted to index. The URL limits crawling to the same origin and path. robots.txt, noindex/nofollow and slower site-requested rates are respected. Private networks, logins and JavaScript rendering are not supported.</p>
+      <p className="warning">Only crawl sites you are permitted to index. Crawling stays on the same origin. An HTML page URL follows links within its containing directory; a directory URL limits crawling to that subtree. robots.txt, noindex/nofollow and slower site-requested rates are respected. Private networks, logins and JavaScript rendering are not supported.</p>
       <p className="muted">Links and Sitemaps discover pages. Limits and failures are reported in Background tasks; a scan cannot guarantee complete website coverage. Creation verifies access; use Crawl website afterwards to index text and generate embeddings.</p>
       <Feedback error={action.error} /><button className="primary" disabled={action.busy}>{action.busy ? "Adding website…" : "Add and verify"}</button>
     </div>

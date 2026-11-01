@@ -154,6 +154,32 @@ def test_scope_rejects_origin_and_path_escapes_and_deduplicates_fragments() -> N
     assert not scope.contains(SITE + "/docs/%252e%252e/admin")
 
 
+@pytest.mark.parametrize("filename", ["ts-tutorial.html", "index.htm", "index.xhtml", "INDEX.HTML"])
+def test_html_page_scope_includes_its_directory_not_other_tutorials(filename: str) -> None:
+    start = SITE + "/typescript/" + filename
+    scope = WebScope(start)
+    assert scope.start_url == start
+    assert scope.resolve("ts-intro.html#intro", start) == SITE + "/typescript/ts-intro.html"
+    assert scope.contains(SITE + "/typescript/chapters/types.html")
+    for url in (
+        SITE + "/typescript-other/page.html",
+        SITE + "/js/js-tutorial.html",
+        "https://other.example.com/typescript/ts-intro.html",
+        "http://docs.example.com/typescript/ts-intro.html",
+        SITE + "/typescript/%2e%2e/private",
+    ):
+        assert not scope.contains(url)
+
+
+def test_explicit_directory_and_non_html_document_scopes_are_not_broadened() -> None:
+    directory = WebScope(SITE + "/docs/guide.html/")
+    assert directory.contains(SITE + "/docs/guide.html/chapter")
+    assert not directory.contains(SITE + "/docs/other.html")
+    document = WebScope(SITE + "/docs/guide.pdf")
+    assert document.contains(SITE + "/docs/guide.pdf")
+    assert not document.contains(SITE + "/docs/other.pdf")
+
+
 async def test_transport_rejects_mixed_private_dns_and_pins_public_ip(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -455,6 +481,54 @@ class Sink:
     async def delete_resource(self, resource_id: str) -> int:
         self.records = [record for record in self.records if record.resource_id != resource_id]
         return 0
+
+
+async def test_tutorial_page_recursively_crawls_and_indexes_linked_chapters(
+    runtime: Runtime, site: Site
+) -> None:
+    site.add(
+        "/typescript/ts-tutorial.html",
+        '<h1>TypeScript Tutorial</h1><nav><a href="ts-intro.html">Introduction</a>'
+        '<a href="ts-intro.html#overview">Introduction fragment</a></nav>'
+        '<a href="/js/js-tutorial.html">Other tutorial</a>'
+        '<a href="/typescript-other/page.html">Other directory</a>'
+        '<a href="https://other.example.com/typescript/page.html">External site</a>'
+        '<a rel="nofollow" href="never.html">Do not follow</a>',
+    )
+    site.add(
+        "/typescript/ts-intro.html",
+        "<h1>TypeScript Introduction</h1><p>Tutorial introduction content.</p>"
+        '<a href="chapters/types.html">Types</a><a href="ts-tutorial.html">Start</a>',
+    )
+    site.add(
+        "/typescript/chapters/types.html",
+        "<h1>TypeScript Types</h1><p>Tutorial types content.</p>"
+        '<a href="../ts-intro.html#overview">Introduction</a>',
+    )
+    resource = await runtime.resources.create(
+        ResourceDraft(
+            name="tutorial",
+            connector_kind="web_search",
+            config={"start_url": SITE + "/typescript/ts-tutorial.html"},
+        )
+    )
+    assert (await runtime.resources.verify(resource.id)).ok
+    site.requests.clear()
+    sink = Sink()
+    result = await ScanService(runtime.sessions, runtime.resources, embedder=Embedder(), sink=sink).scan(
+        resource.id
+    )
+    expected = {
+        SITE + "/typescript/ts-tutorial.html",
+        SITE + "/typescript/ts-intro.html",
+        SITE + "/typescript/chapters/types.html",
+    }
+    assert result.state is JobState.SUCCEEDED and result.parsed == result.embedded == 3
+    assert {record.doc_uri for record in sink.records} == expected
+    assert len(site.paths) == len(set(site.paths))
+    assert set(site.paths) == {"/robots.txt", "/sitemap.xml"} | {httpx.URL(url).path for url in expected}
+    hits = await RetrievalService(runtime).search(SearchInput(query="Tutorial", mode="keyword"))
+    assert {hit["doc_uri"] for hit in hits["items"]} == expected
 
 
 async def test_website_scan_keyword_vectors_recovery_policy_and_no_deletion(

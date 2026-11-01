@@ -237,8 +237,13 @@ SQLite keyword index. HTML text/headings, plain text, Markdown, PDF and modern
 Office documents are supported. Page URLs remain available for citations.
 
 Use an origin-root URL to discover the whole public site, or a path such as
-`https://example.com/docs/` to limit discovery to that subtree. Crawling follows
-ordinary links and XML Sitemaps, including Sitemap indexes. It never expands to
+`https://example.com/docs/` to limit discovery to that subtree. An HTML page URL
+(`.html`, `.htm` or `.xhtml`) starts at that page and follows links within its
+containing directory and subdirectories. For example,
+`https://www.runoob.com/typescript/ts-tutorial.html` crawls linked chapters under
+`/typescript/`, not other tutorials elsewhere on the site. Use a targeted scan
+to index only one page. Crawling follows ordinary links and XML Sitemaps,
+including Sitemap indexes. It never expands to
 another origin, subdomain or scheme, including through redirects or HTML base
 URLs. Use the final HTTPS/hostname URL when a site redirects from HTTP or `www`.
 Only index content you are permitted to collect; robots.txt is not authorization.

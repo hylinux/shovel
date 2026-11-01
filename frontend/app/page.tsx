@@ -1,8 +1,9 @@
 "use client";
 
-import { useReducer, useState, type FormEvent } from "react";
+import { useEffect, useReducer, useRef, useState, type FormEvent, type KeyboardEvent, type PointerEvent } from "react";
 import Link from "next/link";
-import { date, segment, useAction, useQuery, useSessionHistory, type Items, type Resource, type Session, type Status } from "./api";
+import { api, date, errorText, segment, useAction, useQuery, useSessionHistory, type Items, type MessagePage, type Resource, type Session, type Status } from "./api";
+import { resolveInitialSession, sessionCacheKey } from "./session-startup";
 import { Resources } from "./resources";
 import { Tasks } from "./tasks";
 import { Knowledge } from "./knowledge";
@@ -45,11 +46,54 @@ const descriptions: Record<View, string> = {
 };
 
 export default function Home() {
-  const [view, setView] = useState<View>("Resources");
+  const [view, setView] = useState<View>("Chat");
   const [visited, setVisited] = useState<Set<string>>(new Set());
   const [sessionsOpen, setSessionsOpen] = useState(true);
   const [selectedSession, setSelectedSession] = useState("");
   const [sessionRevision, refreshSessions] = useReducer((value: number) => value + 1, 0);
+  const initialSession = useRef<Promise<string> | null>(null);
+  const currentSession = useRef("");
+  const sessionWorkspace = useRef("");
+  const [creatingSession, setCreatingSession] = useState(true);
+  const [sessionError, setSessionError] = useState("");
+  const [creationRevision, retryCreation] = useReducer((value: number) => value + 1, 0);
+  async function restoreInitialSession() {
+    const workspace = (await api<Status>("/status")).workspace_id;
+    sessionWorkspace.current = workspace;
+    if (currentSession.current) sessionStorage.setItem(sessionCacheKey(workspace), currentSession.current);
+    const identifier = await resolveInitialSession(
+      workspace, sessionStorage,
+      async (id) => { await api<MessagePage>(`/conversations/${segment(id)}/messages?limit=1`); },
+      async () => (await api<Session>("/conversations", { method: "POST", body: "{}" })).id,
+    );
+    if (currentSession.current) sessionStorage.setItem(sessionCacheKey(workspace), currentSession.current);
+    return identifier;
+  }
+  useEffect(() => {
+    let active = true;
+    // Keep one mutation across Strict Mode's effect replay; only the active subscriber updates the UI.
+    initialSession.current ??= restoreInitialSession();
+    initialSession.current.then((identifier) => {
+      if (!active) return;
+      if (!currentSession.current) {
+        currentSession.current = identifier;
+        setSelectedSession(identifier);
+      }
+      refreshSessions();
+      setCreatingSession(false);
+    }, (error: unknown) => {
+      if (!active) return;
+      setSessionError(errorText(error));
+      setCreatingSession(false);
+    });
+    return () => { active = false; };
+  }, [creationRevision]);
+  function retryInitialSession() {
+    initialSession.current = null;
+    setSessionError("");
+    setCreatingSession(true);
+    retryCreation();
+  }
   const status = useQuery<Status>("/status", 10000);
   const resourcesNeeded = view === "Resources" || view === "Background tasks" || view === "Search Documents";
   const resources = useQuery<Items<Resource>>(resourcesNeeded ? "/resources" : null, 2000);
@@ -62,13 +106,32 @@ export default function Home() {
     setVisited((current) => new Set(current).add(item));
   }
   function selectSession(identifier: string) {
+    setSessionError("");
+    currentSession.current = identifier;
+    persistSession(identifier);
     setSelectedSession(identifier);
     setView("Chat");
+  }
+  function persistSession(identifier: string) {
+    if (sessionWorkspace.current) {
+      try {
+        const key = sessionCacheKey(sessionWorkspace.current);
+        if (identifier) sessionStorage.setItem(key, identifier);
+        else sessionStorage.removeItem(key);
+      }
+      catch (error) { setSessionError(`Cannot retain this Session across refresh: ${errorText(error)}`); }
+    }
+  }
+  function deleteSelectedSession() {
+    persistSession("");
+    currentSession.current = "";
+    setSelectedSession("");
+    refreshSessions();
   }
   return (
     <div className="workbench">
       <a className="skip-link" href="#main">Skip to content</a>
-      <aside className="sidebar">
+      <aside id="sidebar" className="sidebar">
         <Link href="/" className="brand" aria-label="Shovel home"><span className="brand-mark" aria-hidden="true">S</span>Shovel</Link>
         <p className="sidebar-caption">Personal Agent Platform</p>
         <nav className="main-navigation" aria-label="Main navigation">
@@ -76,7 +139,7 @@ export default function Home() {
           <div className="chat-navigation" data-expanded={showSessions}>
             <button className="navigation-button" aria-current={view === "Chat" ? "page" : undefined} aria-expanded={showSessions} aria-controls="session-navigation" onClick={() => navigate("Chat")}><span aria-hidden="true" className="nav-symbol">◇</span><span className="navigation-label">Chat</span><span className="nav-chevron" aria-hidden="true">{showSessions ? "⌄" : "›"}</span></button>
             <section id="session-navigation" className="session-navigation" aria-label="Chat sessions" hidden={!showSessions}>
-              <SessionNavigation selected={selectedSession} active={view === "Chat"} revision={sessionRevision} onSelect={selectSession} onDeleted={() => { setSelectedSession(""); refreshSessions(); }} />
+              <SessionNavigation selected={selectedSession} active={view === "Chat"} initializing={creatingSession} revision={sessionRevision} onSelect={selectSession} onDeleted={deleteSelectedSession} />
             </section>
           </div>
         </nav>
@@ -84,6 +147,7 @@ export default function Home() {
           <nav className="settings-navigation" aria-label="Settings navigation"><button aria-current={view === "Settings" ? "page" : undefined} onClick={() => navigate("Settings")}><span className="nav-symbol" aria-hidden="true">⚙</span>Settings</button></nav>
           <div className="sidebar-footer"><span className={`connection-dot ${status.data && !status.error ? "connected" : ""}`} />{status.data && !status.error ? "Local runtime connected" : status.loading ? "Connecting to runtime…" : "Runtime unavailable"}<p>Your files. Your model choices.</p></div>
         </div>
+        <SidebarResizeHandle />
       </aside>
       <main id="main" className="main" tabIndex={-1}>
         <header className="page-heading"><div><h1>{view}</h1><p>{descriptions[view]}</p></div><span className="local-label">Local-first runtime</span></header>
@@ -92,7 +156,7 @@ export default function Home() {
         {view === "Resources" && <Resources resources={resources.data?.items} loading={resources.loading} status={status.data} refresh={resources.refresh} />}
         {view === "Background tasks" && <Tasks resources={resources.data?.items || []} />}
         {view === "Search Documents" && <SearchDocuments resources={resources.data?.items || []} status={status.data} />}
-        {view === "Chat" && <Knowledge status={status.data} sessionId={selectedSession} onSessionChanged={refreshSessions} />}
+        {view === "Chat" && <><Feedback error={sessionError} retry={retryInitialSession} />{creatingSession && !selectedSession ? <p role="status">Opening session…</p> : <Knowledge status={status.data} sessionId={selectedSession} onSessionChanged={refreshSessions} />}</>}
         {view === "Settings" && <Settings status={status.data} />}
         {platformViews.filter((item) => visited.has(item)).map((item) => <div key={item} className="platform-view" hidden={view !== item}>
           {item === "Proactive Services" && <ProactiveServices active={view === item} />}
@@ -107,6 +171,64 @@ export default function Home() {
   );
 }
 
+function SidebarResizeHandle() {
+  const handle = useRef<HTMLDivElement>(null);
+  const drag = useRef<{ pointerId: number; x: number; width: number } | null>(null);
+  const [resizing, setResizing] = useState(false);
+  const [dimensions, setDimensions] = useState({ width: 395, maximum: 420 });
+  function maximumWidth() {
+    return Math.max(200, Math.min(420, Math.round(window.innerWidth * .4)));
+  }
+  useEffect(() => {
+    const sidebar = handle.current?.parentElement;
+    const workbench = sidebar?.parentElement;
+    if (!sidebar || !workbench) return;
+    const observer = new ResizeObserver(() => {
+      const width = Math.round(sidebar.getBoundingClientRect().width);
+      const maximum = maximumWidth();
+      setDimensions((current) => current.width === width && current.maximum === maximum ? current : { width, maximum });
+    });
+    observer.observe(sidebar);
+    observer.observe(workbench);
+    return () => observer.disconnect();
+  }, []);
+  function resize(width: number) {
+    handle.current?.parentElement?.parentElement?.style.setProperty("--sidebar-width", `${Math.max(200, Math.min(maximumWidth(), width))}px`);
+  }
+  function reset() {
+    handle.current?.parentElement?.parentElement?.style.removeProperty("--sidebar-width");
+  }
+  function start(event: PointerEvent<HTMLDivElement>) {
+    if (!event.isPrimary || event.button !== 0 || drag.current) return;
+    const sidebar = event.currentTarget.parentElement;
+    if (!sidebar) return;
+    event.preventDefault();
+    event.currentTarget.focus({ preventScroll: true });
+    event.currentTarget.setPointerCapture(event.pointerId);
+    drag.current = { pointerId: event.pointerId, x: event.clientX, width: sidebar.getBoundingClientRect().width };
+    setResizing(true);
+  }
+  function move(event: PointerEvent<HTMLDivElement>) {
+    if (drag.current?.pointerId === event.pointerId) resize(drag.current.width + event.clientX - drag.current.x);
+  }
+  function finish(event: PointerEvent<HTMLDivElement>) {
+    if (drag.current?.pointerId !== event.pointerId) return;
+    drag.current = null;
+    setResizing(false);
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId);
+  }
+  function keyDown(event: KeyboardEvent<HTMLDivElement>) {
+    if (!["ArrowLeft", "ArrowRight", "Home", "End", "Enter"].includes(event.key)) return;
+    event.preventDefault();
+    const width = event.currentTarget.parentElement?.getBoundingClientRect().width ?? dimensions.width;
+    if (event.key === "Enter") reset();
+    else resize(event.key === "Home" ? 200 : event.key === "End" ? maximumWidth() : width + (event.key === "ArrowRight" ? 10 : -10));
+  }
+  return <div ref={handle} className="sidebar-resizer" role="separator" tabIndex={0} aria-label="Resize sidebar" aria-controls="sidebar" aria-orientation="vertical" aria-valuemin={200} aria-valuemax={dimensions.maximum} aria-valuenow={dimensions.width} data-resizing={resizing}
+    title="Drag to resize. Arrow keys adjust; double-click or Enter resets."
+    onPointerDown={start} onPointerMove={move} onPointerUp={finish} onPointerCancel={finish} onLostPointerCapture={finish} onDoubleClick={reset} onKeyDown={keyDown} />;
+}
+
 function SidebarGroup({ group, view, onNavigate }: { group: typeof navigationGroups[number]; view: View; onNavigate: (view: View) => void }) {
   const [open, setOpen] = useState(false);
   return <div className="navigation-group" data-active={group.items.some((item) => item.view === view)}>
@@ -117,7 +239,7 @@ function SidebarGroup({ group, view, onNavigate }: { group: typeof navigationGro
   </div>;
 }
 
-function SessionNavigation({ selected, active, revision, onSelect, onDeleted }: { selected: string; active: boolean; revision: number; onSelect: (identifier: string) => void; onDeleted: () => void }) {
+function SessionNavigation({ selected, active, initializing, revision, onSelect, onDeleted }: { selected: string; active: boolean; initializing: boolean; revision: number; onSelect: (identifier: string) => void; onDeleted: () => void }) {
   const history = useSessionHistory(revision);
   const action = useAction();
   async function create() {
@@ -125,7 +247,7 @@ function SessionNavigation({ selected, active, revision, onSelect, onDeleted }: 
     if (session) { history.refresh(); onSelect(session.id); }
   }
   return <>
-    <button className="new-session" disabled={action.busy} onClick={create}><span aria-hidden="true">+</span>{action.busy ? "Creating…" : "New Session"}</button>
+    <button className="new-session" disabled={action.busy || initializing} onClick={create}><span aria-hidden="true">+</span>{action.busy ? "Creating…" : initializing ? "Opening…" : "New Session"}</button>
     <Feedback error={action.error} />
     <div className="session-history" role="region" aria-label="Session history" tabIndex={0} aria-busy={history.loading}>
       <Feedback error={history.error} retry={history.refresh} />

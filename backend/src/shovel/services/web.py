@@ -73,7 +73,12 @@ def canonical_url(value: str) -> str:
 class WebSearchConfig(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    start_url: str = Field(description="Public website URL; crawl stays on its origin and under its path.")
+    start_url: str = Field(
+        description=(
+            "Public website URL; crawl stays on its origin. HTML page URLs crawl their containing "
+            "directory; directory URLs crawl only that subtree."
+        )
+    )
     max_pages: int = Field(default=1000, ge=1, le=10000)
     max_depth: int = Field(default=10, ge=0, le=30)
     request_delay_seconds: float = Field(default=1, ge=1, le=60, allow_inf_nan=False)
@@ -97,7 +102,10 @@ class WebScope:
     def __init__(self, start_url: str) -> None:
         self.start_url = canonical_url(start_url)
         self.root = httpx.URL(self.start_url)
-        self.path = unquote(self.root.path).rstrip("/")
+        path = unquote(self.root.path)
+        if not path.endswith("/") and posixpath.splitext(path)[1].lower() in {".html", ".htm", ".xhtml"}:
+            path = posixpath.dirname(path)
+        self.path = path.rstrip("/")
 
     def contains(self, value: str, *, origin_only: bool = False) -> bool:
         try:

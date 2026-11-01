@@ -32,7 +32,7 @@ const navigationGroups = [
   ] },
 ] as const;
 const descriptions: Record<View, string> = {
-  Resources: "Choose which local documents and Outlook mail Shovel can work with.",
+  Resources: "Choose which local documents, Outlook mail and public websites Shovel can work with.",
   "Background tasks": "Follow scans, inspect events, and recover failed operations.",
   "Search Documents": "Find relevant passages in your indexed documents.",
   Chat: "Ask your documents. Keep the sources in view.",

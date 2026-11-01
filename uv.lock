@@ -1867,6 +1867,15 @@ wheels = [
 ]
 
 [[package]]
+name = "protego"
+version = "0.7.0"
+source = { registry = "https://repo.huaweicloud.com/repository/pypi/simple" }
+sdist = { url = "https://repo.huaweicloud.com/repository/pypi/packages/7a/d9/5026b9e75db1172f02441a84eaf42efb199b4cea14dda7651a620d1acd40/protego-0.7.0.tar.gz", hash = "sha256:2c032d9736a1f4f0c4318f3558353ae34da5cd038f1a5e064ded7548df315e5a" }
+wheels = [
+    { url = "https://repo.huaweicloud.com/repository/pypi/packages/c0/20/e4382a85e4cf4746d11746481f83360b990165725dd36ba73d55e029e6a9/protego-0.7.0-py3-none-any.whl", hash = "sha256:944638aaee608f6c83fcad442695f3f9381a60be8d5007248f46b00f201fa5fc" },
+]
+
+[[package]]
 name = "protobuf"
 version = "7.36.2"
 source = { registry = "https://repo.huaweicloud.com/repository/pypi/simple" }
@@ -2589,6 +2598,7 @@ dependencies = [
     { name = "keyring" },
     { name = "mcp" },
     { name = "openpyxl" },
+    { name = "protego" },
     { name = "py-generic-host" },
     { name = "pypdf" },
     { name = "python-docx" },
@@ -2632,6 +2642,7 @@ requires-dist = [
     { name = "mcp", specifier = ">=1.24,<2" },
     { name = "mypy", marker = "extra == 'dev'", specifier = ">=2.1.0" },
     { name = "openpyxl", specifier = ">=3.1.5" },
+    { name = "protego", specifier = ">=0.5,<1" },
     { name = "py-generic-host", git = "https://github.com/hylinux/py-generic-host.git?rev=25323282dedb3d0c9537129b477d14f7b9abd631" },
     { name = "pypdf", specifier = ">=6.19.0" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=9.1.1" },

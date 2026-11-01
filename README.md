@@ -19,7 +19,7 @@ Current implementation as of **2026-10-30**:
 | Area | Implemented |
 | --- | --- |
 | Main Agent | MAF Agent, native tool loop, context providers, session handling, and AG-UI streaming through FastAPI |
-| Knowledge / RAG | Local folders and classic Outlook, durable scans, parent/child chunks, SQLite FTS5, Zvec vectors, hybrid ranking, and numbered citations |
+| Knowledge / RAG | Local folders, classic Outlook and public website crawling, durable scans, parent/child chunks, SQLite FTS5, Zvec vectors, hybrid ranking, and numbered citations |
 | Native Memory | Separate history/summaries/facts, structured extraction, deduplication/consolidation, supersession, expiry, soft/hard deletion, provenance, scope isolation, bounded recall, and index recovery |
 | Workspace extensions | MAF Skills, MCP stdio/HTTP, read-only built-ins, and opt-in Python functions and child Agent/Workflow tools |
 | Capability platform | Immutable versions, one durable Execution engine, narrowing permissions, explicit approvals, trigger-agnostic Workflow V1 and interval/daily/event automation |
@@ -40,6 +40,7 @@ not the current completion checklist.
 
 - [Run the local workbench](#run-the-local-workbench)
 - [First knowledge loop](#first-knowledge-loop-without-model-credentials)
+- [Website crawling](#public-websites-web-search)
 - [Configure chat and semantic retrieval](#configure-chat-and-semantic-retrieval)
 - [Main Agent and workspace extensions](#main-agent-and-workspace-extensions)
 - [Native Memory](#native-memory)
@@ -225,6 +226,63 @@ Operations and scan parameters survive restart. Interrupted work resumes with th
 same Job ID; cancellation, partial failure, retries, discovery progress, and job
 events are visible in Background tasks. Deleting a resource keeps its operation
 receipt and durable vector deletion intents even after its metadata is gone.
+
+## Public websites (Web Search)
+
+In **Resources**, select **Web Search — public website**, enter a name and the
+website's canonical HTTP(S) URL, then **Add and verify**. Use **Crawl website**
+to submit a durable scan. With an embedding provider configured, the scan
+embeds chunks into the existing Zvec knowledge index; otherwise it builds the
+SQLite keyword index. HTML text/headings, plain text, Markdown, PDF and modern
+Office documents are supported. Page URLs remain available for citations.
+
+Use an origin-root URL to discover the whole public site, or a path such as
+`https://example.com/docs/` to limit discovery to that subtree. Crawling follows
+ordinary links and XML Sitemaps, including Sitemap indexes. It never expands to
+another origin, subdomain or scheme, including through redirects or HTML base
+URLs. Use the final HTTPS/hostname URL when a site redirects from HTTP or `www`.
+Only index content you are permitted to collect; robots.txt is not authorization.
+
+Defaults are 1,000 URLs, link depth 10, at least one second between requests,
+20 seconds per HTTP attempt, three attempts, 5 MiB per document, 100 MiB total
+download and one hour per scan. The form exposes crawl/retry limits; query URLs
+are opt-in because they can create duplicates and infinite crawl traps.
+Scan profile include/exclude patterns match absolute URLs. A scan's **Document
+limit** restricts indexing after discovery, not the number of crawl requests.
+Targeted scans accept website URLs and do not traverse their links or Sitemaps.
+
+The crawler identifies itself as `ShovelBot`. It honors robots.txt Allow/
+Disallow, Crawl-delay and Request-rate, HTML robots meta tags, X-Robots-Tag,
+and link `rel=nofollow`. Missing robots.txt (404/410) permits discovery;
+unreadable, denied or repeatedly failing robots.txt blocks it. Every outbound
+request resolves and pins a public IP while retaining the original Host/TLS
+identity; private/loopback/reserved addresses, nonstandard ports, credentials
+in URLs and environment proxies are rejected. Only GET is used, without
+login credentials or persistent cookies. Office archive expansion is bounded.
+
+Connection/time-out failures and HTTP 408/429/500/502/503/504 use bounded
+exponential backoff with jitter. Retry-After seconds/HTTP dates are respected;
+a requested wait longer than five minutes ends the crawl for later retry.
+Permanent errors such as 401/403 are not retried. Limit warnings and per-page
+failures appear in **Background tasks → Inspect events**; successful pages are
+retained. Cancellation interrupts network waits and releases temporary content.
+
+Each incremental scan discovers the site again and skips parsing/embedding
+when the content hash and processing versions are unchanged. Crawling cannot
+guarantee every page: disconnected pages without Sitemap entries, JavaScript-
+rendered content, login-only pages and crawler-disallowed content are outside
+this mode. Compressed HTTP bodies and gzip Sitemaps are not supported. Missing
+pages do not automatically erase old indexed copies; explicitly remove a
+resource to erase its index. Observed noindex/disallowed URLs are excluded from
+retrieval and their vector deletions use the existing durable cleanup Outbox.
+
+The same connector is available from the CLI:
+
+```powershell
+uv run shovel resource add docs --kind web_search --set 'start_url=https://example.com/docs/'
+uv run shovel scan run docs --no-embed
+uv run pytest backend\tests\test_web_search.py --no-cov
+```
 
 ## Configure chat and semantic retrieval
 

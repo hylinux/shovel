@@ -246,6 +246,13 @@ in `.github\workflows\ci.yml`.
   Parsers are lazily registered in `pipeline\parsers\registry.py`, with extension
   routing taking precedence over document class; synchronous parsing runs via
   `asyncio.to_thread`.
+- `web_search` uses public, DNS-pinned HTTP GETs within a frozen URL origin/path.
+  Reuse `services\web.py` for all page, robots and Sitemap requests; never bypass
+  its redirect, address, timeout, download and retry fences. Honor robots and
+  noindex/nofollow; do not add login or browser rendering to this connector.
+  Discovery caches bounded content in scan-owned temporary files because the
+  pipeline discovers before indexing. Report partial coverage through discovery
+  diagnostics; Web Search must not declare `DELETE_DETECT`.
 - Small CHUNK records are embedded; PARENT records remain in SQLite for context.
   Preserve the shared deterministic `chunk_vector_id(..., resource_id=...)`
   identity across SQLite and Zvec. Changes to chunking semantics require

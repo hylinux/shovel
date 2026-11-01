@@ -46,6 +46,8 @@ _BY_SUFFIX: dict[str, str] = {
     ".xlsx": "excel_doc",
     ".xlsm": "excel_doc",
     ".pptx": "powerpoint_doc",
+    ".html": "html_doc",
+    ".htm": "html_doc",
 }
 
 #: doc_class -> 实现模块。只在扩展名认不出时使用。
@@ -58,8 +60,19 @@ _BY_DOC_CLASS: dict[DocClass, str] = {
     DocClass.CODE: "plain_text",
     DocClass.MARKDOWN: "markdown_doc",
     DocClass.PDF_DOC: "pdf_doc",
+    DocClass.HTML: "html_doc",
 }
 
+WEB_MIME_PARSERS: dict[str, str] = {
+    "text/html": "html_doc",
+    "application/xhtml+xml": "html_doc",
+    "text/plain": "plain_text",
+    "text/markdown": "markdown_doc",
+    "application/pdf": "pdf_doc",
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.document": "word_doc",
+    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": "excel_doc",
+    "application/vnd.openxmlformats-officedocument.presentationml.presentation": "powerpoint_doc",
+}
 #: 旧版二进制 Office (.doc/.xls/.ppt)。单独列出来, 是为了给一条
 #: "另存为 .docx"的可行建议, 而不是一句泛泛的"不支持"。
 _LEGACY_OFFICE = frozenset({".doc", ".xls", ".ppt"})
@@ -97,6 +110,11 @@ def find_parser(hint: ParseHint) -> Parser:
 
     if hint.content_format == "outlook-mail-v1":
         return _load("email_doc")
+    if hint.content_format == "web-document-v1":
+        module = WEB_MIME_PARSERS.get(hint.mime or "")
+        if module is None:
+            raise UnsupportedDocumentError(hint.uri, hint.mime or "(missing Content-Type)")
+        return _load(module)
     suffix = hint.suffix
 
     if suffix in _LEGACY_OFFICE:
@@ -122,6 +140,8 @@ def can_parse(hint: ParseHint) -> bool:
 
     if hint.content_format == "outlook-mail-v1":
         return True
+    if hint.content_format == "web-document-v1":
+        return hint.mime in WEB_MIME_PARSERS
     if hint.suffix in _LEGACY_OFFICE:
         return False
 

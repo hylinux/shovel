@@ -50,7 +50,7 @@ import asyncio
 import contextlib
 import hashlib
 import json
-from collections.abc import Sequence
+from collections.abc import AsyncIterator, Sequence
 from dataclasses import asdict, dataclass, field
 from time import perf_counter
 
@@ -103,6 +103,7 @@ from shovel.runtime.diagnostics import trace
 from shovel.services.connector_base import (
     Connector,
     ConnectorCapability,
+    ConnectorDiscoveryDiagnostics,
     DiscoveredItem,
     DiscoveryScope,
     connector_session,
@@ -452,6 +453,10 @@ class ScanService:
             outcome=outcome,
             force=force,
         )
+        if isinstance(connector, ConnectorDiscoveryDiagnostics):
+            for warning in connector.discovery_warnings:
+                outcome.warnings.append(warning)
+                await self._log(job_id, LogLevel.WARN, None, "CONNECTOR_DISCOVERY_WARNING", warning)
         trace(
             "scan.discovery.completed",
             job_id=job_id,
@@ -544,8 +549,13 @@ class ScanService:
             profile = await session.get(ScanProfile, profile_id)
             if profile is None:
                 raise PipelineError("扫描 Profile 已不存在。")
-            async for item in connector.discover(scope):
-                if outcome.discovered % 100 == 0:
+            items = (
+                self._discovery_items(job_id, connector, scope, session)
+                if resource.connector_kind == "web_search"
+                else connector.discover(scope)
+            )
+            async for item in items:
+                if outcome.discovered % 100 == 0 or resource.connector_kind == "web_search":
                     await session.commit()
                     await self._save_progress(job_id, outcome)
                     if await self._cancel_requested(job_id):
@@ -600,7 +610,11 @@ class ScanService:
                         )
                     document.lifecycle_state = DocumentLifecycleState.SKIPPED
                     document.pipe_state = DocumentPipeState.SKIPPED
-                    document.skip_reason = f"不支持的类型: {hint.suffix or '(无扩展名)'}"
+                    document.skip_reason = (
+                        str(item.extra["skip_reason"])
+                        if resource.connector_kind == "web_search" and item.extra.get("skip_reason")
+                        else f"不支持的类型: {hint.suffix or '(无扩展名)'}"
+                    )
                     continue
 
                 # 旧数据可能 hash 已匹配但向量仍 pending, 不能仅靠内容判定完成。
@@ -943,6 +957,27 @@ class ScanService:
             exc.code,
             exc.reason,
         )
+
+    async def _discovery_items(
+        self, job_id: str, connector: Connector, scope: DiscoveryScope, session: AsyncSession
+    ) -> AsyncIterator[DiscoveredItem]:
+        iterator = connector.discover(scope)
+        while True:
+            await session.commit()
+            pending = asyncio.ensure_future(anext(iterator))
+            try:
+                while not pending.done():
+                    await asyncio.wait({pending}, timeout=1)
+                    if await self._cancel_requested(job_id):
+                        raise asyncio.CancelledError
+                try:
+                    yield pending.result()
+                except StopAsyncIteration:
+                    return
+            finally:
+                if not pending.done():
+                    pending.cancel()
+                await asyncio.gather(pending, return_exceptions=True)
 
     # ----------------------------------------------------------------- #
     # reconcile
@@ -1326,10 +1361,18 @@ def _hint_of(resource: Resource, item: DiscoveredItem) -> ParseHint:
         filename=filename,
         doc_class=item.doc_class,
         size_bytes=item.size_bytes,
+        mime=str(item.extra["mime"])
+        if resource.connector_kind == "web_search" and item.extra.get("mime")
+        else None,
+        encoding=str(item.extra["encoding"])
+        if resource.connector_kind == "web_search" and item.extra.get("encoding")
+        else None,
         content_format=(
             "outlook-mail-v1"
             if resource.connector_kind == "outlook_local"
             and item.extra.get("content_format") == "outlook-mail-v1"
+            else "web-document-v1"
+            if resource.connector_kind == "web_search"
             else None
         ),
     )

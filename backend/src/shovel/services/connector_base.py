@@ -322,6 +322,12 @@ class ClosableConnector(Protocol):
     async def aclose(self) -> None: ...
 
 
+@runtime_checkable
+class ConnectorDiscoveryDiagnostics(Protocol):
+    @property
+    def discovery_warnings(self) -> tuple[str, ...]: ...
+
+
 @asynccontextmanager
 async def connector_session(connector: Connector) -> AsyncIterator[Connector]:
     """Release optional scan-owned resources, including on failure or cancellation."""

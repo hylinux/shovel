@@ -10,7 +10,7 @@ import { invalidateReads, sharedRead } from "./read-requests";
 
 export type Status = { service: string; workspace_id: string; embedding_configured: boolean; model_configured: boolean; model_name: string; memory_configured: boolean; memory?: { provider: string; index_state: string; pending_index_operations: number; last_error: string | null }; warmup?: Record<string, { state: string; elapsed_ms?: number; error_type?: string }>; chat_capacity?: { limit: number; running: number; waiting: number } };
 export type UnixSeconds = number;
-export type Resource = { id: string; name: string; connector_kind: string; state: string; config: { root_path?: string; store_id?: string; folder_ids?: string[]; include_subfolders?: boolean }; description?: string; authority?: string; sensitivity?: string; state_reason?: string; last_verified_at?: UnixSeconds | null };
+export type Resource = { id: string; name: string; connector_kind: string; state: string; config: { root_path?: string; store_id?: string; folder_ids?: string[]; include_subfolders?: boolean; start_url?: string; max_pages?: number; max_depth?: number; request_delay_seconds?: number }; description?: string; authority?: string; sensitivity?: string; state_reason?: string; last_verified_at?: UnixSeconds | null };
 export type OutlookStore = { id: string; name: string };
 export type OutlookFolder = { id: string; name: string; path: string };
 export type Connector = { kind: string; display_name: string; description: string; config_schema: unknown; capabilities: string[]; supported_modes: string[]; requires_identity: boolean };

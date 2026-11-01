@@ -28,6 +28,7 @@ dependencies = [
     # 文档解析器。每种格式一个库, 都是同步的 CPU 密集调用, 统一用
     # asyncio.to_thread 挪出事件循环 —— 见 pipeline/parsers/
     "openpyxl>=3.1.5",      # .xlsx
+    "protego>=0.5,<1",
     "py-generic-host @ git+https://github.com/hylinux/py-generic-host.git@25323282dedb3d0c9537129b477d14f7b9abd631",
     "pypdf>=6.19.0",        # .pdf
     "python-docx>=1.2.0",   # .docx

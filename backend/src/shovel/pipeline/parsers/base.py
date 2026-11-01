@@ -125,7 +125,8 @@ class ParseHint:
     mime: str | None = None
     size_bytes: int | None = None
     max_chars: int = DEFAULT_MAX_CHARS
-    content_format: Literal["outlook-mail-v1"] | None = None
+    content_format: Literal["outlook-mail-v1", "web-document-v1"] | None = None
+    encoding: str | None = None
 
     @property
     def suffix(self) -> str:

@@ -97,8 +97,10 @@ class PlainTextParser:
             )
 
         try:
-            text, encoding = decode(payload)
-        except UnicodeDecodeError as exc:
+            text, encoding = (
+                (payload.decode(hint.encoding), hint.encoding) if hint.encoding else decode(payload)
+            )
+        except (UnicodeDecodeError, LookupError) as exc:
             raise ParseError(
                 hint.uri,
                 f"无法确定文本编码 (尝试过 {', '.join(_ENCODINGS)})。",

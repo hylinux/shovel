@@ -67,4 +67,10 @@ def test_release_versions_agree() -> None:
     root = Path(__file__).parents[2]
     project = tomllib.loads((root / "pyproject.toml").read_text(encoding="utf-8"))
     frontend = json.loads((root / "frontend" / "package.json").read_text(encoding="utf-8"))
-    assert project["project"]["version"] == frontend["version"] == PRODUCT.default_version
+    lock = tomllib.loads((root / "uv.lock").read_text(encoding="utf-8"))
+    package = next(package for package in lock["package"] if package["name"] == project["project"]["name"])
+    frontend_lock = json.loads((root / "frontend" / "package-lock.json").read_text(encoding="utf-8"))
+    version = project["project"]["version"]
+    assert version == frontend["version"] == PRODUCT.default_version
+    assert version == package["version"]
+    assert version == frontend_lock["version"] == frontend_lock["packages"][""]["version"]

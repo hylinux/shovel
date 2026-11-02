@@ -12,7 +12,9 @@ from shovel.db.model.retrieval import DeletionOutbox
 from shovel.exceptions.pipeline import VectorSinkError
 from shovel.pipeline.cleanup import IndexCleanupService
 from shovel.pipeline.sink import ZvecEnterpriseDeletionSink
-from shovel.protection.domain import content_digest
+from shovel.protection.domain import DataAction, DataDestination, ProtectionDeniedError, content_digest
+from shovel.protection.policy import ProtectionPolicy
+from shovel.protection.service import ProtectionService
 from shovel.vector.schema import (
     DENSE_VECTOR,
     chunk_collection_schema,
@@ -22,6 +24,7 @@ from shovel.vector.schema import (
 from shovel.vector.store import init_zvec_runtime
 from test_capability_registry import catalog as catalog
 from test_enterprise_persistence import Harness, record
+from test_protection_policy import Audit, Provider, reviewed_context, state_for, use_binding, wrapped
 
 
 @pytest.fixture
@@ -68,6 +71,22 @@ def insert_fixture(collection, value):
     assert all(result.ok for result in results)
     collection.flush()
     return fields
+
+
+def test_real_vector_collection_stays_empty_when_read_is_allowed_but_index_is_denied(enterprise_collection):
+    value = record(derived=True, embedding=True)
+    ctx = reviewed_context()
+    read = use_binding(ctx, action=DataAction.READ, destination=DataDestination.WORKFLOW_STATE)
+    index = use_binding(ctx, action=DataAction.INDEX, destination=DataDestination.LOCAL_ZVEC)
+    read_state = state_for(ctx, read)
+    provider = Provider(read_state, state_for(ctx, index, rules=read_state.rules))
+    policy = ProtectionPolicy(Audit(), provider=provider, clock=lambda: 10)
+    service = ProtectionService(policy, clock=lambda: 10)
+    assert service.use(wrapped(ctx), read, lambda body: body)
+    with pytest.raises(ProtectionDeniedError):
+        service.use(wrapped(ctx), index, lambda _body: insert_fixture(enterprise_collection, value))
+    enterprise_collection.flush()
+    assert enterprise_collection.fetch([value.vector_id]) == {}
 
 
 async def test_real_enterprise_collection_contains_only_metadata_and_deletes_exact_ids(

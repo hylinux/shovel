@@ -131,9 +131,9 @@ class SQLiteProtectionRepository:
         fences: dict[str, FenceRow] = {}
         for source in sources:
             key = source_key(source.resource)
-            if key in fences:
-                continue
-            fence = await session.get(FenceRow, (scope.workspace_id, scope.user_id, key))
+            fence = fences.get(key)
+            if fence is None:
+                fence = await session.get(FenceRow, (scope.workspace_id, scope.user_id, key))
             if fence is None and allow_new and source.source_generation == 0:
                 fence = FenceRow(
                     workspace_id=scope.workspace_id,

@@ -220,6 +220,17 @@ async def test_default_deny_and_wrong_destination_make_no_persistent_writes(harn
     assert await counts(harness.sessions) == (0, 0, 0, 0)
 
 
+@pytest.mark.parametrize("generations", [(0, 1), (1, 0)])
+async def test_same_logical_source_cannot_hide_a_conflicting_lineage_generation(harness, generations):
+    sources = tuple(
+        source(resource=resource(source_version=f"v{index}"), source_generation=generation)
+        for index, generation in enumerate(generations)
+    )
+    with pytest.raises(ProtectionDeniedError):
+        await harness.store.check_sources(SCOPE, sources)
+    assert await counts(harness.sessions) == (0, 0, 0, 0)
+
+
 async def test_authorized_metadata_roundtrip_restart_idempotency_and_no_legacy_body(harness):
     value = record()
     write = harness.approve(value, write=True)

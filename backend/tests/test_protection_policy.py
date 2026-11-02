@@ -289,6 +289,56 @@ def test_read_cannot_masquerade_as_display_and_local_storage_requires_retention(
     assert policy.evaluate(ctx, persist).reason_codes == ("retention_not_approved",)
 
 
+@pytest.mark.parametrize("action", [DataAction.EMBED, DataAction.SEND_TO_MODEL, DataAction.PERSIST])
+def test_read_grant_cannot_be_reused_for_an_approved_model_or_sqlite_sink(action):
+    ctx = reviewed_context()
+    model = ModelBinding(
+        model_profile_id="approved-model",
+        revision=1,
+        provider="synthetic",
+        model_name="reviewed",
+        endpoint="https://model.example",
+        environment="test",
+    )
+    profile = ModelProfile(
+        id=model.model_profile_id,
+        provider=model.provider,
+        model_name=model.model_name,
+        endpoint=model.endpoint,
+        environment=model.environment,
+        enterprise_approved=True,
+        approval_policy_ref="organization-model-policy",
+        permitted_classifications=("internal",),
+        permitted_actions=(DataAction.EMBED, DataAction.SEND_TO_MODEL),
+        permitted_tenants=(TENANT,),
+        retention_characteristics_ref="retention",
+        data_boundary_ref="boundary",
+        embedding_allowed=True,
+        generation_allowed=True,
+        enabled=True,
+    )
+    read = use_binding(ctx, action=DataAction.READ, destination=DataDestination.WORKFLOW_STATE)
+    read_state = state_for(ctx, read)
+    target = use_binding(
+        ctx,
+        action=action,
+        destination=DataDestination.LOCAL_SQLITE
+        if action == DataAction.PERSIST
+        else DataDestination.ENTERPRISE_MODEL,
+        model=None if action == DataAction.PERSIST else model,
+    )
+    provider = Provider(read_state, state_for(ctx, target, rules=read_state.rules, models=(profile,)))
+    audit = Audit()
+    policy = ProtectionPolicy(audit, provider=provider, clock=lambda: 10)
+    service = ProtectionService(policy, clock=lambda: 10)
+    assert service.use(wrapped(ctx), read, lambda body: body) == BODY
+    released = []
+    with pytest.raises(ProtectionDeniedError):
+        service.use(wrapped(ctx), target, released.append)
+    assert not released
+    assert audit.events[-1].reason_codes == ("no_unambiguous_rule",)
+
+
 @pytest.mark.parametrize("action", [DataAction.SEND_TO_MODEL, DataAction.EMBED])
 def test_model_and_embedding_sinks_require_exact_reviewed_model(action):
     ctx = reviewed_context()

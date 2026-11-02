@@ -658,3 +658,15 @@ ES-8 增加既有 Engine 的隔离 read/authentication/protection/display 集成
 Provider/组织 policy/source adapters 或 enterprise deny 解除，见分析第 20 节。
 H1–H4仍是后续阶段硬门槛，
 不能把契约测试当作其运行时验证或组织批准。
+
+**ES-9 离线验收**
+
+在既有 Engine/SQLite/Zvec 路径新增失败矩阵，实际复现并修复 timer 覆盖认证等待原因；
+source preflight 去重只复用查询结果，每个 lineage binding 仍检查 generation。
+READ 的 ALLOW 不可复用为模型、embedding、SQLite 或 native vector 写入权；并发
+resume/dispatch 与取消后迟到结果必须保持单次输出或零输出。诊断/异常/repr/SQLite
+哨兵证明限于已运行的受控路径，不当作任意插件、全 AG-UI 或物理存储安全证明。
+
+MAF Core 约束 `>=1.22.0,<1.23`，与项目 MCP 1.x 合同兼容；不做 MCP 2 迁移或假造
+SDK `Client`。真实 MCP 生命周期用例恢复通过，详细矩阵与限制见分析第 21 节。
+ES-5 真实 Windows Broker 及 H1–H4 的生产验收仍未通过，默认 enterprise deny 不变。

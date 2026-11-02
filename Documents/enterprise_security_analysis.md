@@ -13,6 +13,10 @@
 手动恢复、持久审计与完整 buffer 展示门控，见第 20 节。只装配 synthetic fixtures，
 不启用生产 Provider、WAM、自动索引或既有 AG-UI/Memory 的企业数据入口。**
 
+**ES-9 进度：已补齐离线安全/失败矩阵，新增 35 项回归并修复认证定时器及多源
+generation 检查边界，见第 21 节。MCP 1.x/MAF 兼容约束已修正；不以离线测试替代
+真实 WAM、组织批准或 H1–H4 的生产验收。**
+
 需求依据为 `Documents\enterprise_security_foundation.md`，特别是其中的
 ENT-SEC-01 至 ENT-SEC-18、分阶段实施要求和本轮十五项输出。
 本报告配套 [Enterprise Security ADRs](enterprise_security_adrs.md)，不替代现有
@@ -471,7 +475,7 @@ Enterprise Provider”成为 protection bypass；其分类/ingress UX 是上线�
 | ES-6 | 已实施 deny-default Data Protection kernel、保守 merge/lineage、ModelProfile 检查、safe decision/audit contract，见第 18 节 | 每种要求未满足不得 release；无生产 policy/audit adapter；AG-UI/现有模型和存储接线仍待 ES-7/8，H1 不宣称通过 |
 | ES-7 | 已实施 metadata-only SQLite、source fences/lineage/invalidation、独立无正文 vector schema、删除 adapter 与候选回查，见第 19 节 | 无自动 embedding/index writer、生产查询或旧 Memory/Knowledge 接线；不默认为邮件全文建立索引 |
 | ES-8 | 已实施 fixture Provider -> resolver -> fake auth -> transport -> protection -> safe display/deny，走既有 Engine，见第 20 节 | 原子 auth wait/restart/manual resume、既有 Approval、source fences、redacted audit；仅证明新增完整 buffer 路径，全出口 containment 仍未通过 |
-| ES-9 | 需求完整 failure/security test matrix | adversarial response、跨边界泄漏、race/recovery、Windows broker evidence；真实 Provider 仍不默认启用 |
+| ES-9 | 已实施离线 failure/security 验收矩阵与新增 35 项边界/竞态回归，见第 21 节 | synthetic、native SQLite/Zvec 与真实本地 MCP 生命周期；真实 Windows Broker/组织 trust/全出口 evidence 不冒充已通过，企业默认仍关闭 |
 | ES-10 | synthetic sample、authoring/connection/auth/protection/logging/testing guides | sample 不连接真实公司、不使用真实 Token；演示 ALLOW/DENY/auth wait/derived lineage |
 
 每阶段开始前重查代码和基线，列拟改文件、冲突和兼容性；实现最小完整切片并运行其
@@ -1057,3 +1061,92 @@ MAF/model/Artifact/Memory/Knowledge 的企业接线仍未实施。没有通用 e
 durable network dispatch/reconciliation、自动 index writer 或合规 retention purge；
 H1–H4 保持关闭，不把 append-only audit 当作 H4 的组织批准。没有接触用户 stores、
 真实企业账户/业务数据或模型/embedding 网络端点。
+
+## 21. ES-9 Security and Failure Tests：离线验收
+
+### 21.1 兼容基线与范围
+
+ES-8 中真实本地 MCP restart 失败不是账号或企业认证问题：安装/锁定的 MAF Core 1.24
+使用 MCP 2 的 `Client`，项目却要求 `mcp>=1.24,<2`。公开发行元数据中
+[Core 1.22](https://pypi.org/project/agent-framework-core/1.22.0/) 的 `all` extra 要求
+MCP 1.x，[Core 1.23](https://pypi.org/project/agent-framework-core/1.23.0/) 起改为 MCP 2.2+。
+当前业务集成与本地 FastMCP fixture 仍使用 MCP 1.x，因此保留该边界，将 Core 约束为
+`>=1.22.0,<1.23`，不加入 `Client` monkeypatch、不跳过失败测试、不隐式做 MCP 2 迁移。
+
+uv 从已有锁文件解析为 Core 1.22/OpenAI integration 1.17，保留其余已锁版本；
+Windows x64 `uv sync --python 3.14-x86_64 --locked --all-extras --dev` 恢复一致环境。
+`uv lock --check`、真实本地 MCP server 的 restart/关闭/新配置/会话保留测试通过。
+已有锁文件修改在解析前保留备份，按现有 index 配置合并，没有回退用户改动。
+
+新增 `test_enterprise_failures.py` 复用 ES-8 的同一个 Kernel/FunctionContract/Engine/
+PolicyEvaluator fixture；没有第二套认证或执行路径。另在现有 protection、persistence、
+native vector 测试文件补充直接出口与多源校验。全部为 synthetic 数据/凭据，无真实
+enterprise/model/embedding 请求；真实本地 MCP subprocess 只执行测试工具。
+
+### 21.2 需求到证据
+
+以下文件均位于 `backend\tests`。既有用例不重复制造一套测试；表中区分新增矩阵/
+集成证明与原有 kernel/contract 证明，不能把后者当成尚不存在的生产 adapter 验收。
+
+| 需求场景 | 自动化证据 |
+|---|---|
+| wrong tenant / audience | `test_enterprise_failures.py::test_invalid_resolved_target_fails_before_broker_or_business_request`；既有 Engine taxonomy 测试 |
+| missing account / broker unavailable / silent failure | 新增 `test_missing_account_and_broker_wait_without_polling_or_business_dispatch`；既有 authentication/Engine wait 测试 |
+| claims challenge / freshness | `test_enterprise_execution.py::test_fresh_claims_binding_is_required_and_never_persisted`、`test_missing_fresh_claims_does_not_consume_a_completed_authentication_boolean` |
+| identity cancellation / timeout / late result | 新增 `test_cancellation_rejects_late_cancel_ignoring_authentication_or_content`；既有原 deadline、迟到 AuthContext 关闭用例 |
+| Global/Mooncake、disabled connection、endpoint、unsupported Provider、stale revision、invalid scope | 新增 resolved-target 矩阵证明 broker/business 均零调用；既有 manifest/connection/identity contracts 与 revision-change 集成测试 |
+| unknown label / rights / missing protection | 新增 `test_incomplete_protection_is_not_downgraded_to_ordinary_content`；既有 unknown label 与 decode bypass/size/source/lineage 测试 |
+| read allow 不授予 embed / model egress / persist | `test_protection_policy.py::test_read_grant_cannot_be_reused_for_an_approved_model_or_sqlite_sink`；model profile 本身已批准，仍因缺该 action/destination rule 而拒绝 |
+| read allow 不授予 vector index | `test_enterprise_vector.py::test_real_vector_collection_stays_empty_when_read_is_allowed_but_index_is_denied`；检查实际 native collection 无 document，而非只看 mock 计数 |
+| multiple source / derived inheritance / CONTROL lineage | 既有 conservative merge、derived metadata recovery、全部 DATA/CONTROL invalidation 用例；新增相同 logical source 的冲突 generation 检查 |
+| source deleted / permission revoked / policy changed / stale snapshot | 新增 `test_source_deleted_while_authentication_waits_cannot_reappear_on_resume`、`test_current_source_evidence_must_authorize_output_not_merely_prior_read`；既有撤权与 live platform gate 测试 |
+| Token 不进 logs / exceptions / SQLite | 新增 `test_sdk_and_content_sentinels_do_not_enter_diagnostics_reprs_or_sqlite`、`test_broker_exception_traceback_is_safe_without_engine_swallowing_it`；既有所有 SQLite 表哨兵扫描 |
+| protected content 不进 telemetry / repr | 新增用例捕获实际 structlog、development logger/stdout/stderr、标准 logging、result/repr；既有 envelope 默认序列化拒绝用例 |
+| WAITING_FOR_AUTHENTICATION restart / resume / cancellation | 既有 Engine restart/manual resume/cancel/timeout/atomic rollback；新增并发 resume/dispatch 与迟到 callback |
+| policy denial 终态 | 新增 `test_changed_policy_requires_new_invocation_never_revives_a_terminal_denial`：policy 改变后须新 invoke，不重活旧 failed Execution |
+| duplicate wakeup 幂等且不绕过认证 | 新增 Delay/Snooze/Resume timer 矩阵：重复 timer 复用 ID，两次 tick 均不自动唤醒认证等待 |
+
+### 21.3 测试驱动的两处边界修复
+
+**认证等待的 timer 原因保留。** 原 `_schedule()` 保留 Approval/Input/Child 等 wait reason，
+却遗漏 `waiting_for_authentication`。显式 Delay/Snooze/Resume timer 因而会把原因改成
+普通 timer，绕过 `_ready()` 的认证等待屏障。现在与其他交互等待一致保留原原因；
+到期仍不自动发起认证/业务请求，原 deadline 不扩大，重复 timer/tick 保持幂等。
+这不授予登录、permission 或 Approval，也不新增登录/恢复 API。
+
+**source generation 逐项检查。** metadata DTO 已拒绝同一 logical source 的矛盾 generation，
+但独立 source preflight 在去重时会跳过后续 binding。现在只复用 fence 查询结果，不跳过
+generation 验证；两种来源顺序均拒绝冲突，零持久写入。保留 version/parent 变化不能
+绕过同一 logical source 撤权的既有不变量，不扩大为新 observer 或可恢复 source fence。
+
+### 21.4 未接受的生产边界
+
+离线矩阵完成不等于 ENT-SEC 全面合规或所有真实 adapter 均实现。以下继续未接受：
+
+- ES-5 真实 WAM：批准 tenant/app/account、Windows UI/broker-required/non-fallback、
+  实际取消与外部组织策略仍需明确 opt-in 实测。
+- H1：这里只证明新 whole-buffer handler；既有 AG-UI SSE、MAF/model/tool/Artifact/
+  clipboard/Memory/Knowledge 的企业全出口接线未完成。
+- H2：仅有现有只读 Engine/输出 replay guard；没有通用 external-write network
+  dispatch/reconciliation 或 crash-window 发送证明。
+- H3：组织信任、真实 source observer、durable lifecycle delivery/admission 与生产
+  PolicyStateProvider/connection resolver 尚未装配。
+- H4：没有组织 retention/offline/revocation/delete 矩阵批准、WAL/backup 安全清理、
+  native vector 物理安全删除或加密证明；哨兵扫描不证明这些物理属性。
+
+没有真实企业 Provider、自动 embedding/index writer 或默认 enterprise admission；
+没有把原个人数据入口重新标记为“企业安全”。本轮没有前端或生产 endpoint 改动。
+
+### 21.5 验证记录
+
+新增 **35 项测试通过**；全仓 Ruff lint、Mypy（217 source files）、变更的 6 个 Python
+文件格式、`uv lock --check` 与 diff whitespace 检查通过。真实本地 MCP restart
+失败用例在兼容依赖组合下单独通过，且包括在完整后端离线回归内：
+
+`uv run --no-sync pytest --no-cov -o addopts= -q --tb=short`：
+**1178 passed、2 skipped**，用时 582.54 秒；包含本轮新增 35 项，不重复累加。
+两项跳过分别为须显式 opt-in 的真实模型/embedding baseline 和本机 CPU benchmark，
+没有通过打开这些开关来访问用户配置或外部模型。真实 WAM 不在该离线套件内。
+
+全仓 `ruff format --check .` 仍报告 **93 个文件**
+需格式化，包含未修改的文档代码块与 Python 文件；没有夹带全仓格式重写。

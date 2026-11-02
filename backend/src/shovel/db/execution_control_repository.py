@@ -93,6 +93,7 @@ class SQLiteExecutionControlRepository:
             "waiting_for_approval",
             "waiting_for_input",
             "waiting_for_child",
+            "waiting_for_authentication",
             "interrupted",
         }:
             row.execution_control = {

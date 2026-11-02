@@ -10,7 +10,8 @@ authors = [ { name = "HongWei Guo" } ]
 
 dependencies = [
     "agent-framework-ag-ui>=1.6.0",
-    "agent-framework-core>=1.22.0",
+    # MAF 1.23+ requires MCP 2.x; retain the supported MCP 1.x integration.
+    "agent-framework-core>=1.22.0,<1.23",
     "agent-framework-openai>=1.17.0",
     "aiosqlite>=0.22.1",
     "alembic>=1.18.5",

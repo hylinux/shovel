@@ -3,6 +3,9 @@
 **状态：ES-0 分析完成；另行获准的 ES-2 契约、ES-3 配置管理和 ES-4
 身份/认证/持久交互内核已实现。真实 WAM 和后续机制仍待分阶段验证，不启用企业执行。**
 
+**ES-5 进度：用户另行选择隔离 Python WAM 验收 spike；已完成离线 SDK 检查，
+尚未完成真实 Windows Broker 或生产接受性验证，见第 17 节。**
+
 需求依据为 `Documents\enterprise_security_foundation.md`，特别是其中的
 ENT-SEC-01 至 ENT-SEC-18、分阶段实施要求和本轮十五项输出。
 本报告配套 [Enterprise Security ADRs](enterprise_security_adrs.md)，不替代现有
@@ -355,11 +358,12 @@ SQLite WAL/NORMAL 已提供进程恢复基础，但不是断电后最后一笔 a
 
 ### 8.1 已验证、未验证必须区分
 
-本次已安装环境：CPython **3.14.10 AMD64 64-bit**；keyring 25.7.0、pywin32 312、
+ES-0 时主项目已安装环境：CPython **3.14.10 AMD64 64-bit**；keyring 25.7.0、pywin32 312、
 MAF core 1.24.0/openai 1.18.0/AG-UI 1.7.1、Generic Host 1.0.1、
 dependency-injector 4.49.1、SQLAlchemy 2.1.6、httpx 0.28.1、Zvec 0.8.0。
 msal/msal-extensions/pymsalruntime/azure-identity 均未安装。这是 `.venv` 快照，
 不是声称未提交 lock 与当前安装版本完全一致。
+ES-5 隔离环境的 SDK 安装/离线检查见第 17 节；主项目未加入认证 SDK。
 
 | 正式依据 | 能确认的事实 | 不能据此声称 |
 |---|---|---|
@@ -451,7 +455,7 @@ Enterprise Provider”成为 protection bypass；其分类/ingress UX 是上线�
 | ES-2 | 本文第 12 节精确列出的版本化 Core contracts | 强类型/immutable/safe repr/serialization/schema/import graph 测试；无 DB/SDK/default变更 |
 | ES-3 | 已实施 Connection profile repository/application service、optimistic revisions、manifest兼容校验 | disabled draft/unknown refs 不可 invoke；migration 15、重复升级与 stale revision；见第 15 节 |
 | ES-4 | 已实施 Identity profile kernel、TokenRequest validation、safe diagnostics、silent-only服务、transport contract及持久交互内核 | fake broker 仅 tests；生产 unavailable，不假 READY；仅为已挂起 Execution 创建 request/projection，见第 16 节；不开放企业dispatch |
-| ES-5 | 已批准的 Windows MSAL/WAM路线，account/tenant/challenge/cancel/timeout/disconnect | approved tenant 的显式 opt-in Windows交互测试；无真实业务 Provider |
+| ES-5 | 当前仅完成另行获准的隔离 Python SDK 离线验收 spike，见第 17 节 | 真实 WAM/生产路线仍未通过；后续需 approved tenant 的显式 opt-in Windows交互测试；无真实业务 Provider |
 | ES-6 | deny-default Data Protection kernel、merge/lineage/ModelProfile、safe decision/audit | 每种要求未满足不得 release；未知标签和 policy failure 不降级 |
 | ES-7 | metadata-only SQLite、安全 enterprise vector schema、sidecars/generations/invalidation | 证明 deny 时无 embedding/network/index/content write；不默认为邮件全文建立索引 |
 | ES-8 | test fixture Provider -> resolver -> fake auth -> transport -> protection -> safe display/deny，走既有 Engine | 原子 auth wait/restart/resume、pre-effect Approval、source invalidation、所有裸出口 containment |
@@ -690,3 +694,61 @@ ES-4 测试文件 **30 passed**。全仓 Ruff lint、Mypy（**208 source files**
 涉及的 **37 个 Python 文件**格式检查和 diff whitespace 检查通过。
 另行验证旧 Operation 迁移/重复升级及旧数据库 FTS backfill，**2 passed**。
 未重新宣称全套测试通过；第 15 节既有 MAF/MCP 依赖不兼容仍未修改。
+
+## 17. ES-5 隔离 Python WAM 验收 spike
+
+用户选择本轮范围为 **python-acceptance**：先做隔离接受性 spike，不登录、
+不访问账户/用户 stores、不启用生产；不在尚无可靠证据时直接添加 Native Broker。
+本轮交付 `scripts\probe_windows_auth.py`、独立
+`scripts\probe_windows_auth.py.lock` 和 `backend\tests\test_windows_auth_probe.py`。
+这不是 ES-5 Windows Authentication Broker 的完整实现。
+
+脚本用 PEP 723 单独锁定 MSAL **1.39.0**、pymsalruntime **0.20.7**、
+Pydantic **2.14.1** 和传递依赖，只针对 CPython **3.14 x64 Windows**。
+认证 SDK 不进入主项目 `pyproject.toml`、`uv.lock` 或 `.venv`；执行前后验证
+主项目 lock 内容未变，且主项目仍未安装 msal/pymsalruntime。
+不调整既有 MAF/MCP 依赖，也不新增 Runtime、API、CLI 登录、生产 broker 或迁移。
+
+从仓库根执行：
+
+```powershell
+uv run --no-project --locked --python 3.14-x86_64 --script scripts\probe_windows_auth.py
+uv run --no-sync pytest backend\tests\test_windows_auth_probe.py --no-cov
+```
+
+脚本读取包版本/Windows wheel tag，导入 MSAL 并检查指定公开方法的具名参数；
+不构造 PublicClientApplication，不调用 get_accounts、Token acquisition、
+interactive 或 remove_account，不读取 `_broker` 或依赖内部结果属性判断 WAM。
+复用既有 TokenRequest/IdentityBinding，以 synthetic fixtures 检查 tenant、audience、
+scope、connection revision、manifest、principal、correlation、interactive、refresh 和
+claims 绑定拒绝；这些只是 **core preflight**，不是真实 SDK account/token 授权证据。
+传入任何额外参数均拒绝且不回显参数值；检查错误返回安全失败项和非零退出码。
+
+JSON 明确区分 `offline_checks_passed`、`production_ready` 和
+`authentication_attempted`。退出码 0 仅表示离线检查通过，**绝不表示已登录或可启用
+生产认证**；生产门槛分别标为 blocked/not_verified，不用 SDK opt-in 假 READY。
+
+2026-11-02 实测：在隔离环境安装 **16 个包**，**22 项离线检查通过**，
+`production_ready=false`、`authentication_attempted=false`。这证明所锁 SDK 可安装、
+MSAL 可导入且具备相关公开参数，不证明 native DLL 已加载或 Windows WAM 已初始化。
+新增 **7 项测试通过**，覆盖无账户/认证调用、缺失依赖、未知公共参数、
+`**kwargs` 不充当证据、非 Windows/非 x64 拒绝、错误不回显和拒绝认证参数。
+全仓 Ruff lint、Mypy（后端及脚本共 **209 个 source files**）、新增 Python 文件格式、
+diff whitespace 和文档引用检查通过；隔离执行的 JSON 证据保存于 session artifacts。
+
+### 17.1 仍未通过的生产门槛
+
+[官方 PublicClientApplication API](https://learn.microsoft.com/en-us/python/api/msal/msal.application.publicclientapplication?view=msal-py-latest)
+明确说明：broker 初始化失败时可静默回退 non-broker；WAM opt-in 不是
+WAM-required 保证。interactive 的公开 UI callback 只是 UI 类型通知，不能替代
+silent 路径发送前强制保证。官方 API 依据和当前包元数据已重查，未把此行为隐藏。
+
+尚未验证：native 加载/初始化、公开 stable account/principal/guest tenant 绑定、
+批准的 Entra app/tenant/consent、human action/可信 HWND、实际 SDK/UI 取消与 late result、
+Global/China/guest/CA/可信 claims challenge、应用 disconnect 及 SDK/native secret-safe
+diagnostics。此次不触发它们，不采集注册信息或账户资料。
+
+当前证据不足以批准 Python WAM 生产路线，但也不声称 Python 永远不可能满足；
+不能用私有属性、事后丢弃 fallback Token 或 coroutine timeout 冒充门槛通过。
+继续真实接受性测试需要具体授权；切换 Native 路线需先修订/批准
+ENT-ADR-02 的项目/安装/签名/caller/IPC 边界。ES-4 unavailable 默认及 H1–H4 保持。

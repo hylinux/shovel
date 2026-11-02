@@ -4,6 +4,9 @@
 Contracts、ES-3 禁用配置管理及 ES-4 身份/认证/持久交互内核实施。该范围批准不是组织 policy/WAM/存储架构
 或后续上线批准。**
 
+**ES-5 另行批准范围：隔离 Python WAM 离线验收 spike，不是生产 Broker 路线
+批准；未登录、未获取 Token。**
+
 依据 [ES-0 Repository Analysis](enterprise_security_analysis.md) 和需求文件
 `Documents\enterprise_security_foundation.md`。这里的“决策”均为拟议决策，
 不覆盖既有 [Platform ADRs](platform_adrs.md)，运行时提案不代表已经实施。
@@ -115,6 +118,16 @@ B01–B05、B10、B12；国别云、UI/取消、模式可观测性、实际IPC A
 ES-0/1不安装SDK，ES-2不建native项目。生产路线失效时disable/unavailable并保存
 无secret pending request；清理应用状态不删除Windows/Office账户。未来binary/签名/
 installer回退须独立方案，不能无声fallback到弱认证。
+
+**ES-5 接受性 spike 证据**
+
+单独 PEP 723 脚本/lock 在 CPython 3.14 x64 Windows 安装 MSAL 1.39.0、
+pymsalruntime 0.20.7 并完成公开参数和 synthetic core binding 检查；主项目 SDK、
+配置、lock 和 Runtime 不改变。不构造 SDK client 或调用账户/认证方法。
+离线结果通过但 production_ready=false；wheel/API 存在不是 native WAM 初始化证明。
+官方 API 仍明示 broker 初始化失败时的 non-broker fallback，尚无已验证的
+发送前 WAM-required/真实取消保证，不据此启用生产或立即选择 Native 实现。
+详细命令、测试、授权范围和未验证门槛见分析第 17 节。
 
 ## ENT-ADR-03 — Enterprise Connection Profile
 

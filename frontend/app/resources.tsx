@@ -2,21 +2,28 @@
 
 import { useState, type FormEvent } from "react";
 import { type Connector, type Items, type Operation, type OutlookFolder, type OutlookStore, type Resource, type Status, date, segment, useAction, useQuery } from "./api";
-import { Badge, Empty, Feedback } from "./ui";
+import { usePageQuery } from "./pagination-query";
+import { Badge, Empty, Feedback, Pagination } from "./ui";
 import { Profiles } from "./profiles";
 
-export function Resources({ resources, loading, status, refresh }: { resources?: Resource[]; loading: boolean; status?: Status; refresh: () => void }) {
+export function Resources({ status, refresh }: { status?: Status; refresh: () => void }) {
   const connectors = useQuery<Items<Connector>>("/connectors");
   const [adding, setAdding] = useState(false);
   const [filter, setFilter] = useState("");
+  const page = usePageQuery<Resource>(`/resources?q=${segment(filter)}`, 2000);
+  const resources = page.data?.items;
+  const loading = page.loading;
+  function refreshResources() { page.refresh(); refresh(); }
   const [kind, setKind] = useState("local_fs");
   const connector = connectors.data?.items.find((connector) => connector.kind === kind);
-  const visible = (resources || []).filter((resource) => `${resource.name} ${resource.config.root_path || resource.config.start_url || ""} ${resource.connector_kind} ${resource.description || ""}`.toLowerCase().includes(filter.toLowerCase()));
+  const visible = resources || [];
   return <section>
-    <div className="section-toolbar"><div><h2>Connected resources <span className="count">{resources?.length ?? "—"}</span></h2><p>Choose local documents, classic Outlook mail or a public website, verify access, then build its search index.</p></div><button className="primary" onClick={() => setAdding(!adding)} aria-expanded={adding}>{adding ? "Close form" : "+ Add resource"}</button></div>
-    {adding && <div className="inline-panel"><h3>Add a resource</h3><Feedback error={connectors.error} retry={connectors.refresh} />{connectors.loading ? <p role="status">Loading connectors…</p> : <><label>Resource type<select value={kind} onChange={(event) => setKind(event.target.value)}><option value="local_fs">Local folder</option><option value="outlook_local">Classic Outlook mail (Windows)</option><option value="web_search">Web Search — public website</option></select></label>{!connector ? <p>This resource type is not available from this runtime.</p> : <><p>{connector.description}</p>{kind === "outlook_local" ? <CreateOutlookResource onCreated={() => { refresh(); setAdding(false); }} /> : kind === "web_search" ? <CreateWebResource onCreated={() => { refresh(); setAdding(false); }} /> : <CreateResource onCreated={() => { refresh(); setAdding(false); }} />}</>}</>}</div>}
-    <div className="list-toolbar"><label className="search-field"><span className="sr-only">Filter resources</span><input type="search" placeholder="Filter by name, folder path or website…" value={filter} onChange={(event) => setFilter(event.target.value)} /></label><span className="muted">Automatically refreshed</span></div>
-    {loading && !resources ? <p role="status" className="empty">Loading resources…</p> : !resources ? <Empty title="Resources unavailable">Resolve the connection error above to load your resources.</Empty> : !visible.length ? <Empty title={filter ? "No matching resources" : "Connect your knowledge"}>{filter ? "Try a different name, path or website." : "Add a local folder, Outlook mail or public website resource. Nothing is indexed until you run a scan."}</Empty> : <div className="resource-list">{visible.map((resource) => <ResourceRow key={resource.id} resource={resource} status={status} refresh={refresh} />)}</div>}
+    <div className="section-toolbar"><div><h2>Connected resources <span className="count">{page.data?.total ?? "—"}</span></h2><p>Choose local documents, classic Outlook mail or a public website, verify access, then build its search index.</p></div><button className="primary" onClick={() => setAdding(!adding)} aria-expanded={adding}>{adding ? "Close form" : "+ Add resource"}</button></div>
+    {adding && <div className="inline-panel"><h3>Add a resource</h3><Feedback error={connectors.error} retry={connectors.refresh} />{connectors.loading ? <p role="status">Loading connectors…</p> : <><label>Resource type<select value={kind} onChange={(event) => setKind(event.target.value)}><option value="local_fs">Local folder</option><option value="outlook_local">Classic Outlook mail (Windows)</option><option value="web_search">Web Search — public website</option></select></label>{!connector ? <p>This resource type is not available from this runtime.</p> : <><p>{connector.description}</p>{kind === "outlook_local" ? <CreateOutlookResource onCreated={() => { refreshResources(); setAdding(false); }} /> : kind === "web_search" ? <CreateWebResource onCreated={() => { refreshResources(); setAdding(false); }} /> : <CreateResource onCreated={() => { refreshResources(); setAdding(false); }} />}</>}</>}</div>}
+    <div className="list-toolbar"><label className="search-field"><span className="sr-only">Filter resources</span><input type="search" placeholder="Filter by name, folder path or website…" maxLength={2000} value={filter} onChange={(event) => setFilter(event.target.value)} /></label><span className="muted">Automatically refreshed</span></div>
+    <Feedback error={page.error} retry={page.refresh} />
+    {loading && !resources ? <p role="status" className="empty">Loading resources…</p> : !resources ? <Empty title="Resources unavailable">Resolve the connection error above to load your resources.</Empty> : !visible.length ? <Empty title={filter ? "No matching resources" : "Connect your knowledge"}>{filter ? "Try a different name, path or website." : "Add a local folder, Outlook mail or public website resource. Nothing is indexed until you run a scan."}</Empty> : <div className="resource-list">{visible.map((resource) => <ResourceRow key={resource.id} resource={resource} status={status} refresh={refreshResources} />)}</div>}
+    {page.data && <Pagination label="Resources" pagination={page} onPage={page.setPage} onPageSize={page.setPageSize} />}
   </section>;
 }
 

@@ -377,17 +377,38 @@ def configure_api(
         rt: RuntimeDependency,
         state: ResourceState | None = None,
         connector_kind: str | None = None,
+        q: str = Query("", max_length=2000),
         limit: int = Query(100, ge=1, le=1000),
         offset: int = Query(0, ge=0),
     ) -> dict[str, Any]:
-        statement = select(Resource).order_by(Resource.name)
+        statement = select(Resource).order_by(Resource.name, Resource.id)
         if state is not None:
             statement = statement.where(Resource.state == state)
         if connector_kind is not None:
             statement = statement.where(Resource.connector_kind == connector_kind)
         async with rt.sessions() as session:
+            if q:
+                # Preserve the browser filter's Unicode and literal substring semantics.
+                needle = q.lower()
+                matching = [
+                    row
+                    for row in await session.scalars(statement)
+                    if needle
+                    in (
+                        f"{row.name} {row.config.get('root_path') or row.config.get('start_url') or ''} "
+                        f"{row.connector_kind} {row.description or ''}"
+                    ).lower()
+                ]
+                return {
+                    "items": [resource_view(row) for row in matching[offset : offset + limit]],
+                    "total": len(matching),
+                }
+            total = await session.scalar(
+                select(func.count()).select_from(statement.order_by(None).subquery())
+            )
+            assert total is not None
             rows = await session.scalars(statement.limit(limit).offset(offset))
-            return {"items": [resource_view(row) for row in rows]}
+            return {"items": [resource_view(row) for row in rows], "total": total}
 
     @router.get("/resources/{ref}")
     async def resource(ref: str, rt: RuntimeDependency) -> dict[str, Any]:
@@ -549,14 +570,12 @@ def configure_api(
         state: str | None = None,
         resource_id: str | None = None,
     ) -> dict[str, Any]:
-        return {
-            "items": await rt.operation_queries.list(
-                limit=limit,
-                offset=offset,
-                state=state,
-                resource_id=resource_id,
-            )
-        }
+        return await rt.operation_queries.page(
+            limit=limit,
+            offset=offset,
+            state=state,
+            resource_id=resource_id,
+        )
 
     @router.get("/operations/{identifier}")
     async def operation(identifier: str, rt: RuntimeDependency) -> dict[str, Any]:
@@ -577,8 +596,12 @@ def configure_api(
         if resource_id is not None:
             statement = statement.where(Job.resource_id == (await rt.resources.resolve(resource_id)).id)
         async with rt.sessions() as session:
+            total = await session.scalar(
+                select(func.count()).select_from(statement.order_by(None).subquery())
+            )
+            assert total is not None
             rows = await session.execute(statement.limit(limit).offset(offset))
-            return {"items": [job_view(job, name) for job, name in rows]}
+            return {"items": [job_view(job, name) for job, name in rows], "total": total}
 
     @router.get("/jobs/{identifier}")
     async def job(identifier: str, rt: RuntimeDependency) -> dict[str, Any]:

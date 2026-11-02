@@ -21,12 +21,13 @@ from sqlalchemy import func, select, text, update
 from shovel.config.settings import AppSettings
 from shovel.db.database import create_async_database_engine, create_async_session_factory, init_database
 from shovel.db.migrations import upgrade_database
-from shovel.db.model.config import Resource
+from shovel.db.model.capability import CapabilityDefinition, CapabilityVersion
+from shovel.db.model.config import Resource, ScanProfile
 from shovel.db.model.content import Document
 from shovel.db.model.execution import Job
 from shovel.db.model.retrieval import DeletionOutbox, SchemaMigration
 from shovel.db.model.runtime import ChatMessage, Conversation, Operation
-from shovel.domain.enums import JobState, ScanMode
+from shovel.domain.enums import JobState, ResourceState, ScanMode, ScheduleKind
 from shovel.pipeline.embedder import build_embedder
 from shovel.pipeline.scan_service import ScanService
 from shovel.runtime.agent import AgentResult, ToolDiagnosticsMiddleware, model_endpoint
@@ -83,6 +84,156 @@ async def api(runtime: Runtime) -> AsyncIterator[httpx.AsyncClient]:
         transport=httpx.ASGITransport(app=app), base_url="http://127.0.0.1:9999"
     ) as client:
         yield client
+
+
+async def test_resources_pagination_counts_and_filters_beyond_first_page(
+    runtime: Runtime, api: httpx.AsyncClient
+) -> None:
+    async with runtime.sessions() as session:
+        session.add_all(
+            [
+                Resource(
+                    id=f"resource-{index:03}",
+                    name=f"Resource {index:03}" if index < 104 else "Équipe_%_notes",
+                    connector_kind="local_fs",
+                    state=ResourceState.PAUSED if index == 0 else ResourceState.ACTIVE,
+                    config={"root_path": f"C:\\{'target' if index >= 100 else 'notes'}\\{index}"},
+                )
+                for index in range(105)
+            ]
+        )
+        await session.commit()
+    first = (await api.get("/api/v1/resources")).json()
+    last = (await api.get("/api/v1/resources", params={"limit": 10, "offset": 100})).json()
+    assert first["total"] == last["total"] == 105
+    assert len(first["items"]) == 100 and len(last["items"]) == 5
+    assert not {row["id"] for row in first["items"]} & {row["id"] for row in last["items"]}
+    filtered = (await api.get("/api/v1/resources", params={"q": "TARGET", "limit": 2, "offset": 2})).json()
+    assert filtered["total"] == 5
+    assert [row["id"] for row in filtered["items"]] == ["resource-102", "resource-103"]
+    literal = (await api.get("/api/v1/resources", params={"q": "éQUIPE_%"})).json()
+    assert literal["total"] == 1 and literal["items"][0]["id"] == "resource-104"
+    paused = (await api.get("/api/v1/resources", params={"state": "paused"})).json()
+    assert paused["total"] == 1
+    missing = (await api.get("/api/v1/resources", params={"q": "not present"})).json()
+    assert missing == {"items": [], "total": 0}
+
+
+async def test_jobs_pagination_total_tracks_resource_filter_and_deleted_rows(
+    runtime: Runtime, api: httpx.AsyncClient
+) -> None:
+    async with runtime.sessions() as session:
+        session.add_all(
+            [
+                Resource(id=f"resource-{index}", name=f"Resource {index}", connector_kind="local_fs")
+                for index in range(2)
+            ]
+        )
+        await session.flush()
+        session.add_all(
+            [
+                ScanProfile(
+                    id=f"profile-{index}",
+                    resource_id=f"resource-{index}",
+                    name="default",
+                    scan_mode=ScanMode.INCREMENTAL,
+                )
+                for index in range(2)
+            ]
+        )
+        await session.flush()
+        session.add_all(
+            [
+                Job(
+                    id=f"job-{index:03}",
+                    resource_id=f"resource-{index % 2}",
+                    scan_profile_id=f"profile-{index % 2}",
+                    fired_by_kind=ScheduleKind.MANUAL,
+                    scan_mode=ScanMode.INCREMENTAL,
+                    state=JobState.QUEUED,
+                    queued_at=index,
+                )
+                for index in range(105)
+            ]
+        )
+        await session.commit()
+    last = (await api.get("/api/v1/jobs", params={"limit": 10, "offset": 100})).json()
+    assert last["total"] == 105 and len(last["items"]) == 5
+    filtered = (
+        await api.get("/api/v1/jobs", params={"resource_id": "resource-1", "limit": 10, "offset": 50})
+    ).json()
+    assert filtered["total"] == 52 and len(filtered["items"]) == 2
+    async with runtime.sessions() as session:
+        rows = await session.scalars(select(Job).where(Job.queued_at < 5))
+        for row in rows:
+            await session.delete(row)
+        await session.commit()
+    removed = (await api.get("/api/v1/jobs", params={"limit": 10, "offset": 100})).json()
+    assert removed == {"items": [], "total": 100}
+
+
+async def test_operation_pagination_counts_only_visible_filtered_receipts(
+    runtime: Runtime, api: httpx.AsyncClient
+) -> None:
+    async with runtime.sessions() as session:
+        session.add_all(
+            [
+                Operation(
+                    id=f"operation-{index:03}",
+                    kind="resource.verify",
+                    state="failed" if index % 2 else "succeeded",
+                    resource_id=f"resource-{index % 2}",
+                    queued_at=index,
+                )
+                for index in range(105)
+            ]
+        )
+        session.add(
+            CapabilityDefinition(
+                id="test-capability",
+                workspace_id=runtime.memory.owner.workspace_id,
+                user_id=runtime.memory.owner.user_id,
+                kind="skill",
+                name="Hidden execution test",
+            )
+        )
+        await session.flush()
+        session.add(
+            CapabilityVersion(
+                id="test-version",
+                capability_id="test-capability",
+                number=1,
+                content={},
+            )
+        )
+        await session.flush()
+        session.add(
+            Operation(
+                id="hidden-execution",
+                kind="capability.invoke",
+                capability_version_id="test-version",
+                root_execution_id="hidden-execution",
+                correlation_id="hidden-execution",
+                execution_data={"private": True},
+            )
+        )
+        await session.commit()
+    last = (await api.get("/api/v1/operations", params={"limit": 10, "offset": 100})).json()
+    assert last["total"] == 105 and len(last["items"]) == 5
+    filtered = (
+        await api.get(
+            "/api/v1/operations",
+            params={"state": "failed", "resource_id": "resource-1", "limit": 10, "offset": 50},
+        )
+    ).json()
+    assert filtered["total"] == 52 and len(filtered["items"]) == 2
+    assert all(row["state"] == "failed" for row in filtered["items"])
+    assert (await api.get("/api/v1/operations", params={"offset": 200})).json() == {
+        "items": [],
+        "total": 105,
+    }
+    for path in ["resources", "jobs", "operations"]:
+        assert (await api.get(f"/api/v1/{path}", params={"offset": -1})).status_code == 422
 
 
 async def test_mcp_configuration_roundtrip_conflicts_and_validation(

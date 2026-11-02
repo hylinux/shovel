@@ -48,6 +48,14 @@ class OperationReadRepository(Protocol):
         state: str | None,
         resource_id: str | None,
     ) -> list[dict[str, Any]]: ...
+    async def page(
+        self,
+        *,
+        limit: int,
+        offset: int,
+        state: str | None,
+        resource_id: str | None,
+    ) -> dict[str, Any]: ...
 
 
 class OperationQueries:
@@ -66,3 +74,13 @@ class OperationQueries:
         resource_id: str | None = None,
     ) -> list[dict[str, Any]]:
         return await self.repository.list(limit=limit, offset=offset, state=state, resource_id=resource_id)
+
+    async def page(
+        self,
+        *,
+        limit: int = 100,
+        offset: int = 0,
+        state: str | None = None,
+        resource_id: str | None = None,
+    ) -> dict[str, Any]:
+        return await self.repository.page(limit=limit, offset=offset, state=state, resource_id=resource_id)

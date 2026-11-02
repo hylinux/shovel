@@ -95,7 +95,7 @@ export default function Home() {
     retryCreation();
   }
   const status = useQuery<Status>("/status", 10000);
-  const resourcesNeeded = view === "Resources" || view === "Background tasks" || view === "Search Documents";
+  const resourcesNeeded = view === "Background tasks" || view === "Search Documents";
   const resources = useQuery<Items<Resource>>(resourcesNeeded ? "/resources" : null, 2000);
   const showSessions = sessionsOpen;
   function navigate(item: View) {
@@ -153,7 +153,7 @@ export default function Home() {
         <header className="page-heading"><div><h1>{view}</h1><p>{descriptions[view]}</p></div><span className="local-label">Local-first runtime</span></header>
         <Feedback error={status.error} retry={status.refresh} />
         {resourcesNeeded && <Feedback error={resources.error} retry={resources.refresh} />}
-        {view === "Resources" && <Resources resources={resources.data?.items} loading={resources.loading} status={status.data} refresh={resources.refresh} />}
+        {view === "Resources" && <Resources status={status.data} refresh={resources.refresh} />}
         {view === "Background tasks" && <Tasks resources={resources.data?.items || []} />}
         {view === "Search Documents" && <SearchDocuments resources={resources.data?.items || []} status={status.data} />}
         {view === "Chat" && <><Feedback error={sessionError} retry={retryInitialSession} />{creatingSession && !selectedSession ? <p role="status">Opening session…</p> : <Knowledge status={status.data} sessionId={selectedSession} onSessionChanged={refreshSessions} />}</>}

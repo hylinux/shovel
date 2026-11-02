@@ -65,7 +65,9 @@ export async function api<T>(path: string, options: RequestInit = {}): Promise<T
 
 export function useQuery<T>(path: string | null, interval = 0, shouldPoll?: (result: T) => boolean) {
   const [data, setData] = useState<T>();
+  const [dataPath, setDataPath] = useState<string>();
   const [error, setError] = useState("");
+  const [errorPath, setErrorPath] = useState<string>();
   const [loading, setLoading] = useState(Boolean(path));
   const [revision, refresh] = useReducer((value: number) => value + 1, 0);
   useEffect(() => {
@@ -74,17 +76,17 @@ export function useQuery<T>(path: string | null, interval = 0, shouldPoll?: (res
       try {
         const result = await api<T>(path, { signal });
         if (!signal.aborted) {
-          setData(result); setError("");
+          setData(result); setDataPath(path); setError(""); setErrorPath(undefined);
           return shouldPoll?.(result);
         }
       } catch (error) {
-        if (!signal.aborted) setError(errorText(error));
+        if (!signal.aborted) { setError(errorText(error)); setErrorPath(path); }
       } finally {
         if (!signal.aborted) setLoading(false);
       }
     }, interval);
   }, [path, interval, revision, shouldPoll]);
-  return { data, error, loading, refresh };
+  return { data, dataPath, error, errorPath, loading, refresh };
 }
 
 export function useSessionHistory(revision: number) {

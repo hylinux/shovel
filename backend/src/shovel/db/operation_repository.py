@@ -1,8 +1,9 @@
 from __future__ import annotations
 
+import builtins
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from shovel.db.model.runtime import Operation
@@ -35,6 +36,28 @@ class SQLiteOperationReader:
         state: str | None,
         resource_id: str | None,
     ) -> list[dict[str, Any]]:
+        items, _ = await self._page(limit=limit, offset=offset, state=state, resource_id=resource_id)
+        return items
+
+    async def page(
+        self,
+        *,
+        limit: int,
+        offset: int,
+        state: str | None,
+        resource_id: str | None,
+    ) -> dict[str, Any]:
+        items, total = await self._page(limit=limit, offset=offset, state=state, resource_id=resource_id)
+        return {"items": items, "total": total}
+
+    async def _page(
+        self,
+        *,
+        limit: int,
+        offset: int,
+        state: str | None,
+        resource_id: str | None,
+    ) -> tuple[builtins.list[dict[str, Any]], int]:
         if not 1 <= limit <= 1000 or offset < 0:
             raise RuntimeFailure("Invalid operation pagination.")
         statement = (
@@ -50,6 +73,11 @@ class SQLiteOperationReader:
         if resource_id is not None:
             statement = statement.where(Operation.resource_id == resource_id)
         async with self.sessions() as session:
-            return [
+            total = await session.scalar(
+                select(func.count()).select_from(statement.order_by(None).subquery())
+            )
+            assert total is not None
+            items = [
                 operation_view(row) for row in await session.scalars(statement.limit(limit).offset(offset))
             ]
+            return items, total

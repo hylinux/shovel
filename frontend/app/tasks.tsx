@@ -2,12 +2,13 @@
 
 import { useState } from "react";
 import { active, api, date, errorText, segment, useAction, useQuery, type Items, type Job, type JobEvent, type Operation, type Resource, type Status } from "./api";
+import { usePageQuery } from "./pagination-query";
 import { forgetPendingRequest, pendingRequests, type PendingRequest } from "./request-recovery";
-import { Badge, Empty, Feedback } from "./ui";
+import { Badge, Empty, Feedback, Pagination } from "./ui";
 
 export function Tasks({ resources }: { resources: Resource[] }) {
-  const jobs = useQuery<Items<Job>>("/jobs", 2000);
-  const operations = useQuery<Items<Operation>>("/operations", 2000);
+  const jobs = usePageQuery<Job>("/jobs", 2000);
+  const operations = usePageQuery<Operation>("/operations", 2000);
   const action = useAction();
   const [cleanup, setCleanup] = useState(false);
   const [resourceId, setResourceId] = useState("");
@@ -23,9 +24,11 @@ export function Tasks({ resources }: { resources: Resource[] }) {
     <Feedback error={action.error} notice={action.notice} />
     <Feedback error={jobs.error} retry={jobs.refresh} />
     {jobs.loading ? <p role="status">Loading scan jobs…</p> : jobs.data?.items.length === 0 ? <Empty title="No scans yet">Start a scan from Resources. Its stages and document events will appear here.</Empty> : jobs.data?.items.map((job) => <JobRow key={job.id} job={job} refresh={jobs.refresh} />)}
+    {jobs.data && <Pagination label="Scan jobs" pagination={jobs} onPage={jobs.setPage} onPageSize={jobs.setPageSize} />}
     <div className="section-toolbar separated"><div><h2>Operations</h2><p>Resource changes and index maintenance, including failed requests.</p></div></div>
     <Feedback error={operations.error} retry={operations.refresh} />
     {operations.loading ? <p role="status">Loading operations…</p> : operations.data?.items.length === 0 ? <Empty title="No operations yet">Resource actions will be recorded here.</Empty> : <div className="operation-list">{operations.data?.items.map((operation) => <OperationRow key={operation.id} operation={operation} refresh={operations.refresh} />)}</div>}
+    {operations.data && <Pagination label="Operations" pagination={operations} onPage={operations.setPage} onPageSize={operations.setPageSize} />}
   </section>;
 }
 

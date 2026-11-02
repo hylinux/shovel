@@ -46,6 +46,22 @@ type Action = Literal[
     "interaction.list",
     "interaction.show",
     "interaction.input",
+    "enterprise.connection.options",
+    "enterprise.connection.list",
+    "enterprise.connection.show",
+    "enterprise.connection.create",
+    "enterprise.connection.update",
+    "enterprise.connection.validate",
+    "enterprise.connection.disable",
+    "enterprise.identity.list",
+    "enterprise.identity.show",
+    "enterprise.identity.create",
+    "enterprise.identity.update",
+    "enterprise.identity.disable",
+    "enterprise.identity.status",
+    "authentication.list",
+    "authentication.show",
+    "authentication.cancel",
 ]
 
 

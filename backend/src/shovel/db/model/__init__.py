@@ -17,7 +17,9 @@ from .capability import (
 from .config import Resource, ScanProfile, Schedule
 from .content import BlobRef, Chunk, Document, DocumentDerived
 from .control import ExecutionWakeup
+from .enterprise import EnterpriseConnectionProfile
 from .execution import ExecutionAttempt, ExecutionStep, Job, JobEvent
+from .identity import AuthenticationRequest, IdentityProfile
 from .interaction import InputRequest, Interaction, Notification, NotificationDelivery
 from .knowledge import (
     Entity,
@@ -53,6 +55,7 @@ __all__ = [
     "AgentScope",
     "AppSetting",
     "ApprovalRequest",
+    "AuthenticationRequest",
     "BlobRef",
     "CapabilityDefinition",
     "CapabilityDependency",
@@ -64,6 +67,7 @@ __all__ = [
     "DeletionOutbox",
     "Document",
     "DocumentDerived",
+    "EnterpriseConnectionProfile",
     "Entity",
     "EntityEdge",
     "EvalCase",
@@ -74,6 +78,7 @@ __all__ = [
     "FactEvent",
     "FactMessage",
     "FactTask",
+    "IdentityProfile",
     "InputRequest",
     "Interaction",
     "Job",

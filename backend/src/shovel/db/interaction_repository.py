@@ -8,6 +8,8 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from shovel.capability.domain import CapabilityScope
 from shovel.db.execution_repository import _record
+from shovel.db.model.enterprise import EnterpriseConnectionProfile
+from shovel.db.model.identity import AuthenticationRequest, IdentityProfile
 from shovel.db.model.interaction import InputRequest, Interaction, Notification, NotificationDelivery
 from shovel.db.model.runtime import Operation
 from shovel.db.model.security import ApprovalRequest
@@ -122,6 +124,30 @@ class SQLiteInteractionRepository:
     async def refresh(self) -> int:
         async with sqlite_write(self.sessions) as session:
             now = self.clock()
+            auth_requests = await session.scalars(
+                select(AuthenticationRequest)
+                .join(Operation, AuthenticationRequest.execution_id == Operation.id)
+                .join(IdentityProfile, AuthenticationRequest.identity_profile_id == IdentityProfile.id)
+                .join(
+                    EnterpriseConnectionProfile,
+                    AuthenticationRequest.connection_profile_id == EnterpriseConnectionProfile.id,
+                )
+                .where(
+                    AuthenticationRequest.state == "pending",
+                    or_(
+                        AuthenticationRequest.expires_at <= now,
+                        Operation.state.in_(("succeeded", "failed", "cancelled")),
+                        IdentityProfile.revision
+                        != func.json_extract(AuthenticationRequest.request, "$.identity.identity_revision"),
+                        EnterpriseConnectionProfile.revision
+                        != func.json_extract(AuthenticationRequest.request, "$.connection_revision"),
+                    ),
+                )
+                .limit(100)
+            )
+            for auth_request in auth_requests:
+                auth_request.state = "expired" if auth_request.expires_at <= now else "cancelled"
+            await session.flush()
             approvals = list(
                 await session.scalars(
                     select(ApprovalRequest)
@@ -253,7 +279,9 @@ class SQLiteInteractionRepository:
                         Interaction.state.in_(("open", "dismissed")),
                         or_(
                             and_(
-                                Interaction.source_kind.in_(("approval", "input_request")),
+                                Interaction.source_kind.in_(
+                                    ("approval", "input_request", "authentication_request")
+                                ),
                                 Operation.state.in_(("succeeded", "failed", "cancelled")),
                             ),
                             and_(
@@ -268,6 +296,14 @@ class SQLiteInteractionRepository:
                                     select(InputRequest.id).where(InputRequest.state != "pending")
                                 ),
                             ),
+                            and_(
+                                Interaction.source_kind == "authentication_request",
+                                Interaction.source_id.in_(
+                                    select(AuthenticationRequest.id).where(
+                                        AuthenticationRequest.state != "pending",
+                                    )
+                                ),
+                            ),
                         ),
                     )
                     .limit(100)
@@ -275,17 +311,15 @@ class SQLiteInteractionRepository:
             )
             for row in open_rows:
                 execution = await session.get(Operation, row.execution_id)
-                pending = (
-                    (
-                        (approval := await session.get(ApprovalRequest, row.source_id)) is not None
-                        and approval.state == "pending"
-                    )
-                    if row.source_kind == "approval"
-                    else (
-                        (input_fact := await session.get(InputRequest, row.source_id)) is not None
-                        and input_fact.state == "pending"
-                    )
-                )
+                if row.source_kind == "authentication_request":
+                    authentication = await session.get(AuthenticationRequest, row.source_id)
+                    pending = authentication is not None and authentication.state == "pending"
+                elif row.source_kind == "approval":
+                    approval = await session.get(ApprovalRequest, row.source_id)
+                    pending = approval is not None and approval.state == "pending"
+                else:
+                    input_fact = await session.get(InputRequest, row.source_id)
+                    pending = input_fact is not None and input_fact.state == "pending"
                 if (
                     not pending
                     or execution is None

@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 from collections.abc import AsyncGenerator
+from importlib.metadata import version
 from pathlib import Path
 from time import perf_counter
 from typing import TYPE_CHECKING
@@ -16,20 +17,32 @@ from shovel.capability.domain import CapabilityKind, CapabilityScope
 from shovel.capability.registry import CapabilityRegistry
 from shovel.config.settings import AppSettings
 from shovel.db.approval_repository import SQLiteApprovalRepository
+from shovel.db.authentication_repository import SQLiteAuthenticationRepository
 from shovel.db.capability_repository import SQLiteCapabilityRepository
+from shovel.db.enterprise_repository import SQLiteConnectionRepository
 from shovel.db.execution_control_repository import SQLiteExecutionControlRepository
 from shovel.db.execution_repository import SQLiteExecutionRepository
+from shovel.db.identity_repository import SQLiteIdentityRepository
 from shovel.db.interaction_repository import SQLiteInteractionRepository
 from shovel.db.migrations import upgrade_database
 from shovel.db.operation_repository import SQLiteOperationReader
 from shovel.db.platform_queries import SQLitePlatformQueries
 from shovel.db.proactive_repository import SQLiteProactiveRepository
 from shovel.db.workflow_repository import SQLiteWorkflowRepository
+from shovel.enterprise.catalog import InstalledProviderCatalog
+from shovel.enterprise.service import ConnectionService
 from shovel.exceptions.pipeline import VectorSinkError
 from shovel.execution.control import ExecutionWakeupService, RecoveryService
 from shovel.execution.engine import ExecutionEngine
 from shovel.execution.executors import AgentExecutor, FunctionExecutor, SkillExecutor, WorkflowExecutor
 from shovel.execution.invocation import InvocationService
+from shovel.identity.profiles import IdentityService
+from shovel.identity.service import (
+    AuthenticationService,
+    UnavailableAuthenticationResolver,
+    UnavailableWindowsBroker,
+)
+from shovel.identity.waits import AuthenticationRequests
 from shovel.interaction.service import InteractionService, NotificationService
 from shovel.pipeline.sink import ZvecChunkSink, open_chunk_sink
 from shovel.platform.authorization import ApprovalAuthorization, ExplicitActions, InputAuthorization
@@ -153,6 +166,16 @@ class Runtime:
             actions,
             agent_permissions=lambda: self.settings.platform.agent_permissions,
             wake=self.wake.set,
+            connections=ConnectionService(
+                SQLiteConnectionRepository(sessions),
+                InstalledProviderCatalog(runtime_version=version("shovel")),
+            ),
+            identities=IdentityService(SQLiteIdentityRepository(sessions)),
+            authentication=AuthenticationService(
+                UnavailableAuthenticationResolver(),
+                UnavailableWindowsBroker(),
+            ),
+            authentication_requests=AuthenticationRequests(SQLiteAuthenticationRepository(sessions)),
         )
         self.operations: OperationService = OperationService(self)
         self.retrieval: RetrievalService = RetrievalService(self)

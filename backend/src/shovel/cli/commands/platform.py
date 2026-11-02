@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from pathlib import Path
 from typing import Annotated, Any
 
 import typer
@@ -13,6 +14,8 @@ from shovel.cli.decorators import command_handler
 from shovel.cli.ui.console import console
 from shovel.config.settings import load_settings
 from shovel.domain.identity import new_id
+from shovel.enterprise.domain import ConnectionDraft
+from shovel.identity.domain import IdentityDraft
 from shovel.platform.domain import PlatformCommand
 from shovel.runtime.errors import RuntimeFailure
 from shovel.runtime.platform_client import platform_command
@@ -119,6 +122,167 @@ proactive = typer.Typer(no_args_is_help=True)
 approval = typer.Typer(no_args_is_help=True)
 execution = typer.Typer(no_args_is_help=True)
 interaction = typer.Typer(no_args_is_help=True)
+connection = typer.Typer(no_args_is_help=True)
+identity = typer.Typer(no_args_is_help=True)
+authentication = typer.Typer(no_args_is_help=True)
+
+
+def _identity_input(path: Path) -> dict[str, Any]:
+    try:
+        draft = IdentityDraft.model_validate_json(path.read_text(encoding="utf-8"))
+    except OSError, UnicodeError, ValidationError:
+        raise RuntimeFailure(
+            "Identity configuration must be a credential-free JSON draft.", status=422
+        ) from None
+    return draft.model_dump(mode="json")
+
+
+@identity.command("create")
+@command_handler()
+def create_identity(configuration_file: Path) -> None:
+    _run(PlatformCommand(action="enterprise.identity.create", input=_identity_input(configuration_file)))
+
+
+@identity.command("update")
+@command_handler()
+def update_identity(
+    identifier: str,
+    configuration_file: Path,
+    revision: Annotated[int, typer.Option(min=1)],
+) -> None:
+    _run(
+        PlatformCommand(
+            action="enterprise.identity.update",
+            identifier=identifier,
+            expected_revision=revision,
+            input=_identity_input(configuration_file),
+        )
+    )
+
+
+def _register_identities() -> None:
+    @identity.command("list")
+    @command_handler()
+    def list_identities() -> None:
+        _run(PlatformCommand(action="enterprise.identity.list"))
+
+    for action in ("show", "status", "disable"):
+
+        def register(name: str) -> None:
+            @identity.command(name)
+            @command_handler()
+            def act(identifier: str, revision: Annotated[int | None, typer.Option(min=1)] = None) -> None:
+                if name == "disable" and revision is None:
+                    raise RuntimeFailure("Identity disable requires an explicit revision.")
+                _run(
+                    PlatformCommand.model_validate(
+                        {
+                            "action": f"enterprise.identity.{name}",
+                            "identifier": identifier,
+                            "expected_revision": revision,
+                        }
+                    )
+                )
+
+        register(action)
+
+
+_register_identities()
+
+
+@authentication.command("list")
+@command_handler()
+def list_authentication() -> None:
+    _run(PlatformCommand(action="authentication.list"))
+
+
+@authentication.command("show")
+@command_handler()
+def show_authentication(identifier: str) -> None:
+    _run(PlatformCommand(action="authentication.show", identifier=identifier))
+
+
+@authentication.command("cancel")
+@command_handler()
+def cancel_authentication(
+    identifier: str, execution_id: Annotated[str, typer.Option("--execution-id")]
+) -> None:
+    _run(PlatformCommand(action="authentication.cancel", identifier=identifier, execution_id=execution_id))
+
+
+@connection.command("options")
+@command_handler()
+def connection_options() -> None:
+    _run(PlatformCommand(action="enterprise.connection.options"))
+
+
+@connection.command("list")
+@command_handler()
+def list_connections() -> None:
+    _run(PlatformCommand(action="enterprise.connection.list"))
+
+
+@connection.command("show")
+@command_handler()
+def show_connection(identifier: str) -> None:
+    _run(PlatformCommand(action="enterprise.connection.show", identifier=identifier))
+
+
+def _connection_input(path: Path) -> dict[str, Any]:
+    try:
+        draft = ConnectionDraft.model_validate_json(path.read_text(encoding="utf-8"))
+    except OSError, UnicodeError, ValidationError:
+        raise RuntimeFailure(
+            "Connection configuration must be a valid, credential-free JSON draft.", status=422
+        ) from None
+    return draft.model_dump(mode="json")
+
+
+@connection.command("create")
+@command_handler()
+def create_connection(configuration_file: Path) -> None:
+    _run(PlatformCommand(action="enterprise.connection.create", input=_connection_input(configuration_file)))
+
+
+@connection.command("update")
+@command_handler()
+def update_connection(
+    identifier: str,
+    configuration_file: Path,
+    revision: Annotated[int, typer.Option(min=1)],
+) -> None:
+    _run(
+        PlatformCommand(
+            action="enterprise.connection.update",
+            identifier=identifier,
+            expected_revision=revision,
+            input=_connection_input(configuration_file),
+        )
+    )
+
+
+@connection.command("validate")
+@command_handler()
+def validate_connection(identifier: str, revision: Annotated[int, typer.Option(min=1)]) -> None:
+    _run(
+        PlatformCommand(
+            action="enterprise.connection.validate",
+            identifier=identifier,
+            expected_revision=revision,
+        )
+    )
+
+
+@connection.command("disable")
+@command_handler()
+def disable_connection(identifier: str, revision: Annotated[int, typer.Option(min=1)]) -> None:
+    _run(
+        PlatformCommand(
+            action="enterprise.connection.disable",
+            identifier=identifier,
+            expected_revision=revision,
+        )
+    )
 
 
 def _register_services() -> None:

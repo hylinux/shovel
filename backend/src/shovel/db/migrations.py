@@ -10,7 +10,9 @@ from shovel.db.base import Base, now_ts
 from shovel.db.model.automation import PROACTIVE_DDL
 from shovel.db.model.capability import CAPABILITY_DDL
 from shovel.db.model.control import WAKEUP_DDL
+from shovel.db.model.enterprise import CONNECTION_DDL
 from shovel.db.model.execution import EXECUTION_DDL, KERNEL_INDEX_DDL, STEP_DDL
+from shovel.db.model.identity import AUTHENTICATION_DDL, IDENTITY_DDL
 from shovel.db.model.interaction import INPUT_DDL, INTERACTION_DDL, NOTIFICATION_DDL
 from shovel.db.model.retrieval import SchemaMigration
 from shovel.db.model.security import APPROVAL_DDL
@@ -325,6 +327,28 @@ def _upgrade(connection: Connection) -> None:
             insert(SchemaMigration).values(
                 version=14,
                 name="proactive_editor_metadata_and_pause",
+                applied_at=now_ts(),
+            )
+        )
+
+    if 15 not in versions:
+        for statement in CONNECTION_DDL:
+            connection.exec_driver_sql(statement)
+        connection.execute(
+            insert(SchemaMigration).values(
+                version=15,
+                name="disabled_enterprise_connection_profiles",
+                applied_at=now_ts(),
+            )
+        )
+
+    if 16 not in versions:
+        for statement in (*IDENTITY_DDL, *AUTHENTICATION_DDL):
+            connection.exec_driver_sql(statement)
+        connection.execute(
+            insert(SchemaMigration).values(
+                version=16,
+                name="unavailable_identity_and_durable_authentication_requests",
                 applied_at=now_ts(),
             )
         )

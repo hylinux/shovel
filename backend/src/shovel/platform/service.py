@@ -23,9 +23,13 @@ from shovel.capability.domain import (
     Permission,
 )
 from shovel.capability.service import CapabilityService
+from shovel.enterprise.service import ConnectionService
 from shovel.execution.control import ExecutionWakeupService
 from shovel.execution.domain import CapabilitySnapshot, Execution, Invocation, InvocationContext
 from shovel.execution.engine import ExecutionEngine
+from shovel.identity.profiles import IdentityService
+from shovel.identity.service import AuthenticationService
+from shovel.identity.waits import AuthenticationRequests
 from shovel.interaction.service import InteractionService
 from shovel.platform.authorization import ExplicitActions, PublishAuthorization
 from shovel.platform.domain import PlatformCommand
@@ -76,6 +80,10 @@ class PlatformApplication:
         agent_permissions: Callable[[], tuple[Permission, ...]],
         wake: Callable[[], None],
         clock: Callable[[], float] = time.time,
+        connections: ConnectionService | None = None,
+        identities: IdentityService | None = None,
+        authentication: AuthenticationService | None = None,
+        authentication_requests: AuthenticationRequests | None = None,
     ) -> None:
         self.scope, self.engine, self.proactive = scope, engine, proactive
         self.approvals, self.inputs, self.interactions = approvals, inputs, interactions
@@ -84,6 +92,9 @@ class PlatformApplication:
         self.registry = engine.invocations.registry
         self.capabilities = CapabilityService(self.registry, authorizer=PublishAuthorization(actions))
         self._confirmations: dict[str, tuple[str, float]] = {}
+        self.connections = connections
+        self.identities, self.authentication = identities, authentication
+        self.authentication_requests = authentication_requests
 
     async def permissions(self, *, human: bool) -> tuple[Permission, ...]:
         policy = await self.engine.invocations.security.authorization.provider.load(self.scope)
@@ -252,6 +263,76 @@ class PlatformApplication:
     async def _execute(self, command: PlatformCommand, *, human: bool) -> dict[str, Any]:
         action, scope = command.action, self.scope
         identifier = command.identifier
+        if action.startswith(("enterprise.identity.", "authentication.")):
+            if not human:
+                raise SecurityDenied("Enterprise identity actions require an explicit human command.")
+            if action.startswith("authentication."):
+                await self.interactions.refresh()
+                requests = _required(self.authentication_requests, "Authentication requests")
+                if action == "authentication.list":
+                    return {"items": [_json(row) for row in await requests.list(scope)]}
+                identifier = _required(identifier, "identifier")
+                if action == "authentication.show":
+                    return _json(await requests.get(scope, identifier))
+                return _json(
+                    await requests.cancel(
+                        scope,
+                        identifier,
+                        execution_id=_required(command.execution_id, "execution_id"),
+                    )
+                )
+            identities = _required(self.identities, "Identity service")
+            if action == "enterprise.identity.list":
+                return {"items": [_json(row) for row in await identities.list(scope)]}
+            if action == "enterprise.identity.create":
+                return _json(await identities.create(scope, identities.parse_draft(command.input)))
+            identifier = _required(identifier, "identifier")
+            if action == "enterprise.identity.show":
+                return _json(await identities.get(scope, identifier))
+            if action == "enterprise.identity.status":
+                profile = (await identities.get(scope, identifier)).profile
+                state = await _required(self.authentication, "Authentication service").status(profile)
+                return {"identity_profile_id": identifier, "state": state.value}
+            revision = _required(command.expected_revision, "expected_revision")
+            if action == "enterprise.identity.update":
+                result = await identities.update(
+                    scope,
+                    identifier,
+                    identities.parse_draft(command.input),
+                    expected_revision=revision,
+                )
+            else:
+                result = await identities.disable(scope, identifier, expected_revision=revision)
+            await self.interactions.refresh()
+            return _json(result)
+        if action.startswith("enterprise.connection."):
+            if not human:
+                raise SecurityDenied(
+                    "Enterprise connection configuration requires an explicit human command."
+                )
+            connections = _required(self.connections, "Enterprise connection service")
+            if action == "enterprise.connection.options":
+                return {"items": [_json(row) for row in connections.options()]}
+            if action == "enterprise.connection.list":
+                return {"items": [_json(row) for row in await connections.list(scope)]}
+            if action == "enterprise.connection.create":
+                return _json(await connections.create(scope, connections.parse_draft(command.input)))
+            identifier = _required(identifier, "identifier")
+            if action == "enterprise.connection.show":
+                return _json(await connections.get(scope, identifier))
+            revision = _required(command.expected_revision, "expected_revision")
+            if action == "enterprise.connection.update":
+                return _json(
+                    await connections.update(
+                        scope,
+                        identifier,
+                        connections.parse_draft(command.input),
+                        expected_revision=revision,
+                    )
+                )
+            if action == "enterprise.connection.validate":
+                return _json(await connections.validate(scope, identifier, expected_revision=revision))
+            return _json(await connections.disable(scope, identifier, expected_revision=revision))
         if action == "capability.options":
             return await self._options(human=human)
         if action.startswith("automation."):

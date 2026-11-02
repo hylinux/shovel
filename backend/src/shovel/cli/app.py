@@ -93,3 +93,10 @@ app.add_typer(platform.proactive, name="proactive", help="Manage Proactive Servi
 app.add_typer(platform.approval, name="approval", help="Review structured Execution approvals.")
 app.add_typer(platform.execution, name="execution", help="Inspect and control durable Executions.")
 app.add_typer(platform.interaction, name="interaction", help="Inspect and explicitly answer input requests.")
+app.add_typer(platform.connection, name="connection", help="Manage disabled enterprise connection drafts.")
+app.add_typer(
+    platform.identity, name="identity", help="Manage enterprise identity metadata; WAM remains unavailable."
+)
+app.add_typer(
+    platform.authentication, name="authentication", help="Inspect and cancel durable authentication requests."
+)

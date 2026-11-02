@@ -1,0 +1,692 @@
+# Enterprise Security Foundation：ES-0 仓库分析
+
+**状态：ES-0 分析完成；另行获准的 ES-2 契约、ES-3 配置管理和 ES-4
+身份/认证/持久交互内核已实现。真实 WAM 和后续机制仍待分阶段验证，不启用企业执行。**
+
+需求依据为 `Documents\enterprise_security_foundation.md`，特别是其中的
+ENT-SEC-01 至 ENT-SEC-18、分阶段实施要求和本轮十五项输出。
+本报告配套 [Enterprise Security ADRs](enterprise_security_adrs.md)，不替代现有
+[Platform Architecture](platform_architecture.md) 和
+[Platform ADRs](platform_adrs.md) 中已经实施的决策。
+
+## 1. 分析范围、证据与限制
+
+代码基线为 `de91f40`。实际盘点到 187 个后端 Python 文件、34 个后端测试文件；
+分析沿入口、依赖装配、调用、检查点、模型出站、数据写入、检索和恢复链路进行，
+同时检查 ORM 注册、迁移、测试断言、前端约束和 CI/Release 配置。以下将“已实施”、
+“ORM 脚手架”和“建议实施”分开，不把设计文档中的未来计划当成运行时能力。
+
+本轮未访问用户业务数据库、邮箱或企业账户，未登录、申请 Token、调用真实企业
+Provider或安装认证依赖。ES-3/4 迁移仅在测试隔离数据库验证，不操作用户业务 stores。
+SDK 依据来自官方公开文档和 PyPI 元数据；
+wheel 存在不等于端到端集成通过。
+
+工作区原有 `uv.lock` 修改和需求文件保持不变。ES-0/1 最初只新增本分析及配套 ADR；
+ES-2 增加第 12 节的十二个 Python 文件；单独获准的 ES-3/4 范围见第 15–16 节。
+不更新版本、用户配置、依赖或既有发布内容；复用现有 Runtime，生产认证保持 unavailable。
+
+## 2. 当前架构地图
+
+| 层/领域 | 实际组件与证据 | 企业安全实施应复用的边界 |
+|---|---|---|
+| 安装与入口 | `pyproject.toml:67` 的 CLI entry point；`backend\src\shovel\cli` 的 Typer 命令 | 不增加企业专用 Host 或第二套 CLI Runtime |
+| Host 与 DI | `container.py:21` 的 `AppContainer`；`runtime\hosting.py:239` 的 `build_host`；`runtime\service.py:239` 的 `create_runtime` | dependency-injector 的配置、DB/session Resource、Runtime 生命周期及停机清理 |
+| 后台维护 | `runtime\hosting.py:51,111,156,191` 的 Operation、Memory、Automation、Execution maintenance workers | 新的维护步骤加入现有 Host，不建立企业 Worker Runtime |
+| 应用门面 | `platform\service.py:61` 的 `PlatformApplication`；`platform\agent_tools.py`；API 和 CLI adapters | 新能力通过同一门面、同一 Scope 和明确 human/agent 边界 |
+| Capability | `capability\domain.py:208,241` 的 `CapabilityContent`、`FunctionContract`；`capability\registry.py:22` 的 `CapabilityRegistry` | trusted implementation ID、版本/hash/dependency lock、不可变发布及 availability |
+| Invocation / Execution | `execution\invocation.py:46`；`execution\engine.py:32`；`db\execution_repository.py` | 唯一新 Execution 生命周期；root/child、预算、lease、幂等请求、dispatch receipts |
+| Permission / Risk / Approval | `security\services.py:31,55,88,103,111,143,207` | 精确 permission 交集、side-effect risk floor、实时重查、单次审批消费 |
+| Workflow | `workflow\executor.py:12`；`workflow\domain.py`；`db\workflow_repository.py` | serial DAG、持久检查点、同一 Engine 的 child 调用、Approval/Input/Output 节点 |
+| Event / Proactive | `automation\events.py:13` 的 `InProcessEventBus`；`automation\manager.py`、`schedules.py` | matching/admission、revision/configuration freeze；当前 EventBus 不耐久 |
+| Interaction / Notification | `interaction\service.py:61`；`db\model\interaction.py` | request fact 与 interaction projection、投递重试和既有唤醒机制 |
+| 主 Agent / MAF | `runtime\agent.py:218,506,703`；`runtime\chat.py:218` | ContextProvider、MAF Agent/AgentSession、原生 compaction、AG-UI、预算及诊断 middleware |
+| 版本化 Skill / Agent | `execution\executors.py:33,64` | 独立、无工具的 MAF Agents；不继承主 Agent 的 Memory、RAG 或扩展 |
+| 扫描与 Knowledge | `pipeline\scan_service.py:687`；parser registry、chunker、embedder、sink、cleanup | discovery/fetch/parse/chunk/embed/persist/reconcile；不要复制整个 pipeline |
+| Native Memory | `memory\domain.py`、`memory\service.py`、`memory\sqlite_repository.py:122`、`memory\zvec_index.py:30`；`runtime\memory_tasks.py:22` | SQLite 权威记录、revision、scope、epoch fences、原子 outbox、可重建索引 |
+| SQLite | `db\database.py:29`；`db\unit_of_work.py:12`；`db\migrations.py:38` | WAL、foreign keys、BEGIN IMMEDIATE、显式 commit、版本化升级 |
+| Zvec / 搜索 | `vector\schema.py:67,118`；`pipeline\sink.py:98`；`runtime\retrieval.py:45` | deterministic IDs、flush 后确认、候选回查 SQLite；索引不能授予权限 |
+| 资源与凭据 | `services\connector_registry.py`；`services\credentials.py:64,162`；`db\model\config.py:15` | connector 实现目录与资源配置分离，CredentialRef/keyring；不是企业身份框架 |
+| 前端 | `frontend\app\api.ts`、request recovery、static-export workbench；`frontend\AGENTS.md` | FastAPI 后端，统一 API helpers；不能通过 Next.js server actions 建认证后端 |
+
+表中的后端路径均相对于 `backend\src\shovel`。
+
+```mermaid
+flowchart LR
+    CLI["CLI"] --> Facade["PlatformApplication"]
+    Web["Static workbench / FastAPI"] --> Facade
+    Main["Main MAF Agent tools"] --> Facade
+    Events["Process-local EventBus / Schedule"] --> Proactive["Proactive admission"]
+    Proactive --> Invocation["InvocationService"]
+    Facade --> Invocation
+    Registry["CapabilityRegistry"] --> Invocation
+    Gate["Permission / Risk / Policy / Approval"] --> Invocation
+    Invocation --> Root["SQLite operation: Execution root"]
+    Root --> Engine["Existing ExecutionEngine"]
+    Engine --> Function["Trusted FunctionExecutor"]
+    Engine --> Skill["Isolated tool-free MAF Skill / Agent"]
+    Engine --> Workflow["Existing WorkflowExecutor"]
+    Workflow --> Engine
+    Engine --> Checkpoint["SQLite attempts / steps / checkpoint / control"]
+    Checkpoint --> Recovery["Existing Recovery / Wakeup / Interaction"]
+    Recovery --> Engine
+    Main --> Legacy["Legacy Chat / Retrieval / Memory / Resource services"]
+    Legacy --> SQLite["SQLite authoritative text and lifecycle"]
+    Legacy --> Zvec["Knowledge and Memory Zvec indexes"]
+```
+
+**唯一 Engine 的准确含义：**新 Capability/Workflow/Proactive 调用共享 Engine，
+但 legacy Job、Chat、资源扫描及 Memory Operation 尚未全部迁入它。不能宣称当前
+所有主 Agent 工具均已注册为 Capability，也不能为弥补这一差异再建企业 Engine。
+
+### 2.1 实际领域模型与 ORM，不机械重复建表
+
+* `capability_definition/version/dependency` 已承载定义、不可变内容及依赖。
+  `operation.execution_data` 承载新 Execution snapshot，`execution_attempt/step`
+  承载尝试和 dispatch 事实。没有独立 EnterpriseExecution 表的需求。
+* `approval_request` 有 owner、execution、binding hash、有效期和单次消费约束；
+  `input_request` 是 Workflow 输入事实，不是登录请求。
+* `proactive_service` 有版本化配置；`execution_wakeup` 是 Execution timer，
+  与业务 `schedule` 不同。
+* `resource` 是 connector 实例，`identity_ref` 是 `keyring:`/`env:` 凭据引用；
+  `domain\identity.py` 只有 `new_id`，不是 Entra IdentityProfile。
+* `document/chunk` 是现有 Knowledge 文本和生命周期权威；`deletion_outbox`
+  是索引删除意图。`memory_belief/episode/procedure`、Memory epoch/index outbox
+  是现有 Native Memory 持久化基础。
+* `DocumentDerived`、`BlobRef`、`AgentScope`、Entity/Fact 图模型已存在并在
+  `db\model\__init__.py` 注册；源码引用检查中，前述前三项未发现运行服务读写路径。
+  `BlobRef` 不是已完成的 secure Artifact Store，Entity 图也不是数据派生 lineage。
+  `AgentScope` 的说明不能证明现有搜索执行了它的授权。
+* `RetrievalLog` 实际由搜索写入，保存 query text 和命中 ID/score，不保存本次
+  returned passage 正文；ChatMessage 则保存正文及包含引用的结果。
+  Memory revision log、Execution facts、Approval receipts 不等于统一 Security Audit。
+
+## 3. 文件级缺口与具体接入点
+
+| 当前文件/类 | 已有行为或缺口 | 最小后续变化，不在本轮实施 |
+|---|---|---|
+| `runtime\service.py:83,128` | 生产 `CapabilityRegistry` 没有安装 Function contracts，`FunctionExecutor({})` handler map 为空 | 原子安装 trusted manifest、FunctionContract 与 handler；仍由既有 Registry/Engine 执行 |
+| `capability\domain.py:105` / `ConnectionRequirement` | 只有 name 和安全 connection ref，无 tenant/cloud/profile/manifest 解析 | 接入强类型 ConnectionProfile resolver，不把 ref 当 Credential |
+| `security\services.py:103` / `PolicyEvaluator` | 明确拒绝 connection-backed execution；它是 capability side-effect policy，不是 DLP | 仅对完整验证、已安装的企业绑定解除该项拒绝；其余继续 deny |
+| `execution\domain.py:26,203,257` | 六个生命周期状态，generic JSON input/output/checkpoint，无认证等待或保护类型 | 保持物理 `SUSPENDED`，增加受控 auth wait projection/fact；持久层仅接受获准引用 |
+| `execution\engine.py:32` | auth 异常会落入一般失败；dispatch 事实先于 executor 内部 HTTP | 专门分类 auth wait；记录实际 outbound effect 阶段，避免错误 replay |
+| `db\execution_repository.py` / control repository | frozen snapshots、lease、resume、deadline 已可靠存在，但不验证企业 principal/source/policy | admission、dispatch、resume、完成写入处验证企业 binding/generation；不延长旧 deadline |
+| `workflow\executor.py:30,93` | mappings、node values、outputs 直接传递/保存 JSON；Condition 可读取普通值 | 企业引用保持标签；即使 Condition/Notification/Input/Output 也要评估 PROCESS/DISPLAY/PERSIST |
+| `execution\executors.py:33,64` | JSON input 直接发 MAF，结果为普通 text JSON | 输入 materialization 和模型 HTTP 前置 gate；输出为继承 lineage 的 ProtectedContent/ref |
+| `runtime\agent.py:270,830` | history、summary、Memory、RAG、MCP/工具结果进入模型；预算 middleware 不是 DLP | 在所有模型出站而非仅一个工具回调处强制 gate；覆盖 compaction、recovery 和后续工具回合 |
+| `runtime\chat.py:250,286` | 用户消息/标题先写 SQLite；答案、citations、summary tasks 随后写入 | 企业 ingress、DISPLAY、PERSIST、summary lineage 都须 gate；不能靠关闭长期 Memory 解决 |
+| `runtime\agent_extensions.py:118` | MCP 及可选 Python/Pipeline 路径不经过 Capability Engine | 企业数据不得经未受控扩展出站；受保护模式下拒绝未纳管出口，不能把 Python 插件当沙箱 |
+| `runtime\model_admission.py:37,164` | 管理本地模型并发/优先级，不判断分类、tenant 或目的地 | 在调度 transport 之外组合 protection transport；本机 Ollama 也不自动 ALLOW |
+| `pipeline\scan_service.py:687,756,805` | 普通 bytes/text 进入 parse、embed、SQLite；部分 source hash 为长度提示 | 企业路径先取可信元数据、逐动作 gate，并使用可信 source version/digest；不复用弱版本假设 |
+| `vector\schema.py:67` / `ZvecChunkSink` | Knowledge Zvec schema/sink 包含全文 text；无 tenant/protection binding | 企业独立安全 collection/generation 无默认正文；复用 Zvec 基础设施，不改写旧 personal schema |
+| `runtime\retrieval.py:119,194,310` | 已回查 resource state、document revision/index hash；仍返回裸 text、记录 query | 增加 identity/connection/authorization freshness/protection/lifecycle gate；keyword/parent expansion 同样覆盖 |
+| `memory\domain.py:43,106` / `runtime\memory.py:54` | MemoryScope 不含企业 tenant/connection，运行 owner 默认 local-user；platform user 默认 owner | 显式绑定两种身份命名空间，不自动改写旧 scope；企业 Memory 强制 source/protection sidecar |
+| `memory\service.py` / SQLite/Zvec adapters | personal 过滤、去重、epoch fences、SQLite fallback 已存在，无企业 policy/lineage | 复用写入/outbox/fence 机制；所有 enterprise read/write/fallback/rebuild 必须绑定保护 |
+| `automation\events.py:13` | bounded process-local queue，publish 不证明耐久 | 增加 SQLite lifecycle fact/outbox 与匹配后的幂等 admission receipts；复用当前 bus/matching |
+| `interaction\service.py:61` / ORM | actions/kind/channel 有有限集合和 SQL CHECK；InputRequest owner trigger 限 Workflow | 新 AuthenticationRequest 事实和 AUTHENTICATE action；更新旧 projection/DDL，不伪装成 Approval/Input |
+| `services\credentials.py:162` | keyring 自动选 backend；SecretStr 不是 WAM token lifecycle | 企业 secret refs 只解析批准的 Windows backend；Entra token 不进入 CredentialStore 业务接口 |
+| `domain\safe_data.py:7,24` | 拒绝若干 credential key 和 SecretStr/Bytes，不检查中性字段字符串，也未覆盖 Cookie key | 复用结构 guard，但以禁止 secret serialization、schema allowlist、safe errors 为主，非 regex DLP |
+| `runtime\service.py:176` / `pipeline\embedder.py:161` | redaction 只覆盖已配置模型 key；embedder 错误包含截断 response.text | enterprise transport 将 SDK/HTTP 错误转为 allowlisted safe error，不复用 body-shaped exception |
+| `runtime\diagnostics.py:52` / `runtime\hosting.py:51` | trace 可接受任意 fields；现有请求诊断已排除真实 URL，browser console 原样转发 | 分离 application/security audit/execution/diagnostic/telemetry；保护元数据出口使用 allowlist |
+
+后端路径均相对于 `backend\src\shovel`。这是具体迁移边界，不是声称这些现有
+personal 功能已经具有企业合规保证。
+
+## 4. 与规范冲突及最小兼容迁移
+
+| 冲突 | 必须明确作出的迁移 |
+|---|---|
+| Windows-only 定位与现状不同 | CI quality、Release 在 Ubuntu；`runtime\locking.py:44,74` 有 fcntl；CLI run 有 Unix process group 分支；Pyright platform 为 All。后续经评审改 Windows CI/打包及相关入口，ES-2 不提前改这些 |
+| 四类产品 Function 不是四种现有 CapabilityKind | 保留 Function/Skill/Workflow/Agent 四种 kind；Built-in/Utility/Enterprise/Platform 是 Function catalog 类别，不增 kind 或平行 Registry |
+| 主 Agent 的 legacy tools/MCP/Pipeline 未统一纳管 | 分步接入同一门面与 data boundary；在所有出口通过前，真实企业 Provider 保持禁用。不得宣称注册一个 Provider 就完成横切保护 |
+| 当前 connection-backed deny | 不能全局删除。resolver、manifest/version、policy、identity/transport 均就绪才放行具体绑定 |
+| 当前存储/检索依赖裸正文 | 保留已有 personal 行为；enterprise reference-first 路径不通过裸 text fallback，也不在 NOT NULL chunk text 写空占位后宣称索引成功 |
+| 硬编码 `Sensitivity` 与组织 Labels 不同 | 原 resource sensitivity 是 legacy 提示，不当作组织 Label/rank；未知企业分类拒绝，不从名称推断优先级 |
+| 六态 Engine vs WAITING_FOR_AUTHENTICATION | 建议作为 `SUSPENDED + wait_reason` 的逻辑状态，API 明确展示；新增 enum 须另审 SQL/state-machine/前端兼容性 |
+| 认证等待与现有预算 | 保留 durable deadline。产品若要求跨天等待，必须为新 invocation 显式批准预算策略，不能偷偷扩大已有执行 |
+| 示例步骤把 Approval 放在 Provider 调用之后 | 有副作用 Provider 必须在实际 dispatch 前消费既有 Approval；数据释放需要的后置确认是另一次 gate，不能补授前置权限 |
+| durable lifecycle 与当前 EventBus/global pause | 源失效事务先关闭读取/写入并 bump generation；耐久事件驱动后续 revalidation。安全失效不能被业务 global pause/quiet hours/cooldown 跳过 |
+| DENY 后“policy changed 可恢复”与终态不变性 | DENY 保持 failed receipt；策略改变可产生新授权 invocation，不重开旧 failed Execution 或扩大其 frozen permissions |
+| 本机凭据与业务配置已有兼容行为 | 不把 enterprise Profile 允许保存 Secret；也不顺带重写个人 model key/TOML 保存机制或旧 keyring refs |
+
+发布还有一个已验证的约束：源 `pyproject.toml:3` 为 `0.1.2`，
+已有 `v0.1.4` tag；`release.yml:32` 要求 tag 等于项目版本。
+Provider `minimum_runtime_version` 必须使用安装包实际版本并辅以 contract/feature
+compatibility，不能直接把 Git tag 当 runtime version。本轮不改版本或重做 Release。
+
+## 5. 目标模块放置与五问模型
+
+```text
+backend\src\shovel\
+  identity\       IdentityProfile、auth states/errors、受控请求、短时 AuthContext
+  enterprise\     ConnectionProfile、ResourceRef、trusted Manifest 与 resolver/transport
+  protection\     ProtectedContent、policy、model destinations、lineage、source lifecycle
+  capability\     保留唯一 CapabilityRegistry；安装既有 FunctionContract + handler
+  execution\      保留唯一 Engine；增加企业绑定与 durable wait/recheck
+  security\       保留 capability Permission / Risk / Approval；不冒充 data policy
+  automation\     保留 event matching/bus；接入耐久 lifecycle delivery
+  interaction\    保留 projection/delivery；增加认证交互类型
+  db\             ORM、repository、ordered migrations；Provider 无 sessions/SQL
+```
+
+新包是正交领域，不是 OS adapter 层。Domain dependency graph：
+`identity` 不依赖 `enterprise/protection`，profile refs 为强类型安全标识；
+`enterprise.domain` 可引用已有 capability values，不依赖保护实现；
+`protection.domain` 使用 `EnterpriseResourceRef`；
+policy Protocol 用类型引用避免 domain/ports 循环；application/runtime 层负责装配。
+不新增平台工厂、跨 OS notification/filesystem/auth 接口或第二套 MAF runtime。
+
+| 问题 | 负责机制 | 不能被替代的检查 |
+|---|---|---|
+| WHO | Identity Plane | 精确 account/principal、tenant binding、silent/auth state；成功登录不说明业务授权 |
+| WHERE | Connection resolver + trusted Manifest | cloud/environment/endpoint/resource scope/profile refs/version |
+| MAY | 外部 authorization + 现有 Permission | 本地 ceiling 不授予企业权限；企业 read 也不授予 Shovel transform/write |
+| WHAT MAY HAPPEN | Data Protection Plane | source/derived metadata + action/destination/model/current policy/identity/execution |
+| DO IT NOW | 现有 Risk + Approval | 具体调用绑定、有效期、single-use，approval 不覆盖 DENY 或 missing grant |
+
+```mermaid
+flowchart TD
+    Entry["User / Trigger / Main Agent"] --> Registry["Existing CapabilityRegistry"]
+    Registry --> Freeze["Freeze capability, provider manifest, connection binding"]
+    Freeze --> Gate["Existing Permission / Risk / pre-dispatch Approval"]
+    Gate --> Connection["Enterprise Connection Resolver"]
+    Connection --> Auth["Identity Plane: silent-first"]
+    Auth -->|ready| Transport["AuthenticatedTransport: trusted request only"]
+    Auth -->|interaction needed| Wait["Existing Execution SUSPENDED: waiting_for_authentication"]
+    Wait --> Request["Durable AuthenticationRequest + existing Interaction"]
+    Request --> Human["Explicit Windows user authentication"]
+    Human --> Recheck["Existing Resume / Wakeup + all live checks"]
+    Recheck --> Auth
+    Transport --> Provider["Trusted Enterprise Provider mapping"]
+    Provider --> Protected["ProtectedContent + source/provenance/lifecycle"]
+    Protected --> Policy["Data Protection decision per action and destination"]
+    Policy -->|deny or unknown| Deny["Safe denial; no materialization or persistence"]
+    Policy -->|requirements unmet| Hold["Fail closed / explicit revalidation or user action"]
+    Policy -->|allow and obligations applied| Release["Existing Engine continues approved release"]
+    Release --> Screen["Policy-approved display"]
+    Release --> Model["ModelProfile gate before every model call"]
+    Model --> Derived["Derived ProtectedContent: merged protection and lineage"]
+    Derived --> Policy
+    Release --> Stores["Approved SQLite / Zvec / Memory / Knowledge / Artifact"]
+    Release --> Audit["Allowlisted audit and diagnostics"]
+```
+
+Engine 从 admission 起即拥有整个调用，图中的 “continues” 不是 Provider 结束后
+才启动 Engine。Connection 的无副作用解析可在前置 gate 前完成；不得在 permission/
+approval 之前申请 Token、发业务请求或释放正文。
+
+## 6. Core contracts 与数据边界提案
+
+| Contract | ES-2 已实现的类型边界；不等于运行时 enforcement |
+|---|---|
+| IdentityProfile | 逻辑身份、tenant/account selector、authentication/broker mode、enabled/status、时间；无密码/Token/Secret |
+| EnterpriseConnectionProfile | provider/cloud/environment/endpoint/tenant/resource scope、identity/protection refs、非 secret settings、revision；manifest schema 严格验证 |
+| ProviderManifest | 不可变 version/hash、authorities/audiences/scopes/endpoints、auth modes、LockedDependency 引用及 implementation IDs、保护 metadata 能力和最低 runtime version 元数据；不复制可变 Function schema |
+| EnterpriseResourceRef | provider/connection/type/id/parent/tenant/version/etag；跨 audit、snapshot、lineage、lifecycle 共用 |
+| TokenRequest | connection/provider/identity binding、tenant/authority/audience/scopes、correlation/mode、受控 force-refresh；challenge 仅可信 transport 提供的短时内容/opaque ref |
+| AuthContext | 短时、仅 trusted transport 可使用；禁止 JSON/pickle/state/Artifact，repr/str/error 不显值；不提供 Provider/Agent token getter |
+| AuthenticationState | READY_SILENT、INTERACTION_REQUIRED、REAUTHENTICATION_REQUIRED、CLAIMS_CHALLENGE_REQUIRED、AUTHORIZATION_REQUIRED、DEVICE_OR_POLICY_BLOCKED、ACCOUNT_UNAVAILABLE、CONNECTION_MISCONFIGURED、UNAVAILABLE |
+| ProtectedContent[T] | 正文/secure handle 与 context、source、provenance、snapshot、lifecycle/digest/time；无默认正文 dump；大型内容不反复复制 |
+| ProtectionContext | 显式 source、分类/Label refs、rights、DLP、retention、policy version、original/derived 来源；unknown 与 deny 不伪装成 allow |
+| DataAction / Destination | 使用需求中完整 action/destination 集合；READ/PROCESS/SEND_TO_MODEL/EMBED/INDEX/PERSIST/各 store/export 分别评估 |
+| PolicyDecision | 六种结果，decision/rule/reason/protection/version/time/revalidation/audit refs；ALLOW 与义务兑现绑定；REQUIRE_USER_ACTION 不是 Approval 别名 |
+| AuthorizationSnapshot | principal/tenant/resource scope、decision/version/time/freshness；不能永久授权，无硬编码统一 TTL |
+| DerivedDataRecord | 所有 source refs/versions、保护 ref、operation/executor/capability/model、decision、lifecycle；不能当普通 entity graph |
+| ModelProfile | 审核来源、endpoint/environment、tenant/classification/action、generation/embedding、retention/boundary/enabled；用户填 enterprise_approved=true 不授予信任 |
+
+Auth errors 完整覆盖需求中的 AuthenticationRequiredError、ReauthenticationRequiredError、
+ClaimsChallengeError、WrongTenantError、TokenAudienceMismatchError、AccountNotFoundError、
+BrokerUnavailableError、ConditionalAccessBlockedError、DeviceComplianceRequiredError、
+ConsentRequiredError、EntitlementRequiredError、JitActivationRequiredError、
+ExternalAuthorizationDeniedError、AuthConfigurationError。只输出 stable code、安全提示、
+retryable/user_action_required、correlation/diagnostic refs，不转发 SDK raw error、claims、
+headers 或 Pydantic validation 的原始 input。
+
+已存在的 frozen `Value`、schema validation、JSON size limit、credential guard 可复用，
+但不能直接继承其默认 JSON dump 来序列化 AuthContext/ProtectedContent。
+`repr=False`、SecretStr、regex 并不能保证 `asdict/model_dump` 不复制秘密或正文；
+应以独立不可默认序列化容器、显式 safe-reference serializer 和 destination gate 为准。
+Python/SDK token string 的内存零化不作保证，减少副本/生命期，不宣称“已安全擦除”。
+
+普通执行 JSON 只携带经 PERSIST/WORKFLOW_STATE 允许的版本化 `ProtectedContentRef`，
+引用也不自带读权限。transform/summary/entity/chunk/vector/generated answer 默认继承，
+`ProtectionContext.merge` 委托可信 policy，保存全部来源；不以 Label 名称或固定 rank
+做降级，也不把多个 tenant 视为天然可合并。
+
+### 6.1 此次实施的四项协议补充
+
+1. **绑定且可验证的许可。** `DataUseBinding` 冻结 actor/execution/step、
+   workspace/user/principal/tenant、identity/connection revision、provider manifest、
+   source version/generation、content/context digest、action/destination、精确 model
+   name/endpoint/environment/revision 与 policy version。`PolicyPermit` 仅接受 ALLOW，
+   检查有效期及全部义务，并在消费时再次调用可信 `PolicyAuthority` 验证签发与撤销。
+   caller 提交 ALLOW 或伪造 authority 不等于授权；ES-2 没有生产 authority/default policy。
+2. **明确可恢复性。** 引用区分 `TransientContentHandle`、`SourceContentRef`、
+   `ArtifactRef`；前者不能作为 durable dependency，后两者只在重新授权、源版本/可用性
+   和合法 Artifact 保护验证成功后可恢复。无法 refetch 的模型摘要不是 source-resolvable；
+   没有批准的 durable artifact 必须显式不可恢复，不重跑已完成 child 来伪造恢复。
+3. **控制依赖传播。** `LineageEdge` 同时承载 DATA/CONTROL；同源两种角色均保留。
+   Condition、路径选择、过滤和路由的控制来源也进入 union。可信 merge policy 不得丢失
+   任一来源或 derived provenance；分类顺序/跨 tenant 合并仍由组织 policy 决定。
+4. **组合义务与证据。** `PolicyObligation`/`ObligationProof` 绑定 obligation kind/target、
+   binding digest、policy version、verifier/evidence refs/time；缺失、重复、错绑定、未验证
+   或未来证据不能成为 permit。证据结构不是审计/加密/用户操作已经实际完成的证明，
+   完成事实必须由后续 Runtime 的可信 verifier 校验。
+
+正文容器仅支持明确的 canonical JSON 值或 bytes，不用任意对象 repr 计算 digest；
+释放前重查正文和 context digest，防止借用的可变正文或同 ID context 被替换。
+typed metadata 可以序列化，但仍是纳管数据，不可直接作为日志 allowlist。
+参数验证只证明形状/一致性，不能证明 provider settings 的中性字符串不含秘密、
+组织批准或最低 runtime version 已被安装器执行；后续 trusted adapters 必须补齐。
+
+## 7. SQLite、Zvec、Memory 与生命周期迁移提案
+
+以下是**按阶段增加的最小持久化候选**，并非 ES-2 的建表清单。遵循现有单数表名，
+字段提升到 column 取决于实际查询/约束；完整 metadata 可用受控版本化 JSON。
+
+| 对象 | 存储选择与阶段 | 与已有实现的关系 |
+|---|---|---|
+| ConnectionProfile | ES-3：`enterprise_connection_profile`，scope/revision/state/validated non-secret configuration | 不复用 resource credential identity_ref 语义 |
+| IdentityProfile | ES-4：`identity_profile`，逻辑身份/account ref/status/version | 不保存 SDK accounts 全量对象、claims、缓存或 Token |
+| ProviderManifest | trusted installed catalog，执行冻结 version/hash；需要审计时仅保存批准的 manifest snapshot | 由既有 CapabilityRegistry 安装 binding，不把 DB manifest 当代码加载器 |
+| Protection/Model profiles | ES-6 初期由经过审核、版本化的配置/policy catalog 提供，decision 引用 digest/version | 不先为所有 profile 建 CRUD 表；也不把 mutable AppSetting 当政策信任根 |
+| Resource / Context / Snapshot / Decision | ES-6/7：需要 query/revalidation 的 `enterprise_resource`、`protection_context`、`authorization_snapshot`、`policy_decision` metadata | 一致的 source ref、principal/tenant/connection 和 epoch/version；无原文/敏感 claims |
+| Derived lineage / lifecycle | ES-7：`derived_data_record` 的来源边与 lifecycle generation；ES-8 durable lifecycle event/outbox/admission receipts | 不复制 Document/Chunk/Memory 的业务实体；复用现有 outbox/SQLite UoW 模式 |
+| Auth wait | ES-4 准备 `authentication_request` 的持久化/交互内核；ES-8 与现有 operation control 绑定，同事务写事实/挂起 | projection/delivery 可稍后刷新；不复用 workflow-only InputRequest |
+| 企业 Memory / Knowledge | ES-7/8：现有实体的强制 protection/source binding sidecar，隔离索引与查询 | 复用现有 repository、outbox、generation；不建第二套 Memory/Knowledge engine |
+| 正文 / Artifact | 默认不落盘；源引用重授权后 refetch；transient/generated output 不保证重启恢复。只有 Policy 允许且保护机制实现后才落盘 | BlobRef 可作后续 metadata 索引参考，不预先建设第二个 CAS 或明文 Artifact Store |
+
+ES-3 可保存 disabled Draft 及尚未可执行的 profile refs；**invoke resolution 不允许**
+未存在/未验证的 Identity/Protection profile。不能为提前通过阶段测试伪造 READY。
+这些跨阶段引用在 application/repository 验证；需要 FK 时在目标 schema 就绪后
+设计实际迁移，不给尚不存在的表添加“成功形状”的引用。
+
+### 7.1 存储门槛
+
+企业 Zvec record 至少绑定 source/protection ref、tenant、connection、identity scope、
+classification/lifecycle/source/policy version 和 indexed_at。允许 embedding 不意味着
+允许 INDEX/PERSIST；向 embedding endpoint 发正文还要 SEND_TO_MODEL/ModelProfile。
+vector、query cache 和 embedding cache 本身也是 derived data。
+
+建议企业 collection 无 `text` 字段；现有 personal chunk collection 不重写、不破坏。
+复用 ensure_collection、owned handles、deterministic identity、flush/rebuild/cutover。
+keyword/FTS 也是 INDEX/PERSIST，不能作为 embedding 被拒后的旁路。
+reference-only 数据不能用空 Chunk/Memory 正文“完成”写入。
+
+Enterprise Memory 不进入 personal core-profile projection、普通 `view(record)`、
+自动用户事实提取、裸 SQLite fallback 或未过滤 summary。新增 source binding 后，
+个人记录维持旧 ownership；企业记录必须同时验证 tenant/connection/principal/context。
+不能把历史无标签内容自动判为企业，也不能把“没有 context”自动判为安全 personal。
+旧数据若要进入企业路径，需明确来源分类/重验证/重摄取策略。
+
+### 7.2 生命周期和竞态
+
+所有需求事件 source_changed/deleted/access_revoked/label_changed/retention_changed、
+connection_disabled、identity_disabled、policy_changed、model_profile_disabled 均先成为
+耐久、无正文的 lifecycle fact。事务先标失效并 bump generation，立即阻止新的读取、
+model egress、写入；后续沿既有 bus/matching 和唯一 Engine 处理 revalidation/invalidation。
+Provider 只报告事件，不拥有 Trigger、不直接 launch Workflow。
+
+采用 at-least-once delivery + scoped event/admission key，非 Exactly Once。
+ack 不早于 durable admission；重投不能重做已完成 child/effect。业务暂停不阻断安全
+失效，不能依靠业务 cooldown 丢弃 revocation。cleanup 失败时 stale vectors 仍不可见。
+
+网络/模型操作前后及写入事务中重查 source/policy/profile generation，防止旧 callback、
+late extraction、rebuild 或重启 resurrect。有效 snapshot 的 freshness 由 policy 决定。
+远程撤权和本地 gate 之间存在不可消除的网络 TOCTOU；不能承诺已经发出的正文可撤回，
+其可接受 freshness、取消和远程 retention 必须获得组织决策。
+
+### 7.3 安全迁移与降级
+
+当前 `db\migrations.py:38,333` 为 ordered upgrades 1–14，没有通用 downgrade runner，
+且 v13 有专用 projection 重建。未来增加新步骤，不能只改 ORM/create_all；
+SQLite CHECK/trigger 变化需真实 DDL 迁移，迁移版本以届时基线为准。
+
+在 RuntimeLock 下创建一致性备份（包含 WAL 状态或使用 SQLite backup），验证重复升级、
+旧 receipt/hash/ID/owner 不变。禁止把未分类历史数据自动写入企业索引。
+schema 保留式回滚优先：禁用 enterprise 功能，保留 metadata/tombstones，禁止旧 binary
+在 enterprise 数据存在时无保护读取。若需要 binary downgrade，必须有拒绝启动/访问
+的版本检查或明确隔离/清理方案；不能仅声称 additive 就安全。
+
+SQLite WAL/NORMAL 已提供进程恢复基础，但不是断电后最后一笔 audit 必然耐久的承诺。
+是否要求 FULL/fsync、encrypted backup、清理 WAL/FTS/cache/vector 副本或 crypto-erasure
+须评审，不能把 DELETE、BitLocker 或 local-first 当作数据保护证明。
+
+## 8. Windows MSAL/WAM 调查与条件性 IPC
+
+### 8.1 已验证、未验证必须区分
+
+本次已安装环境：CPython **3.14.10 AMD64 64-bit**；keyring 25.7.0、pywin32 312、
+MAF core 1.24.0/openai 1.18.0/AG-UI 1.7.1、Generic Host 1.0.1、
+dependency-injector 4.49.1、SQLAlchemy 2.1.6、httpx 0.28.1、Zvec 0.8.0。
+msal/msal-extensions/pymsalruntime/azure-identity 均未安装。这是 `.venv` 快照，
+不是声称未提交 lock 与当前安装版本完全一致。
+
+| 正式依据 | 能确认的事实 | 不能据此声称 |
+|---|---|---|
+| [MSAL Python WAM guide](https://learn.microsoft.com/en-us/entra/msal/python/advanced/wam) | Windows WAM opt-in、delegated public client、broker redirect、parent window handle | Shovel browser/static workbench 已有有效 HWND |
+| [MSAL Python public API](https://msal-python.readthedocs.io/en/latest/index.html) | `get_accounts`、`acquire_token_silent_with_error`、interactive `claims_challenge/timeout/parent_window_handle/on_before_launching_ui` | 一个 `None` silent result 足以分类所有错误；用户名足以安全绑定 tenant/principal |
+| [MSAL PyPI metadata](https://pypi.org/pypi/msal/json) | 1.39.0，Python >=3.9，Windows broker dependency `pymsalruntime>=0.20,<0.21` | lower bound 或 wheel 存在即通过产品兼容测试 |
+| [pymsalruntime metadata](https://pypi.org/pypi/pymsalruntime/json) | 0.20.7 发布 `pymsalruntime-0.20.7-cp314-cp314-win_amd64.whl` | Python 3.14 不能支持 WAM，因此必须创建 .NET broker |
+| [MSAL.NET WAM guide](https://learn.microsoft.com/en-us/entra/msal/dotnet/acquiring-tokens/desktop-mobile/wam) | 正式 .NET broker 路线；必须处于可交互 Windows 用户会话，silent-first/user gesture | Windows Service/session 0 能交互；本机 .NET SDK 证明 broker 已集成 |
+
+本机有 .NET SDK 10.0.403 及 desktop/runtime 10.0.14，但仓库没有 `.csproj`。
+这只说明可能进行未来 spike，不证明 NuGet、打包、签名、IPC 或 SDK cancellation 通过。
+
+**重要限制：**MSAL Python 官方 API 明示 broker 初始化失败时可能静默回退 non-broker，
+ADFS/B2C/OIDC 等路径也不使用 WAM；因此 `enable_broker_on_windows=True` 不能独自证明
+WAM-required。interactive callback 能告知 browser/broker，但是否能用公开 API 全面
+阻止 silent/interactive fallback 必须验证，不能读取私有 `_broker` 后宣称可靠。
+interactive 默认 timeout=None 会阻塞；显式 timeout 及取消需在 WAM 路径验证，
+`asyncio.to_thread` 外层取消不证明底层 SDK/UI 已停止。
+
+建议 ES-5 先验证进程内 Python MSAL/WAM，满足全部接受门槛才采用；若不满足可靠 UI、
+模式保证、取消/隔离要求，再评审独立 Windows authentication-only broker。
+Azure Global/China 的 authority builder 常量不是 WAM/Mooncake/guest/CA 实测证据。
+每个 cloud/provider binding 单独验证，不复制 `/common` 或一个全局 current_account。
+
+### 8.2 若需要 Native Broker：最小边界提案，不是现成实现
+
+* 同一交互 Windows 用户/session 下的独立受信任 auth-only component；不启动 Provider、
+  HTTP business proxy、Workflow、Trigger 或第二套 Runtime。
+* 私有 per-launch IPC，候选 Windows Named Pipe/inherited handle；实际 API、签名、
+  安装身份、caller attestation 与 ACL 要在专门 spike/ADR 修订后确定。
+* allowlisted operations：availability、受限 account selection、acquire silent、
+  begin interactive、cancel、application disconnect。消息含协议版本/request/correlation、
+  execution binding、profile revision、manifest version/hash、deadline，不允许 caller
+  提交任意 scope/audience/authority/endpoint/URL/refresh token。
+* broker 独立检查已批准 manifest/profile binding、请求时效、caller/user/session；
+  interactive 必须绑定具体 human action，不能被 proactive/Agent 参数开启。
+* 不向 Agent/API/Provider 返回 Token。若 native SDK 必须交付短时 access token，
+  只通过私有 secret response 交给 trusted Identity adapter/AuthenticatedTransport，
+  随 invocation lease 失效；不返回 refresh token，不走普通 JSON/result/audit/state。
+  仅返回 opaque handle 而把业务 HTTP 搬入 broker 并不符合 auth-only 边界。
+* nonce/replay/size/deadline/binding 检查、parent/child 退出与晚到结果丢弃均须测试。
+  使用受管自身进程的 Job Object 等需实际验证，不杀 OS WAM/Office 进程来模拟取消。
+* SID-only ACL、loopback、PID 或“签名的 python.exe”不足以认证 Shovel 调用代码，
+  也不阻止同用户恶意软件。需要可信安装/launcher/session handshake 决策，
+  不能以可写源码 checkout 当 production caller authenticity。
+
+Native 路线不属于 ES-2 计划文件；若采用，先另行提出 Windows-only 项目/打包/签名
+清单。不以“未来平台兼容”为理由创建 OS adapter abstraction。
+
+## 9. Threat model 与信任边界
+
+**资产：**短时 auth secrets、企业正文与派生数据、principal/tenant、策略/manifest、
+execution bindings、批准事实、source generations、索引/缓存、审计可用性。
+威胁主体包括恶意外部内容/LLM、恶意或错误 Provider 响应、网页/XSS、本机非受信任
+IPC/HTTP 客户端、失效授权、过时 worker 和供应链/配置篡改。
+
+| 边界/威胁 | 必须的控制与验证 | 剩余假设或限制 |
+|---|---|---|
+| Browser/CLI/Agent -> 本机 Host，伪造 human/tenant/profile | scoped facade、结构化确认、exact intent、live validation、无 token endpoint | `LocalAccessMiddleware` 的 Origin/Host 检查不是 OS caller authentication |
+| Host -> WAM/native component，冒用登录/请求任意 scopes | manifest-bound request、caller/session/gesture、silent-only proactive、no extra consent scopes | 本机可信安装/运行身份与 WAM-required 可观测性待定 |
+| trusted Provider -> transport，SSRF/redirect/token audience 混淆 | 受控 operation/relative path、host/authority/audience绑定、TLS、禁 auth header override、默认不重定向 | 企业 private endpoints/proxy/CIDR 必须组织批准；KQL 等参数也可能扩展资源范围 |
+| DNS/proxy/env -> network destination | 复用 `services\web.py:132` 的验证/pinning prior art，批准的 enterprise network policy | PublicWebTransport 拒绝 private IP，不能整类照搬到企业网络；不能禁 TLS 绕代理问题 |
+| 外部正文 -> Provider mapping / Agent，prompt injection/伪造 Label | source metadata authority、unknown deny、Provider 返回 ProtectedContent，正文不是指令或 policy | Provider code 仍是受信任代码；不接受未经审核扩展充当 Policy Provider |
+| ProtectedContent -> 任意模型/compaction/recovery/embedder | 全量来源合并、精确 ModelProfile、每次出站 gate、派生输出继承 | 本机模型也可有日志/云转发；approved 名称/localhost 不是证明 |
+| 数据 -> SQLite/Zvec/FTS/cache/Artifact/Workflow | 每个 action/destination gate、ref-first、无默认正文 dump、查询再验证 | embedding 和 metadata 本身敏感；加密不能替代授权 |
+| revoked source -> stale index/Memory/late callback | transaction generation fence、query/write前后重查、durable invalidation/outbox | 远程撤权和已发请求不能原子协调，需 freshness/retention 合同 |
+| 多 source/tenant merge -> 保护降级 | policy-owned merge、全量 refs、cross-tenant 默认拒绝 | 不根据固定 Label order 自动建立组织规则 |
+| auth wait -> restart/resume，重复 effects/旧 principal | durable request、deadline、single-use resume binding、实际 outbound receipt、相同 Engine/child key | 无法证明未发生的非幂等 effect 必须 reconciliation，不能盲重试 |
+| application log/SDK error/SQL echo/browser console -> 泄漏 | safe serialization allowlist、禁 raw payload/error chain、受控 debug/audit、synthetic sentinel tests | regex/trace discipline 不提供任意第三方 logger 的强保证 |
+| 同进程 Python 扩展 / 同用户 malware / admin -> 内存或 policy | 只安装 trusted handlers，关闭未纳管扩展，验证安装完整性；高信任 broker caller | Python 不隔离恶意同进程代码；同用户 DPAPI/管理员可访问内存不能被夸大为已防护 |
+| 篡改 manifest/model/profile ->扩大权限或 destination | version/hash freeze、审核过的配置源、live availability、revision checks | 人工可修改 dev checkout 不等于可信 production 配置根 |
+| 拒绝审计/队列耗尽/无限 auth -> DoS或无记录执行 | bounded queues/timeouts、backpressure、durable audit failure 显式失败、无无限 auth retry | audit mandatory/availability 的 fail-closed 范围需要组织规则 |
+
+数据释放到 browser/terminal 后无法仅靠隐藏 copy 按钮保证 no-copy/no-export；
+若 rights 要求受保护查看器且未实现，REQUIRE_PROTECTION 必须拒绝显示。现有
+RichNotificationSink 的 stderr 也可能被重定向，认证通知默认只发安全状态/opaque refs，
+不包含正文、邮箱地址或受限 Label 名称。
+
+外部 MCP、用户粘贴和磁盘上的企业内容目前没有可靠来源标签。不能让“未经过
+Enterprise Provider”成为 protection bypass；其分类/ingress UX 是上线阻断项，
+而不是宣称 regex 可以识别全部企业数据。
+
+## 10. 分阶段实施计划与完成门槛
+
+| 阶段 | 复用/最小切片 | 验证与禁止提前实施 |
+|---|---|---|
+| ES-0 | 本报告：真实模块、领域、ORM/迁移、MAF与测试路径、依赖调查 | 文档证据校验；不访问企业/用户业务数据 |
+| ES-1 | 十份 Proposed ADRs、冲突/迁移/未决事项 | 用户已批准 ES-2 契约范围；不代表后续运行时或组织决策批准 |
+| ES-2 | 本文第 12 节精确列出的版本化 Core contracts | 强类型/immutable/safe repr/serialization/schema/import graph 测试；无 DB/SDK/default变更 |
+| ES-3 | 已实施 Connection profile repository/application service、optimistic revisions、manifest兼容校验 | disabled draft/unknown refs 不可 invoke；migration 15、重复升级与 stale revision；见第 15 节 |
+| ES-4 | 已实施 Identity profile kernel、TokenRequest validation、safe diagnostics、silent-only服务、transport contract及持久交互内核 | fake broker 仅 tests；生产 unavailable，不假 READY；仅为已挂起 Execution 创建 request/projection，见第 16 节；不开放企业dispatch |
+| ES-5 | 已批准的 Windows MSAL/WAM路线，account/tenant/challenge/cancel/timeout/disconnect | approved tenant 的显式 opt-in Windows交互测试；无真实业务 Provider |
+| ES-6 | deny-default Data Protection kernel、merge/lineage/ModelProfile、safe decision/audit | 每种要求未满足不得 release；未知标签和 policy failure 不降级 |
+| ES-7 | metadata-only SQLite、安全 enterprise vector schema、sidecars/generations/invalidation | 证明 deny 时无 embedding/network/index/content write；不默认为邮件全文建立索引 |
+| ES-8 | test fixture Provider -> resolver -> fake auth -> transport -> protection -> safe display/deny，走既有 Engine | 原子 auth wait/restart/resume、pre-effect Approval、source invalidation、所有裸出口 containment |
+| ES-9 | 需求完整 failure/security test matrix | adversarial response、跨边界泄漏、race/recovery、Windows broker evidence；真实 Provider 仍不默认启用 |
+| ES-10 | synthetic sample、authoring/connection/auth/protection/logging/testing guides | sample 不连接真实公司、不使用真实 Token；演示 ALLOW/DENY/auth wait/derived lineage |
+
+每阶段开始前重查代码和基线，列拟改文件、冲突和兼容性；实现最小完整切片并运行其
+formatter/linter/type checker/unit/integration tests。后续阶段不能以“先跑起来”
+开放未保护的 enterprise route。Windows-only CI/发布迁移需独立批准并与需要 Windows
+运行保障的阶段协调，不混入 ES-2 contract diff。
+
+### 10.1 认证等待的实际事务与恢复
+
+以下是 ES-8 的完整集成目标，不是 ES-4 已实施的 Engine 保证。ES-4 只为
+**已经 SUSPENDED** 的 Execution 同事务写 request/projection/notification；
+不负责把运行中的 Execution 挂起、认证完成或唤醒。用户已明确选择沿用原
+Execution deadline，不引入更长的认证等待期限，也不扩大预算。
+
+1. auth failure 先按 taxonomy 分类，不把 auth-required 当 transient effect retry。
+2. proven not-sent 时，在既有 execution transaction 记录 request/control/attempt事实，
+   进入 SUSPENDED，释放 coroutine/secret；随后现有 projection/notification 刷新。
+3. Agent 只收到状态/请求引用，不能产生/消费 human authentication tickets。
+4. 用户完成登录后只提交安全 completion binding；不提交 Token/claims 到普通 API。
+   按 execution/request/scope/user/identity/tenant/connection/manifest revision 复核，
+   再经现有 wakeup/resume。旧 deadline、permissions、budget、child key 保持不变。
+5. restart 从 durable request 恢复；失去短时 challenge 时重新获取可信 challenge，
+   不将 raw challenge 写进 workflow state。duplicate/late completion 不重复发请求。
+6. 支持 cancel/skip 本次/暂停 proactive；既有 cancel/pause 复用，skip 的新语义在
+   ES-8 明确映射，不能让“dismiss notification”隐式取消或批准执行。
+
+## 11. 测试策略：现有证据和需要新增的证明
+
+已检查现有 fixtures 与代表性断言：`test_security_core.py:218,358` 的精确权限/
+审批；`test_kernel_persistence.py:66,98,372` 的 scope/不可变 dispatch/credential
+拒绝；`test_execution_control.py:112,185,491` 的 timers/recovery/live checks；
+`test_memory_tasks.py:85,113` 的原子 outbox/late extraction fences；
+`test_native_memory.py:596,678` 的真实 Zvec/rebuild/delete race；
+`test_platform_demos.py:95,339` 的 synthetic model/mail handler。
+这些可复用，但不证明 WAM、DLP、企业 source reauthorization 或 protected egress。
+
+| 测试组 | 新的必要用例/断言 | 最小复用基础 |
+|---|---|---|
+| Core/serialization | version/schema、mutation、unknown字段、AuthContext repr/JSON/pickle/asdict拒绝、ProtectedContent无正文dump、refs不授予权限、safe validation errors | 新 ES-2 contract tests；现有 credential/JSON boundary assertions |
+| Identity | wrong tenant/audience、missing account、claims challenge、silent empty/refresh error、broker unavailable、CA/device/consent/entitlement/JIT、force refresh限制、cancel/timeout/late result/disconnect | deterministic fake broker 仅 tests；Windows opt-in SDK tests另列 |
+| Connection | Global/Mooncake authority/endpoint错配、disabled、unsupported provider、host/audience/scope不在 manifest、stale revision、forged profile/tenant/model selections | registry、resource service、platform options/revision fixtures |
+| Transport | auth header/cookie override、arbitrary URL、redirect、DNS rebinding、private/proxy policy、恶意 challenge authority、非幂等超时不重放、safe SDK/HTTP错误 | httpx MockTransport；PublicWebTransport prior-art tests |
+| Protection | missing metadata/unknown label/policy unavailable、READ允许但EMBED/PERSIST/model egress拒绝、义务未兑现、多源/跨tenant merge不降级、Agent无法覆盖DENY | fake trusted policy，sentinel body；不硬编码公司 Label |
+| Model boundary | Main/Skill/Agent/tool回合、Memory extractor/summary、MAF compaction、empty-response recovery、embedding/query cache均不旁路 | MAF synthetic HTTP fixtures；deny后请求计数必须为零 |
+| Search / stores | keyword/vector/parent expansion/SQLite fallback、expired/revoked snapshot、source版本/Label/retention变更、policy/model/identity/connection disabled；只返回 ProtectedContent refs | existing real SQLite/Zvec tmp_path fixtures；不能只验证schema字段 |
+| Memory / lineage | personal隔离、source-bound企业记录、merged refs、迟到提取/rebuild不得 resurrect；不同tenant/connection同ID不串读 | epoch/outbox/rebuild/forget race tests |
+| Execution | WAITING_FOR_AUTHENTICATION restart/child wakeup、绑定恢复、cancel/skip、deadline、duplicate wakeup、approval在effect前、lost response/reconciliation | 唯一 Engine、real process recovery、kernel/Workflow/control tests |
+| Leak prevention | synthetic token/body放入response/error/headers/claims/validation失败；捕获logs/exceptions/trace/browser output/SQLite与WAL/FTS/Artifact/vector可见fields，deny时无对应写入 | 临时目录/隔离DB/index，禁止用真实Token或生产数据 |
+| Migration / compatibility | 新旧升级重复、已有hash/ID/receipt/fingerprint不变；old binary拒读、CHECK/trigger更新、cleanup失败不暴露stale数据、进程/断电durability目标 | capability/kernel migrations、installed wheel smoke；Windows CI |
+
+ES-2 只运行 contracts 及相关既有 boundary regressions；不制造“真实 broker integration
+已通过”。ES-5 才可能在授权环境安装/锁定 SDK并验证真实 WAM。所有 live 测试显式
+opt-in；标准离线测试不需要企业身份、模型凭据或付费服务。
+
+ES-0/1 验证文档引用、正式依赖来源与阶段范围；此次 ES-2 另执行新增 contracts 和
+既有边界回归、Ruff/Mypy。离线契约测试不证明真实 WAM、DLP、Artifact Store、
+流式出口、dispatch durability 或组织政策已经集成。
+
+此次验证结果：三个新增测试文件与 `test_kernel_persistence.py`、
+`test_security_core.py` 共 **165 passed**；全仓 `ruff check .`、
+`mypy backend\src`（196 个 source files）及十二个新增 Python 文件的格式检查通过。
+使用 `uv run --no-sync`，不重新同步原有 lock。全仓 `ruff format --check .`
+报告 94 个既有文件需要格式化；其中后端 source/tests 范围为 86 个，
+不在本次范围内，未批量改动。两份本文档格式检查、相对链接、代码围栏及文件范围验证通过。
+
+## 12. Phase ES-2 精确计划文件
+
+用户已批准实施，**仅以下 12 个新增文件**；不修改任何现有生产入口、DB、配置、lock、
+Capability hash serializer 或 Engine state enum。采用 repository 既有 Python typing/
+Pydantic/dataclass 风格，但 secret/content 容器不使用普通可 dump 的 Value。
+
+| 文件 | 内容 |
+|---|---|
+| `backend\src\shovel\identity\__init__.py` | 窄 export，无 SDK/import side effect |
+| `backend\src\shovel\identity\domain.py` | 版本化 IdentityProfile、AuthenticationState、受控 TokenRequest、非序列化 AuthContext、safe identity refs |
+| `backend\src\shovel\identity\errors.py` | 全部 auth taxonomy、安全 code/message/diagnostic serialization |
+| `backend\src\shovel\identity\ports.py` | authentication-only broker/service 边界类型；无 OS factory、无生产 fake |
+| `backend\src\shovel\enterprise\__init__.py` | 窄 export，无注册/网络 side effect |
+| `backend\src\shovel\enterprise\domain.py` | 版本化 EnterpriseConnectionProfile、ProviderManifest、EnterpriseResourceRef、安全 profile/configuration refs |
+| `backend\src\shovel\protection\__init__.py` | 窄 export |
+| `backend\src\shovel\protection\domain.py` | ProtectedContent[T]/safe refs、ProtectionContext、完整 DataAction/Destination/PolicyDecision、AuthorizationSnapshot、DerivedDataRecord、ModelProfile |
+| `backend\src\shovel\protection\ports.py` | typed policy evaluation/merge contracts；merge不内置Label顺序或ALLOW规则 |
+| `backend\tests\test_enterprise_identity_contracts.py` | identity/profile/request/error/secret container schema与泄漏测试 |
+| `backend\tests\test_enterprise_connection_contracts.py` | connection/manifest/resource refs、cloud/tenant形状、安全config/immutable/version测试 |
+| `backend\tests\test_data_protection_contracts.py` | typed envelopes/metadata/refs/decision/lineage、policy委托merge、组合序列化与import dependency测试 |
+
+端到端 service integration、实际 transport/SDK、CRUD repositories/migrations、UI、
+lifecycle worker 都是后续阶段；ES-2 的“组合”测试只验证不同 contracts 跨 envelope/
+safe-reference/schema boundary 的一致性，不伪造运行时 enforcement。
+如果实施时证据要求额外现有文件变化，先报告新的最小 diff 和理由，不扩大本清单。
+
+## 13. 阻断安全实施/上线的未决问题
+
+| ID | 需要评审/正式证据，不预填组织答案 |
+|---|---|
+| B01 | Entra app/client ID、tenant/cloud、redirect/allowed scopes、admin consent与安装/配置审核主体是谁？guest/account的稳定principal绑定如何用公开SDK可靠取得？ |
+| B02 | Windows-only最低OS、x64/ARM仿真和Windows CI/Release策略；包版本/tag mismatch如何修复及 minimum runtime version规则？ |
+| B03 | browser/CLI/后台Host的interactive UX与可信HWND谁拥有？无交互Windows会话只能wait/unavailable，不能自动浏览器/device-code fallback。 |
+| B04 | Python MSAL 公开API能否证明WAM-required并阻止silent fallback？WAM timeout/cancellation、Global/China/guest/CA/claims矩阵未实测。 |
+| B05 | 进程内可信扩展边界；若Native broker，可信安装/签名/launcher/caller attestation/IPC协议如何实现，同用户攻击保证范围是什么？ |
+| B06 | Source Label/rights/DLP/retention的权威、受保护内容解密/展示授权、组织merge policy、政策版本/审计来源是谁？ |
+| B07 | 哪些ModelProfile、tenant、endpoint/代理、生成/embedding、日志/retention符合组织批准？“本机”或“enterprise”名称不作自动授权。 |
+| B08 | Source authorization snapshot允许多新鲜？撤权/Label变更检测、源版本保证、网络TOCTOU、跨tenant合并和refetch失败策略是什么？ |
+| B09 | SQLite/Zvec/FTS/WAL/backup/Artifact允许保留什么？加密key管理、可验证删除、断电audit耐久性、审计失败阻止哪些动作？ |
+| B10 | authentication等待最大期限、skip与cancel语义、暂停服务、用户切换账户/断开应用与OS账户退出的区别？旧预算不能暗中扩张。 |
+| B11 | 用户粘贴、现有Outlook/local file/网页、MCP、custom instructions、历史Chat/Memory内容如何提供可信分类？不可用“未标注=personal”规避。 |
+| B12 | Enterprise private network/proxy/CIDR/TLS trust、provider operation参数资源范围、claims challenge解析标准和 replay-safe effect证明？ |
+| B13 | 旧binary降级/旧CLI直接SQLite读的阻断，以及历史未分类正文/索引的隔离、审计与重新摄取策略是否获准？ |
+
+## 14. 本轮交付与评审边界
+
+架构/文件级 gap/冲突见第 2–4 节；module structure、数据流和contracts见第 5–6 节；
+DB/lifecycle/migration见第 7 节；SDK与条件性IPC见第 8 节；threat/trust boundaries
+见第 9 节；phases/tests见第 10–11 节；ES-2 exact files见第 12 节；未决问题见第 13 节。
+十份 ADR、ENT-SEC 对照和每项 rollback impact 见配套文档。
+
+**ES-2 仅实现契约；不移除 `security\services.py` 现有 connection-backed deny。
+后续架构与组织决策仍是提案，不是运行时保证或合规认证。**
+
+### 14.1 后续阶段的四项硬门槛
+
+| 门槛 | 接入/阶段 | 必须通过的运行验证 |
+|---|---|---|
+| H1 输出前流式保护 | ES-6，`runtime\agent.py`/AG-UI、模型与 display adapters | 正文 token/SSE frame 释放前 gate；需要完整输出 DLP 时先 buffer，不可“最终答案检查”替代；拒绝时外部接收计数为零，buffer 亦按 retention 管理 |
+| H2 Durable dispatch intent | ES-5/8，既有 Engine/transport/SQLite attempt facts | 发网络请求前提交 intent；intent 与 HTTP 不原子，crash after intent/before send 也可能 uncertain；只有可信 not-sent/replay-safe 证明才 retry，否则 reconciliation，禁止已完成 child 重放 |
+| H3 组织政策信任根 | ES-3/6，可信安装/版本化 policy catalog/DI | 验证来源、完整性、版本/撤销与最低 runtime compatibility；personal settings 仅能收窄，不能改组织 ALLOW、model approval 或保护机制；伪造 ALLOW/authority/verifier 必须拒绝 |
+| H4 按数据类别的保留/离线/撤权矩阵 | ES-6/7/8，现有 store/query/outbox/recovery | 分别审批正文、metadata、向量、摘要、control lineage、Artifact、cache、audit；明确 retention、offline freshness、revocation/delete、WAL/backup 与失败行为；无组织答案不默认无限保留或离线读 |
+
+H1–H4 是启用相关运行时路径的必要门槛，未在本轮实现。
+其证据覆盖 Main/Skill/Agent、compaction/recovery、Memory extraction、embedding、
+Workflow state、display、日志与各存储出口，不限于 Enterprise Provider 回调。
+
+## 15. ES-3 配置管理交付边界
+
+新增 `enterprise\catalog.py`、`enterprise\ports.py`、`enterprise\service.py`、
+`db\model\enterprise.py`、`db\enterprise_repository.py` 和
+`backend\tests\test_enterprise_connections.py`。后端模块路径相对于 `backend\src\shovel`。
+扩充已有 `enterprise\domain.py` 的编辑 DTO、scope-bound record 和配置验证结果，
+并接入既有 PlatformApplication、Runtime、HTTP/CLI，不建立第二个 Registry/Engine。
+
+* `ConnectionDraft` 只接受编辑 metadata；ID、scope、revision、timestamps、enabled/status
+  和 manifest pin 均由服务端生成。修改保存为 disabled Draft；禁用也增加 revision。
+* SQLite 的 `enterprise_connection_profile` 存储安全配置和冻结 manifest version/hash。
+  migration 15 按现有升级路径执行；ORM/check/trigger 同时禁止 enable、validated 状态、
+  越 scope 修改以及不递增/跳跃 revision。写事务复用 `sqlite_write`。
+* `InstalledProviderCatalog` 仅接受可信安装/DI 的 manifest metadata，不加载 DB/TOML/
+  workspace extensions 中的 manifest，也不导入 implementation IDs。校验唯一 provider、
+  cloud/environment/exact endpoint、connection type、setting names及最低 runtime version；
+  version 比较暂只支持稳定 `major.minor.patch`，未知格式明确拒绝，无猜测 fallback。
+* **默认生产目录为空**，不存在伪装为生产实现的 demo Provider。新增配置要求安装目录
+  已有受审 manifest；测试注入 fixture manifest。配置可引用尚未就绪的 identity/protection，
+  但 `configuration_valid=true` 始终伴随 `executable=false` 和明确 pending requirements。
+* manifest 删除/变更后配置不能验证为可用；再次人工保存修订才能更新 pin。旧配置仍可
+  查看/禁用，不自动替换 endpoint、tenant 或冻结版本。H3 的组织签名/信任根仍未实现；
+  可信 DI metadata 不等于组织 policy approval 或已注册 Function handler。
+* Agent 不可调用配置管理命令；human 入口沿现有 loopback/owner boundary。编辑 DTO
+  拒绝 credential keys、cookie settings、任意 lifecycle/manifest 字段，错误不回显输入。
+  该标量 schema/allowlist 不声称能识别中性字符串中的任意秘密或完成 DLP。
+
+HTTP：`GET /api/v1/platform/enterprise/connections`、
+`GET /api/v1/platform/enterprise/connections/options`、
+`GET /api/v1/platform/enterprise/connections/{id}`；修改复用
+`POST /api/v1/platform/commands` 的 `enterprise.connection.create/update/disable`。
+create/update 的 `input` 是 ConnectionDraft，不扩充旧 PlatformCommand 的默认字段，
+避免改变已有 command serialization；update/disable/validate 要求 expected_revision。
+
+CLI：`shovel connection options/list/show/create/update/validate/disable`。
+create/update 从用户指定的 JSON 文件读取 draft；update/validate/disable 必须显式
+`--revision`，不自动读取最新 revision 后覆写。没有 enable、sign-in、probe 或业务 run。
+
+现有 connection-backed execution deny、CapabilityContent/DependencyLock hash、
+Execution lifecycle、Operation receipts 和 personal Memory/Knowledge 行为保持不变。
+本阶段没有 AuthContext 创建、Token 请求、企业网络调用、embedding 或正文落盘路径。
+
+验证结果：ES-3 新增 **24 项测试通过**；连同 ES-2、迁移、Platform 和 Host 回归，
+共 **247 passed / 1 failed**。失败是既有 MCP 实连接重启测试：
+`agent-framework-core 1.24.0` 导入本机 `mcp 1.30.0` 不存在的 `Client`；
+独立导入检查确认该 API 缺失，不属于 ES-3 配置路径，未自动调整依赖或原有 lock。
+全仓 Ruff lint、Mypy（201 source files）、本轮涉及的 20 个文件格式检查和 diff
+whitespace 检查通过；未把扩展回归报告为全绿。
+
+## 16. ES-4 身份、认证与持久交互内核交付边界
+
+新增 `identity\service.py`、`identity\profiles.py`、`identity\waits.py`、
+`enterprise\transport.py`、`db\model\identity.py`、
+`db\identity_repository.py`、`db\authentication_repository.py` 和
+`backend\tests\test_enterprise_authentication.py`。后端模块路径相对于
+`backend\src\shovel`。扩充既有 identity contracts，复用 PlatformApplication、
+Runtime、Interaction/Notification、HTTP/CLI 和按序迁移，不新增 Engine 或 broker SDK。
+
+* migration **16** 增加 `identity_profile`、`authentication_request` 及 owner/revision/
+  deadline/immutable binding guards；重复升级和旧 stores 升级只在隔离 SQLite 验证。
+  身份只存 display metadata、tenant、account selector 引用及 scope/revision/timestamps，
+  读回始终 disabled、broker/status unavailable。配置编辑和 disable 增加 revision；
+  disable 是应用内失效栅栏，不移除 Windows/Office 账户。
+* `AuthenticationService` 仅允许一次、受可信 resolver ceiling 约束的 silent acquisition；
+  禁止 interactive、未授权 refresh/challenge/scope 扩张及诊断模式 fallback。
+  acquisition 按冻结 deadline 限时；返回前重新解析绑定，并再次检查 context 的有效期。
+  错误按安全 taxonomy 转换，不回显 SDK 描述或异常链；status 只报告状态，不触发登录。
+  取消/超时会关闭未交付 context，并清理忽略取消后才返回的 context。
+  这不证明实际 SDK/native 调用已经停止；resolver I/O 尚非独立限时的 SDK 接受性保证。
+* 默认 Runtime 注入 `UnavailableWindowsBroker` 和 `UnavailableAuthenticationResolver`，
+  明确拒绝认证；测试中的 broker/resolver 不进入生产。不存在 sign-in、enable、
+  credential upload、authentication completion 或真实 Token/业务网络路径。
+* `ProviderRequest` 绑定 operation、connection/manifest、identity/tenant、TokenRequest
+  和 resource refs，拒绝不一致及任意 URL/header 覆盖；`AuthenticatedTransport` 仅为
+  Protocol，可信 decoder 返回 ProtectedContent，没有 HTTP 实现或默认 Provider。
+* 内部 request 创建只接受 scope/correlation/identity/connection/manifest revision
+  相符、未过期且**已挂起**的 Execution，精确复制既有 deadline；不扩大权限或预算。
+  持久化前移除短时 claims 引用和 interactive/refresh 标志，只记录需重新获取可信
+  challenge 的事实；同一安全绑定重放返回原 request，不重复创建投递。
+* request、既有 warning Interaction 和 Notification/Delivery 在同一 SQLite 写事务提交。
+  列表/查看/取消沿现有门面；refresh 按既有有界批次处理 deadline、配置 revision
+  和终态 Execution 失效，并关闭 projection。cancel 绑定 request/execution/scope，
+  **只取消认证待办，不取消或恢复 Execution**；dismiss 也不是批准、跳过或取消执行。
+
+HTTP 新增 `GET /api/v1/platform/enterprise/identities[/{id}]`、
+`GET /api/v1/platform/authentication[/{id}]`；identity create/update/disable/status 和
+authentication cancel 复用 `POST /api/v1/platform/commands`，仅 human 入口可调用。
+CLI 新增 `shovel identity list/show/create/update/disable/status` 和
+`shovel authentication list/show/cancel`；配置更新/禁用要求显式 revision，
+取消要求 execution ID。没有新增默认字段或改变既有发布 payload/hash。
+
+**未实施边界：**自动 auth failure → Engine 原子挂起、完成认证的校验/单次消费、
+pending-auth resume guard、wakeup/restart/effect reconciliation 都属于 ES-8；
+ES-4 持久待办不能作为恢复授权。真实 WAM、账户绑定及取消/交互接受性验证属于 ES-5。
+现有 connection-backed deny 保持，H1–H4 未解除，也不改变 personal Memory/Knowledge。
+
+验证：首次包含 ES-2/3、迁移、Platform、kernel persistence 和 Execution control 的
+定向回归 **221 passed**；最终补充有效期重查、诊断模式拒绝和 status 安全测试后，
+ES-4 测试文件 **30 passed**。全仓 Ruff lint、Mypy（**208 source files**）、
+涉及的 **37 个 Python 文件**格式检查和 diff whitespace 检查通过。
+另行验证旧 Operation 迁移/重复升级及旧数据库 FTS backfill，**2 passed**。
+未重新宣称全套测试通过；第 15 节既有 MAF/MCP 依赖不兼容仍未修改。

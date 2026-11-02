@@ -35,6 +35,49 @@ def platform_router(dependency: Any) -> APIRouter:
             PlatformCommand(action="capability.list", kind=kind, query=query), human=True
         )
 
+    @router.get("/enterprise/connections/options")
+    async def connection_options(rt: Runtime = runtime_dependency) -> dict[str, Any]:
+        return await rt.platform.execute(
+            PlatformCommand(action="enterprise.connection.options"),
+            human=True,
+        )
+
+    @router.get("/enterprise/identities")
+    async def identities(rt: Runtime = runtime_dependency) -> dict[str, Any]:
+        return await rt.platform.execute(PlatformCommand(action="enterprise.identity.list"), human=True)
+
+    @router.get("/enterprise/identities/{identifier}")
+    async def identity(identifier: str, rt: Runtime = runtime_dependency) -> dict[str, Any]:
+        return await rt.platform.execute(
+            PlatformCommand(action="enterprise.identity.show", identifier=identifier),
+            human=True,
+        )
+
+    @router.get("/authentication")
+    async def authentication_requests(rt: Runtime = runtime_dependency) -> dict[str, Any]:
+        return await rt.platform.execute(PlatformCommand(action="authentication.list"), human=True)
+
+    @router.get("/authentication/{identifier}")
+    async def authentication_request(identifier: str, rt: Runtime = runtime_dependency) -> dict[str, Any]:
+        return await rt.platform.execute(
+            PlatformCommand(action="authentication.show", identifier=identifier),
+            human=True,
+        )
+
+    @router.get("/enterprise/connections")
+    async def connections(rt: Runtime = runtime_dependency) -> dict[str, Any]:
+        return await rt.platform.execute(
+            PlatformCommand(action="enterprise.connection.list"),
+            human=True,
+        )
+
+    @router.get("/enterprise/connections/{identifier}")
+    async def connection(identifier: str, rt: Runtime = runtime_dependency) -> dict[str, Any]:
+        return await rt.platform.execute(
+            PlatformCommand(action="enterprise.connection.show", identifier=identifier),
+            human=True,
+        )
+
     @router.get("/options")
     async def options(rt: Runtime = runtime_dependency) -> dict[str, Any]:
         return await rt.platform.execute(PlatformCommand(action="capability.options"), human=True)

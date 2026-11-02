@@ -7,6 +7,9 @@ Contracts、ES-3 禁用配置管理及 ES-4 身份/认证/持久交互内核实�
 **ES-5 另行批准范围：隔离 Python WAM 离线验收 spike，不是生产 Broker 路线
 批准；未登录、未获取 Token。**
 
+**ES-6 另行批准范围：默认拒绝保护内核、保守派生传播和隔离测试；不是生产
+组织 policy 信任根、现有全部出口接线或企业执行启用。**
+
 依据 [ES-0 Repository Analysis](enterprise_security_analysis.md) 和需求文件
 `Documents\enterprise_security_foundation.md`。这里的“决策”均为拟议决策，
 不覆盖既有 [Platform ADRs](platform_adrs.md)，运行时提案不代表已经实施。
@@ -215,7 +218,8 @@ version/time的可信evidence；unknown obligation/verifier无默认fulfilled。
 生产authority/verifier只允许可信DI注入；同进程伪造Python对象不是此类型系统能隔离的攻击。
 
 **H1硬门槛：**streaming正文释放前检查；完整输出DLP要求buffer时不能先转发token
-再检查final response。ES-6必须覆盖当前AG-UI逐event转发、buffer retention及所有模型出口。
+再检查final response。企业路径启用前必须覆盖当前AG-UI逐event转发、buffer retention及
+所有模型出口；本轮 ES-6 只交付完整 buffer 内核，尚未完成该运行时硬门槛。
 
 **Alternatives**
 
@@ -241,6 +245,17 @@ ingress/历史数据、代理/retention/审计和revocation freshness。
 
 不替换security.services.PolicyEvaluator。enterprise出口关闭而不是回到无policy处理。
 personal兼容行为不借机重写；新legacy bypass guard不允许因降级binary消失。
+
+**ES-6 已实施切片**
+
+`ProtectionPolicy` 从可信 DI state provider 取得 exact-bound 规则/source snapshots/
+ModelProfiles，缺失/未知/失效默认拒绝；DLP、rights、restriction、动作/目的地和
+retention 分别校验。DENY 优先，REQUIRE 不签发；audit sink 失败不释放正文。
+process-local authority 只认可自身签发的一次性 ALLOW，并在消费/proof 验证后复查
+当前 state 和原 Execution deadline。没有生产 policy/verifier/audit adapter，
+也不把 caller 的 ALLOW、local model 或 Approval 当作数据授权。
+服务只向受审 consumer 交付完整 buffer；尚未接入 AG-UI/模型/存储现有出口，
+H1–H4 保持，详见分析第 18 节。
 
 ## ENT-ADR-05 — ProtectedContent, ProtectionContext and Derived Data
 
@@ -293,6 +308,15 @@ B06/B08/B09/B11：真实metadata格式、rights实现、digest敏感性、secure
 
 新contract version独立于旧CapabilityContent hash/fingerprint，不给旧published payload
 补default字段。旧API不能反序列化protected ref时明确unsupported/deny，不能降成text。
+
+**ES-6 已实施切片**
+
+受控 derive 对每个输入分别通过 policy 后才调用 trusted transform，输出自动包装
+ProtectedContent，保留 DATA/CONTROL lineage 与全部 source refs。
+同策略/分类/tenant merge 取 rights 交集、restrictions 并集及更早期限；
+不同 Label/tenant 或缺少可信保护处理时明确拒绝，不猜测排序或解密能力。
+输出只创建 process-local transient ref，后续 egress/store 重新评估。
+没有企业正文持久化、source refetch、Zvec 或旧 raw-JSON 运行链迁移。
 
 ## ENT-ADR-06 — Enterprise Persistence and Vector Indexing
 
@@ -577,6 +601,7 @@ B05/B06/B09/B11：audit retention/tamper evidence/可用性、SQL/WAL/backup权�
 
 **当前边界：**ES-2契约、ES-3配置管理及ES-4身份/认证/持久交互内核已实施；
 migration 15/16只在隔离测试验证，生产Runtime的resolver/broker仍unavailable。
-没有真实企业认证、SDK安装、自动认证挂起/完成/恢复或enterprise deny解除。
+ES-5只安装隔离 spike SDK并进行离线检查；ES-6只增加未接入生产出口的保护内核。
+没有真实企业认证、主项目认证SDK、自动认证挂起/完成/恢复或enterprise deny解除。
 H1–H4仍是后续阶段硬门槛，
 不能把契约测试当作其运行时验证或组织批准。

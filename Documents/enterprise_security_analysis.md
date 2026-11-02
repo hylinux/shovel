@@ -6,6 +6,9 @@
 **ES-5 进度：用户另行选择隔离 Python WAM 验收 spike；已完成离线 SDK 检查，
 尚未完成真实 Windows Broker 或生产接受性验证，见第 17 节。**
 
+**ES-6 进度：另行获准的默认拒绝策略内核、受控消费及保守派生传播已实现，
+见第 18 节；尚未接入现有 AG-UI/模型/存储出口，不代表 H1–H4 已通过。**
+
 需求依据为 `Documents\enterprise_security_foundation.md`，特别是其中的
 ENT-SEC-01 至 ENT-SEC-18、分阶段实施要求和本轮十五项输出。
 本报告配套 [Enterprise Security ADRs](enterprise_security_adrs.md)，不替代现有
@@ -19,8 +22,8 @@ ENT-SEC-01 至 ENT-SEC-18、分阶段实施要求和本轮十五项输出。
 同时检查 ORM 注册、迁移、测试断言、前端约束和 CI/Release 配置。以下将“已实施”、
 “ORM 脚手架”和“建议实施”分开，不把设计文档中的未来计划当成运行时能力。
 
-本轮未访问用户业务数据库、邮箱或企业账户，未登录、申请 Token、调用真实企业
-Provider或安装认证依赖。ES-3/4 迁移仅在测试隔离数据库验证，不操作用户业务 stores。
+实施期间未访问用户业务数据库、邮箱或企业账户，未登录、申请 Token 或调用真实企业
+Provider；ES-5 认证依赖只安装于独立 spike 环境。ES-3/4 迁移仅在测试隔离数据库验证，不操作用户业务 stores。
 SDK 依据来自官方公开文档和 PyPI 元数据；
 wheel 存在不等于端到端集成通过。
 
@@ -456,7 +459,7 @@ Enterprise Provider”成为 protection bypass；其分类/ingress UX 是上线�
 | ES-3 | 已实施 Connection profile repository/application service、optimistic revisions、manifest兼容校验 | disabled draft/unknown refs 不可 invoke；migration 15、重复升级与 stale revision；见第 15 节 |
 | ES-4 | 已实施 Identity profile kernel、TokenRequest validation、safe diagnostics、silent-only服务、transport contract及持久交互内核 | fake broker 仅 tests；生产 unavailable，不假 READY；仅为已挂起 Execution 创建 request/projection，见第 16 节；不开放企业dispatch |
 | ES-5 | 当前仅完成另行获准的隔离 Python SDK 离线验收 spike，见第 17 节 | 真实 WAM/生产路线仍未通过；后续需 approved tenant 的显式 opt-in Windows交互测试；无真实业务 Provider |
-| ES-6 | deny-default Data Protection kernel、merge/lineage/ModelProfile、safe decision/audit | 每种要求未满足不得 release；未知标签和 policy failure 不降级 |
+| ES-6 | 已实施 deny-default Data Protection kernel、保守 merge/lineage、ModelProfile 检查、safe decision/audit contract，见第 18 节 | 每种要求未满足不得 release；无生产 policy/audit adapter；AG-UI/现有模型和存储接线仍待 ES-7/8，H1 不宣称通过 |
 | ES-7 | metadata-only SQLite、安全 enterprise vector schema、sidecars/generations/invalidation | 证明 deny 时无 embedding/network/index/content write；不默认为邮件全文建立索引 |
 | ES-8 | test fixture Provider -> resolver -> fake auth -> transport -> protection -> safe display/deny，走既有 Engine | 原子 auth wait/restart/resume、pre-effect Approval、source invalidation、所有裸出口 containment |
 | ES-9 | 需求完整 failure/security test matrix | adversarial response、跨边界泄漏、race/recovery、Windows broker evidence；真实 Provider 仍不默认启用 |
@@ -752,3 +755,109 @@ diagnostics。此次不触发它们，不采集注册信息或账户资料。
 不能用私有属性、事后丢弃 fallback Token 或 coroutine timeout 冒充门槛通过。
 继续真实接受性测试需要具体授权；切换 Native 路线需先修订/批准
 ENT-ADR-02 的项目/安装/签名/caller/IPC 边界。ES-4 unavailable 默认及 H1–H4 保持。
+
+## 18. ES-6 默认拒绝策略与保护传播内核
+
+基线为 ES-5 spike 提交 `e585f01`。新增 `protection\policy.py`、
+`protection\service.py`、`backend\tests\test_protection_policy.py`，并在既有
+`protection\domain.py` 增加安全 adapter failure 类型及 permit 复查后的正文 digest 校验。后端模块相对于
+`backend\src\shovel`。复用 ES-2 envelope、binding、snapshot、ModelProfile、
+typed obligations 和 PolicyPermit，不增加 Registry、Engine、数据库、配置、API 或依赖。
+既有 published serializers/hashes、个人 Chat/Memory/Knowledge 和企业 execution deny 不变。
+
+### 18.1 可信输入与默认拒绝
+
+`ProtectionPolicy` 要求显式注入 `PolicyAuditSink`；可选可信 DI
+`PolicyStateProvider` 和 `ObligationVerifier`，缺少 provider 时返回审计后的
+`policy_unavailable` DENY，缺少 verifier 时必要 evidence 不可通过。
+没有默认 ALLOW、生产组织规则、用户可编辑 policy endpoint 或 workspace Python loader。
+
+`PolicyState` 必须由可信 adapter 提供确切 reviewed context/binding、已知分类、
+逐 source 的 active/authentication 状态和 AuthorizationSnapshot、规则、model profile、
+DLP 结论、刷新时间及既有 Execution deadline。调用者提供的 context/actor/identity/
+connection/source generation/model/content digest 不等于授权；必须与当前可信 state
+完全一致。provider 抛错或输入非法会记录安全错误类型并明确 DENY，不回显原始异常。
+组织来源真实性、策略签名和可信 adapter 的安装/撤销仍是 H3，当前类型不是信任根。
+
+动作和目的地分别显式校验。READ 不能伪装成 DISPLAY；模型/embedding 目的地必须
+使用对应动作并匹配 ModelProfile 的精确 revision/provider/model/endpoint/environment、
+分类、tenant、用途和 approval。localhost 不是批准，READ/DISPLAY 也不供应后续
+PERSIST/INDEX/Memory/Knowledge/export/share 权限。
+当前内核保守地将 READ/PROCESS/TRANSFORM/SUMMARIZE/EXTRACT 的内部处理目的地限制为
+WORKFLOW_STATE，并对该目的地要求明确 retention；这不表示实际写入 Workflow state。
+
+每次评估检查 context 已知且未过期、source coverage/active 状态、精确身份和源版本、
+fresh allow snapshot、READ 加对应 ContentRight、DLP、restriction allowlist、精确规则。
+所有匹配规则中的 DENY 优先，任何 REQUIRE 结果都不能签发 permit；未知分类、
+缺规则/rights、未知 restriction、未批准模型或 retention 均拒绝。
+存储类用途必须有规则明确允许的 retention ref 并保持 delete-with-source；
+这只是逻辑 gate，不是已经完成 H4 组织保留矩阵或物理删除保证。
+
+### 18.2 签发、复查、obligations 与审计
+
+decision 保留六种 PolicyOutcome 和固定安全 reason codes。只有本实例实际签发且
+尚未领取/撤销的 ALLOW 可经 `authorize` 产生一次性 permit；普通 JSON 中的 ALLOW、
+篡改 decision、重复领取或跨实例使用均不构成许可。`permit` 提供 evaluate/authorize
+快捷路径；需事后取得 evidence 的 adapter 应先 evaluate，再 authorize。
+
+决策 TTL 最多 30 秒，进一步受 policy/source/context 刷新或到期时间及原 Execution
+deadline 限制；不扩大原预算。领取和消费重查可信 state，proof 验证后再次检查
+state/时间，防止慢 resolver/verifier 越过有效期。permit 消费即撤销该 decision；
+失败也不重新签发同一个 decision。进程内最多保留 1024 个未过期 ALLOW，超出明确拒绝，
+不建立持久 ALLOW 缓存。source generation/identity/connection/policy 改变后旧许可失效。
+
+所有 typed obligations 要求 ES-2 的 kind/target/binding/policy/time 精确 evidence，
+并在签发与消费时经可信 verifier 验证；必要的 protected display 无已实现可信 viewer/
+verifier 时不能释放。未实现加密/解密、MIP 或合规查看器；protected/encrypted 内容的
+普通 transform 拒绝，其他用途不能靠一个布尔值假装已完成保护。
+
+每个 decision 在签发前通过必需的 audit sink。事件只含随机 decision/audit 引用、
+outcome/action/destination/rule/reason/policy version/time，不包含正文、source 路径、
+账户、原始 claims 或 content digest；sink 失败时显式拒绝，正文不交给 consumer。
+audit 表达的是**策略判断，不是外部 effect 成功或 obligation 已完成**。
+本阶段只定义并强制调用 audit contract；测试 audit sink 是 fixture，不是生产持久审计。
+
+### 18.3 消费、派生与 DATA/CONTROL lineage
+
+`ProtectionService.use` 先验证 envelope 生命周期及 transient instance/lifetime，
+再评估、签发、释放完整 buffer，交付 consumer 前再次检查 buffer 生命周期；
+`ProtectedContent.release` 在 live permit 复查后再次核对正文 digest，拒绝复查期间的
+借用 mutable body 修改。拒绝时 consumer 不运行；这不声称能隔离同进程恶意并发写。
+consumer/transform 的错误仅记录类型并抛安全 `ProtectionAdapterError`，不泄漏异常链，
+也不自动重试可能已发送的外部 effect；这不替代 H2 的 durable dispatch intent。
+consumer 和 transform 必须是受审 trusted adapters，不接受 Agent/Provider 提交的
+任意可执行代码；Python 同进程恶意代码隔离不在此机制保证内。
+
+`derive` 只接受同 Execution/step/actor/identity 的已保护输入，每个输入都要分别通过
+对应处理用途的 policy gate；全部通过后才调用可信本地 transform。
+既有 DATA/CONTROL edges 全部保留，并按当前输入角色增加来源边，不因同源不同角色
+去重丢失 control influence。输出重新包装 ProtectedContent，不返回裸 transform 结果。
+
+`ConservativeProtectionMerge` 不推测组织 Label 顺序：只支持同 tenant、
+classification/label、policy、保护/DLP/retention/model metadata 一致的合并。
+rights 取交集，restrictions 取并集，期限取更早值，delete-with-source 不降级；
+跨 tenant、不同分类或未知保护明确拒绝，需另行提供受审合并规则才能扩展。
+派生内容保留 sources、lineage、snapshot refs、operation 和新 digest/context，
+仅创建短时 transient ref，不能作为持久恢复依赖；后续 display/model/store 必须再评估，
+不能借用输入的 transform grant。reference/snapshot ID 是 provenance，不是读取许可。
+
+### 18.4 验证与未实施边界
+
+新增 **46 项测试通过**；连同 ES-2 contracts、ES-3 connection 和 ES-4 authentication，
+本轮 **191 passed**。全仓 Ruff lint、Mypy（**210 source files**）、涉及 Python 文件格式、
+diff whitespace 及文档引用检查通过。
+覆盖无策略默认拒绝、精确绑定/伪造/重放/撤销、DENY/REQUIRE、unknown/DLP/rights、
+多用途零 consumer 调用、模型及 embedding、retention、safe audit/error、
+obligation 重查、resolver/verifier 越期、DATA/CONTROL 传播、拒绝降级/跨 tenant、
+派生 buffer 期限、跨实例不可恢复、复查期间正文 mutation/短时 handle 过期。
+测试使用 synthetic fixtures，不访问业务 stores，
+不调用真实模型/embedding/企业网络，也不调整原有 `uv.lock`。
+
+**H1 仍未通过：**这里是完整 buffer 的内核 gate，不是现有 AG-UI SSE、MAF tool rounds、
+compaction/summary、Memory extractor 或全部现有出口的 containment 接线。真实企业
+入口启用前仍必须逐出口集成，并验证拒绝时无 token/frame、请求或正文写入；
+不能把 fixture consumer 未调用当成现有运行链已被保护的证明。
+ES-7 负责安全持久化/index adapters；ES-8 负责唯一 Engine 的集成和全出口 gate。
+真实组织 policy/Label/DLP/source freshness、可信 viewer、持久 audit、retention/
+revocation matrix、dispatch intent 和 WAM 尚未就绪；H1–H4、企业 deny 和 unavailable
+默认全部保持，不宣称真实 Provider 可运行或组织合规。

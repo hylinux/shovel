@@ -28,6 +28,10 @@ class ProtectionDeniedError(ValueError):
     pass
 
 
+class ProtectionAdapterError(RuntimeError):
+    pass
+
+
 class ReferenceUnavailableError(ValueError):
     pass
 
@@ -647,4 +651,6 @@ class ProtectedContent[T](Ephemeral):
         ):
             raise ProtectionDeniedError("Content is unavailable or differs from the authorized binding.")
         permit.consume(binding, now=now)
+        if content_digest(self._value) != metadata.reference.content_digest:
+            raise ProtectionDeniedError("Content changed during protection revalidation.")
         return self._value

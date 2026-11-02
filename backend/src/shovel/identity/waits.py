@@ -1,8 +1,39 @@
-from typing import Protocol
+from __future__ import annotations
 
-from shovel.capability.domain import CapabilityScope
-from shovel.identity.domain import AuthenticationRequest, AuthenticationState, TokenRequest
+from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Protocol
+
+from shovel.capability.domain import CapabilityScope, Digest
+from shovel.identity.domain import AuthContext, AuthenticationRequest, AuthenticationState, TokenRequest
 from shovel.runtime.errors import RuntimeFailure
+
+if TYPE_CHECKING:
+    from shovel.execution.domain import Execution, ExecutionLease
+
+
+class AuthenticationWaitRequired(Exception):
+    def __init__(self, request: TokenRequest, reason: AuthenticationState, operation_digest: str) -> None:
+        self.request = TokenRequest.model_validate(request)
+        self.reason = AuthenticationState(reason)
+        self.operation_digest = operation_digest
+        super().__init__("Execution requires enterprise authentication.")
+
+
+@dataclass(frozen=True)
+class AuthenticationExecutionContext:
+    bind_operation: Callable[[str], Awaitable[None]]
+    authenticated: Callable[[TokenRequest, AuthContext, str], Awaitable[None]]
+    prepare_output: Callable[[], Awaitable[None]]
+
+
+class AuthenticationExecutionLifecycle(Protocol):
+    async def bind_operation(self, lease: ExecutionLease, operation_digest: Digest) -> None: ...
+    async def suspend(self, lease: ExecutionLease, wait: AuthenticationWaitRequired) -> Execution: ...
+    async def authenticated(
+        self, lease: ExecutionLease, request: TokenRequest, context: AuthContext, operation_digest: Digest
+    ) -> None: ...
+    async def prepare_output(self, lease: ExecutionLease) -> None: ...
 
 
 class AuthenticationRequestRepository(Protocol):

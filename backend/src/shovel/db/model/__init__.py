@@ -18,6 +18,7 @@ from .config import Resource, ScanProfile, Schedule
 from .content import BlobRef, Chunk, Document, DocumentDerived
 from .control import ExecutionWakeup
 from .enterprise import EnterpriseConnectionProfile
+from .enterprise_execution import AuthenticationCompletion, ProtectionAudit
 from .execution import ExecutionAttempt, ExecutionStep, Job, JobEvent
 from .identity import AuthenticationRequest, IdentityProfile
 from .interaction import InputRequest, Interaction, Notification, NotificationDelivery
@@ -56,6 +57,7 @@ __all__ = [
     "AgentScope",
     "AppSetting",
     "ApprovalRequest",
+    "AuthenticationCompletion",
     "AuthenticationRequest",
     "BlobRef",
     "CapabilityDefinition",
@@ -99,6 +101,7 @@ __all__ = [
     "NotificationDelivery",
     "Operation",
     "ProactiveService",
+    "ProtectionAudit",
     "Resource",
     "RetrievalFeedback",
     "RetrievalLog",

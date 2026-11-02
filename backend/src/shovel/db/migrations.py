@@ -11,6 +11,7 @@ from shovel.db.model.automation import PROACTIVE_DDL
 from shovel.db.model.capability import CAPABILITY_DDL
 from shovel.db.model.control import WAKEUP_DDL
 from shovel.db.model.enterprise import CONNECTION_DDL
+from shovel.db.model.enterprise_execution import ENTERPRISE_EXECUTION_DDL
 from shovel.db.model.execution import EXECUTION_DDL, KERNEL_INDEX_DDL, STEP_DDL
 from shovel.db.model.identity import AUTHENTICATION_DDL, IDENTITY_DDL
 from shovel.db.model.interaction import INPUT_DDL, INTERACTION_DDL, NOTIFICATION_DDL
@@ -360,6 +361,15 @@ def _upgrade(connection: Connection) -> None:
         connection.execute(
             insert(SchemaMigration).values(
                 version=17, name="source_bound_enterprise_metadata", applied_at=now_ts()
+            )
+        )
+
+    if 18 not in versions:
+        for statement in ENTERPRISE_EXECUTION_DDL:
+            connection.exec_driver_sql(statement)
+        connection.execute(
+            insert(SchemaMigration).values(
+                version=18, name="enterprise_execution_authentication_and_audit", applied_at=now_ts()
             )
         )
 

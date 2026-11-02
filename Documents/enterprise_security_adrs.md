@@ -72,6 +72,14 @@ disabled/unavailable，resolver/broker 明确 unavailable。request 仅为已挂
 期限或预算。没有认证完成入口、自动 Engine 挂起/resume guard/wakeup；这些仍属于 ES-8。
 cancel/dismiss 不授予权限，不隐式取消或恢复 Execution。详见分析第 16 节。
 
+**ES-8 已实施切片**
+
+既有 Engine 通过 typed wait 与同事务 repository 自动挂起认证前的 read-only Function；
+等待原 deadline 不扩大，polling 不自动恢复。明确 resume 后重新静默 acquire、复核 exact
+bindings，再以 migration 18 的不可变 completion fact 投影 `satisfied`，不接收 UI 认证
+boolean/Token、不重写旧 request CHECK/fingerprint。terminal cleanup 与挂起取消竞态
+均走既有生命周期。生产 broker/resolver 仍 unavailable，仅 fixture 装配，见分析第 20 节。
+
 ## ENT-ADR-02 — Windows MSAL/WAM Broker Strategy
 
 **Context**
@@ -417,6 +425,10 @@ cleanup 失败不恢复读取。terminal blocked fences 不提供 reactivation�
 本阶段仅实现失效 primitive，不把 vector DeletionOutbox 复用为任意业务事件；
 durable lifecycle event/delivery/admission、observer 装配和唯一 Engine 接线仍待 ES-8。
 
+ES-8 的隔离 read/display handler 已在既有 Engine 中复核本地 fences，证明认证期间/
+transport 返回后的撤权不会释放内容；不代表上述 durable lifecycle event/observer/
+delivery/admission 装配已经实现。其剩余生产要求保持关闭，详见分析第 20 节。
+
 **Alternatives**
 
 仅内存event可能重启丢revocation；Provider直接启动Workflow绕过统一admission；
@@ -478,6 +490,19 @@ auth wait在已证not-sent阶段才可安全恢复；不能拿Engine早期dispat
 SQLite提交和HTTP发送不可能一个原子事务。崩溃恢复只有可信not-sent/replay-safe
 证据才能重试；“intent已写但未见response”不能推断未发出，默认uncertain并reconcile。
 非幂等外部effects无法因token refresh、401或timeout盲重放，不另建dispatch Runtime。
+
+**ES-8 implemented slice**
+
+可信只读 Function 将 manifest/profile/source/permission 固定到既有 Execution，并在
+认证前提交稳定 operation digest；binding 改变后不隐式换目标。只允许一个 bounded
+decoder 返回 exact source 的 ProtectedContent/DATA lineage。READ 和 DISPLAY 独立检查，
+同步 whole-buffer display 前提交 release intent；结果只保留安全状态收据。可能释放输出
+之后禁止 replay，包括原本标为 retry-safe 的 read。已有 Workflow 完成的 child 不重放。
+
+保护审计先在显式 UoW 提交 safe decision，再用新锁复核 lease、deadline、permissions、
+consumed Approval、source/protection 状态，最后释放；失败 decision 被 revoke。ALLOW
+不是 release receipt。fixture 的安全 display 不证明既有 AG-UI/MAF 全出口已接线，也不
+实现通用 external-write network dispatch receipt/reconciliation；H1/H2 保持必要门槛。
 
 **Security assumptions**
 
@@ -628,6 +653,8 @@ migration 15/16只在隔离测试验证，生产Runtime的resolver/broker仍unav
 ES-5只安装隔离 spike SDK并进行离线检查；ES-6只增加未接入生产出口的保护内核。
 ES-7增加 metadata/reference-only repository、migration 17、本地失效/删除与 index 基础；
 没有企业正文/自动 embedding/index writer、Runtime 或现有 Memory/Knowledge 接线。
-没有真实企业认证、主项目认证SDK、自动认证挂起/完成/恢复或enterprise deny解除。
+ES-8 增加既有 Engine 的隔离 read/authentication/protection/display 集成、migration 18、
+原子认证挂起/手动恢复与安全持久审计；生产仍没有真实企业认证、主项目认证SDK、
+Provider/组织 policy/source adapters 或 enterprise deny 解除，见分析第 20 节。
 H1–H4仍是后续阶段硬门槛，
 不能把契约测试当作其运行时验证或组织批准。

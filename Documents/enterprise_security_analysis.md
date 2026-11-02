@@ -9,6 +9,10 @@
 **ES-6 进度：另行获准的默认拒绝策略内核、受控消费及保守派生传播已实现，
 见第 18 节；尚未接入现有 AG-UI/模型/存储出口，不代表 H1–H4 已通过。**
 
+**ES-8 进度：已实施既有 Engine 的隔离只读企业 Function 集成、原子认证等待/
+手动恢复、持久审计与完整 buffer 展示门控，见第 20 节。只装配 synthetic fixtures，
+不启用生产 Provider、WAM、自动索引或既有 AG-UI/Memory 的企业数据入口。**
+
 需求依据为 `Documents\enterprise_security_foundation.md`，特别是其中的
 ENT-SEC-01 至 ENT-SEC-18、分阶段实施要求和本轮十五项输出。
 本报告配套 [Enterprise Security ADRs](enterprise_security_adrs.md)，不替代现有
@@ -466,7 +470,7 @@ Enterprise Provider”成为 protection bypass；其分类/ingress UX 是上线�
 | ES-5 | 当前仅完成另行获准的隔离 Python SDK 离线验收 spike，见第 17 节 | 真实 WAM/生产路线仍未通过；后续需 approved tenant 的显式 opt-in Windows交互测试；无真实业务 Provider |
 | ES-6 | 已实施 deny-default Data Protection kernel、保守 merge/lineage、ModelProfile 检查、safe decision/audit contract，见第 18 节 | 每种要求未满足不得 release；无生产 policy/audit adapter；AG-UI/现有模型和存储接线仍待 ES-7/8，H1 不宣称通过 |
 | ES-7 | 已实施 metadata-only SQLite、source fences/lineage/invalidation、独立无正文 vector schema、删除 adapter 与候选回查，见第 19 节 | 无自动 embedding/index writer、生产查询或旧 Memory/Knowledge 接线；不默认为邮件全文建立索引 |
-| ES-8 | test fixture Provider -> resolver -> fake auth -> transport -> protection -> safe display/deny，走既有 Engine | 原子 auth wait/restart/resume、pre-effect Approval、source invalidation、所有裸出口 containment |
+| ES-8 | 已实施 fixture Provider -> resolver -> fake auth -> transport -> protection -> safe display/deny，走既有 Engine，见第 20 节 | 原子 auth wait/restart/manual resume、既有 Approval、source fences、redacted audit；仅证明新增完整 buffer 路径，全出口 containment 仍未通过 |
 | ES-9 | 需求完整 failure/security test matrix | adversarial response、跨边界泄漏、race/recovery、Windows broker evidence；真实 Provider 仍不默认启用 |
 | ES-10 | synthetic sample、authoring/connection/auth/protection/logging/testing guides | sample 不连接真实公司、不使用真实 Token；演示 ALLOW/DENY/auth wait/derived lineage |
 
@@ -965,3 +969,91 @@ H1–H4、WAM 实测和唯一 Engine/全出口 containment 接线仍是硬门槛
 retention ref 的逻辑 gate 不代表 H4 已批准：本切片保留保护 metadata/tombstones，
 不提供 approved retention purge、WAL/backup 安全擦除、Zvec 物理安全删除或向量加密保证，
 也不声称旧 binary/raw SQL 或同进程恶意代码受 Python adapter 隔离。
+
+## 20. ES-8 既有 Engine 隔离集成切片
+
+### 20.1 安装、绑定与唯一执行路径
+
+`enterprise\execution.py` 的 `EnterpriseReadHandler` 是可信 Function handler，不建第二套
+Registry/Engine/Runtime。`EnterpriseReadPlan` 将安装 manifest、启用的逻辑 identity/
+connection、精确 source/version/generation、TokenRequest 与既有冻结 Execution 绑定；
+要求安装的 read-only Function、声明的 connection requirement，以及 required 和 frozen
+granted permissions 中精确的 `enterprise.read`/connection pair。第一次执行提交 operation
+digest，后续 resume 不得静默更换 source、tenant、connection/identity revision 或 target。
+request id 和短时 claims ref 不进入该稳定 operation digest，原 safe request fingerprint
+与已发布版本 hash 不重写。
+
+测试在既有 Kernel 中显式注入只接受 synthetic connection 的 PolicyEvaluator、可信
+FunctionContract、resolver、fake broker/transport/decoder/display 和 PolicyStateProvider；
+不删 connection requirement 来绕过默认 gate。生产 Runtime 仅共享 authentication lifecycle
+repository；installed enterprise catalog/Function registrations 仍为空，connection-backed
+PolicyEvaluator 仍拒绝，resolver/broker 仍 unavailable，没有新 enable/bypass 配置。
+
+### 20.2 认证等待、完成事实与取消
+
+认证发生在 business transport 之前；需要用户动作的安全 taxonomy 抛出 typed wait，由
+Engine 与 `SQLiteAuthenticationRepository` 在一个 SQLite UoW 中结束当前 attempt/step、
+挂起既有 Operation、保存安全 request/control、创建 Interaction/Notification。等待沿用
+原 Execution deadline/预算；同 attempt 去重，新 attempt 取消旧的未完成 request，再创建
+新 pending request。SQL/投影失败整体回滚，然后既有 Engine 以安全错误结束该次执行。
+
+timer/child polling 不自动恢复 authentication wait。用户明确 resume 后必须重新解析、
+静默 acquire，并复核 profile/source/operation/request/scope/correlation 与 live permission/
+Approval；UI boolean、dismiss 或 pending request 的存在都不是认证证明。没有新增接受
+Token/claims 的 API，也没有“登录即批准业务”的入口。重启不保留 AuthContext；需要 fresh
+claims challenge 时只能重新提供可信短时 ref，未提供则不发 business request。
+
+migration **18** 增加 append-only `authentication_completion`，只在当前 running Execution、
+精确 pending binding 与原 deadline 内插入。对外 `satisfied` 是该不可变完成事实的投影，
+不改旧 request 表的 state CHECK、不伪装成 cancelled，也不重写旧请求 fingerprint。
+cancel/timeout/terminal cleanup 同事务退休未完成 request、解析 Interaction；已满足的
+事实不降级成 cancelled。Engine 的认证挂起 await 被调用方取消时，无论事务提交前后，
+都清理既有 Execution，不留下 running lease 或 pending 待办。
+
+### 20.3 门控、审计与不确定输出
+
+transport 只能调用一次 bounded decoder，最多 262144 bytes；必须返回该 decoder 产生的
+ProtectedContent，精确匹配 source，包含 DATA lineage，不能把 CONTROL-only、derived、
+wrong-source 或裸 JSON 当成源响应。完整 buffer 先独立通过 READ/WORKFLOW_STATE gate，
+再通过 DISPLAY/USER_SCREEN gate；普通 Function output/checkpoint 只保存
+`{"status": "displayed"}`，不保存正文、Token、claims 或 exception descriptions。
+没有模型、embedding、index、Memory/Knowledge 写入或通用 stream/body fallback。
+
+`SQLitePolicyAudit` 只接受 allowlisted safe decision facts，绑定当前 asyncio task 和显式
+SQLite UoW；migration 18 的 `protection_audit` 保留 scoped、不可更新/删除的事实。
+`use_bound()` 先复核 lease、ancestors、原 deadline、live platform permission/consumed
+Approval、source fences，评估并提交 audit；然后在新的本地写锁内重新复核这些状态和
+live protection authority，才消费单次 permit 并调用同步 trusted whole-buffer consumer。
+audit 插入/提交失败不会释放内容；未消费或失败的 decision 也立即 revoke。
+
+**ALLOW audit 是决策，不是成功输出收据。** 两阶段之间的撤权仍然阻断释放；
+本地 source/platform preflight 拒绝可能只有安全 Execution failure，而没有策略 audit。
+display 之前提交 `enterprise_release_started`。之后即使 consumer 抛错、结果不明或重启，
+也禁止自动 retry/resume/recovery replay，要求 reconciliation；这保守地覆盖“尚未发出
+frame 就失败”的情况。先前完成的 Workflow children 复用既有 child key/checkpoint，
+认证等待恢复不重跑它们。
+
+### 20.4 验证与仍然关闭的边界
+
+隔离集成测试在 `backend\tests\test_enterprise_execution.py`，覆盖实际既有 Engine 的
+read/display、deny/unknown protection、持久审计失败和审计后撤权、认证原子回滚、
+restart/manual resume、原期限、重复 wait、cancel/dismiss、claims freshness、错误
+tenant/audience、profile revisions、source revocation、live permission/Approval、bounded/
+bypassed decoder、日志与所有 SQLite 表正文/Token 哨兵检查、append-only guards、
+migration 18 repeatability、已完成 child 不重放及不确定输出不重试。
+
+最终新增 **45 项集成测试全部通过**。Engine、Workflow、Security、Runtime、
+enterprise contracts/authentication/protection/persistence/vector 与 migrations 的
+16 文件针对性回归为 **637 passed、1 failed**；其中已包含此前 44 项新增测试，
+不与最后的 45 项重复累加。唯一失败为既有
+`test_mcp_restart_closes_real_connection_and_loads_new_config_without_losing_sessions`：
+当前 agent-framework 需要 `mcp.Client`，已安装 mcp 不提供该入口。未修改依赖或 dirty
+`uv.lock` 来掩盖此无关兼容问题。最终 Ruff 全仓 lint、Mypy（217 source files）、
+22 个涉及 Python 文件的格式与 diff whitespace 检查通过；不称为全量测试全绿。
+
+这是 synthetic read-only/display 路径的集成证据，不是生产认证或全出口 containment：
+真实 WAM/组织信任 adapter、source observer/durable lifecycle delivery、现有 AG-UI SSE/
+MAF/model/Artifact/Memory/Knowledge 的企业接线仍未实施。没有通用 external-write
+durable network dispatch/reconciliation、自动 index writer 或合规 retention purge；
+H1–H4 保持关闭，不把 append-only audit 当作 H4 的组织批准。没有接触用户 stores、
+真实企业账户/业务数据或模型/embedding 网络端点。

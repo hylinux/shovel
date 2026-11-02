@@ -19,6 +19,7 @@ from shovel.execution.domain import (
     ExecutionStep,
     ExecutorResult,
 )
+from shovel.identity.waits import AuthenticationExecutionContext
 
 if TYPE_CHECKING:
     from shovel.security.ports import ExecutionGate
@@ -31,6 +32,8 @@ class ExecutorContext:
     consume: Callable[[BudgetUsage], Awaitable[Execution]]
     call: Callable[[ChildInvocation], Awaitable[Execution]]
     workflow: WorkflowContext | None = None
+    authentication: AuthenticationExecutionContext | None = None
+    lease: ExecutionLease | None = None
 
 
 class CapabilityExecutor(Protocol):

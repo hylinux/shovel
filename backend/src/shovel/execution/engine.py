@@ -24,6 +24,14 @@ from shovel.execution.domain import (
 from shovel.execution.invocation import InvocationService
 from shovel.execution.ports import CapabilityExecutor, ExecutorContext
 from shovel.execution.validation import validate_data
+from shovel.identity.domain import AuthContext, TokenRequest
+from shovel.identity.errors import AuthenticationError
+from shovel.identity.waits import (
+    AuthenticationExecutionContext,
+    AuthenticationExecutionLifecycle,
+    AuthenticationWaitRequired,
+)
+from shovel.protection.domain import ProtectionDeniedError
 from shovel.runtime.errors import NotFound, RuntimeFailure
 from shovel.security.domain import SecurityDenied
 from shovel.workflow.ports import WorkflowContext
@@ -38,6 +46,7 @@ class ExecutionEngine:
         clock: Callable[[], float] = time.time,
         workflow_context: Callable[[ExecutionLease], WorkflowContext] | None = None,
         wakeups: ExecutionWakeupService | None = None,
+        authentication_waits: AuthenticationExecutionLifecycle | None = None,
     ) -> None:
         if set(executors) != set(CapabilityKind):
             raise ValueError("Exactly one executor is required for every capability kind.")
@@ -45,6 +54,7 @@ class ExecutionEngine:
         self._executors = dict(executors)
         self._workflow_context = workflow_context
         self.wakeups = wakeups
+        self.authentication_waits = authentication_waits
         self._active: dict[str, asyncio.Task[ExecutorResult]] = {}
         self._dispatches: set[asyncio.Future[None]] = set()
         self._log = structlog.get_logger("shovel.execution")
@@ -90,11 +100,27 @@ class ExecutionEngine:
                 return await self.run(scope, child.id)
             return child
 
+        authentication = None
+        if self.authentication_waits is not None:
+            lifecycle = self.authentication_waits
+
+            async def bind_operation(digest: str) -> None:
+                await lifecycle.bind_operation(lease, digest)
+
+            async def authenticated(request: TokenRequest, credential: AuthContext, digest: str) -> None:
+                await lifecycle.authenticated(lease, request, credential, digest)
+
+            async def prepare_output() -> None:
+                await lifecycle.prepare_output(lease)
+
+            authentication = AuthenticationExecutionContext(bind_operation, authenticated, prepare_output)
         context = ExecutorContext(
             execution=execution,
             consume=consume,
             call=call,
             workflow=self._workflow_context(lease) if self._workflow_context else None,
+            authentication=authentication,
+            lease=lease,
         )
         completion: asyncio.Future[None] = asyncio.get_running_loop().create_future()
         self._dispatches.add(completion)
@@ -125,6 +151,26 @@ class ExecutionEngine:
             return await self.repository.get(scope, identifier)
         except BudgetExceeded, TimeoutError:
             return await self.fail(lease, error_code="budget_exceeded")
+        except AuthenticationWaitRequired as wait:
+            if self.authentication_waits is None:
+                return await self.fail(lease, error_code="authentication_unavailable")
+            try:
+                return await self.authentication_waits.suspend(lease, wait)
+            except asyncio.CancelledError:
+                with CancelScope(shield=True):
+                    current = await self.repository.get(scope, identifier)
+                    if not current.state.terminal:
+                        await self.cancel(scope, identifier)
+                raise
+            except Exception as exc:
+                self._log.error("execution.authentication_wait_failed", error_type=type(exc).__name__)
+                return await self.fail(lease, error_code="authentication_wait_failed")
+        except AuthenticationError as error:
+            return await self.fail(lease, error_code=error.code)
+        except ProtectionDeniedError:
+            return await self.fail(lease, error_code="data_use_denied")
+        except SecurityDenied:
+            return await self.fail(lease, error_code="security_denied")
         except TransientExecutionError:
             self._log.warning("execution.transient_failure", execution_id=identifier)
             if self.wakeups is None:

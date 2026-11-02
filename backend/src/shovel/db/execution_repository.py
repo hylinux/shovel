@@ -10,10 +10,13 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from shovel.capability.domain import CapabilityScope
+from shovel.db.authentication_lifecycle import retire_authentication
 from shovel.db.base import new_id
 from shovel.db.model.capability import CapabilityDefinition, CapabilityVersion, CapabilityVersionAvailability
+from shovel.db.model.enterprise_execution import AuthenticationCompletion
 from shovel.db.model.execution import ExecutionAttempt as AttemptRow
 from shovel.db.model.execution import ExecutionStep as StepRow
+from shovel.db.model.identity import AuthenticationRequest
 from shovel.db.model.runtime import Operation
 from shovel.db.unit_of_work import sqlite_write
 from shovel.domain.safe_data import ensure_no_credentials
@@ -447,6 +450,8 @@ class SQLiteExecutionRepository:
             else:
                 raise RuntimeFailure("Execution claim has no durable attempt.", status=409)
         row.claim_token = None
+        if state.terminal:
+            await retire_authentication(session, row, self.clock())
 
     async def _cancel_rows(self, session: AsyncSession, rows: list[Operation]) -> list[str]:
         cancelled: list[str] = []
@@ -507,6 +512,39 @@ class SQLiteExecutionRepository:
             return cancelled
 
     async def ensure_resumable(self, session: AsyncSession, row: Operation) -> None:
+        if row.execution_control.get("enterprise_release_started"):
+            raise RuntimeFailure(
+                "Enterprise output may have been released; reconciliation is required.", status=409
+            )
+        authentication = row.execution_control.get("authentication")
+        if isinstance(authentication, dict):
+            request_id = authentication.get("request_id")
+            request = (
+                await session.get(AuthenticationRequest, request_id) if isinstance(request_id, str) else None
+            )
+            completion = (
+                await session.get(AuthenticationCompletion, request_id)
+                if isinstance(request_id, str)
+                else None
+            )
+            scope = _record(row).snapshot.context.scope
+            if (
+                request is None
+                or request.execution_id != row.id
+                or (request.workspace_id, request.user_id) != (scope.workspace_id, scope.user_id)
+                or authentication.get("operation_digest")
+                != row.execution_control.get("enterprise_operation_digest")
+                or (completion is None and (request.state != "pending" or request.expires_at <= self.clock()))
+                or (
+                    completion is not None
+                    and (
+                        completion.execution_id != row.id
+                        or completion.binding_digest != request.binding_digest
+                        or completion.operation_digest != authentication.get("operation_digest")
+                    )
+                )
+            ):
+                raise RuntimeFailure("Authentication wait is no longer resumable.", status=409)
         if row.execution_control.get("wait_reason") == "interrupted" and not row.execution_control.get(
             "replay_safe"
         ):
@@ -551,6 +589,7 @@ class SQLiteExecutionRepository:
             if row.state != ExecutionState.QUEUED.value:
                 raise RuntimeFailure("Only an unclaimed execution can be rejected.", status=409)
             row.state, row.error, row.finished_at = ExecutionState.FAILED.value, error, int(self.clock())
+            await retire_authentication(session, row, self.clock())
             row.row_version += 1
             await session.commit()
             return _record(row)

@@ -11,12 +11,16 @@ from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from shovel.capability.domain import CapabilityScope
+from shovel.db.approval_repository import SQLiteApprovalRepository
+from shovel.db.execution_repository import SQLiteExecutionRepository, _record
 from shovel.db.model.protection import EnterpriseMetadata as MetadataRow
 from shovel.db.model.protection import EnterpriseMetadataSource as SourceRow
 from shovel.db.model.protection import EnterpriseSourceFence as FenceRow
 from shovel.db.model.retrieval import DeletionOutbox
+from shovel.db.protection_audit import SQLitePolicyAudit
 from shovel.db.unit_of_work import sqlite_write
 from shovel.domain.enums import DeletionScope
+from shovel.execution.domain import BudgetExceeded, ExecutionLease
 from shovel.protection.domain import (
     DataAction,
     DataDestination,
@@ -27,6 +31,7 @@ from shovel.protection.domain import (
     ProtectedContentRef,
     ProtectionAdapterError,
     ProtectionDeniedError,
+    SourceBinding,
     TransientContentHandle,
     content_digest,
 )
@@ -41,6 +46,8 @@ from shovel.protection.persistence import (
 from shovel.protection.policy import ProtectionPolicy
 from shovel.protection.service import ProtectionService
 from shovel.runtime.errors import RuntimeFailure
+from shovel.security.domain import SecurityDenied
+from shovel.security.ports import ExecutionGate
 
 
 class SQLiteProtectionRepository:
@@ -111,16 +118,26 @@ class SQLiteProtectionRepository:
     async def _fences(
         self, session: AsyncSession, record: EnterpriseMetadata, *, allow_new: bool = False
     ) -> dict[str, FenceRow]:
+        return await self._source_fences(session, record.scope, record.context.sources, allow_new=allow_new)
+
+    async def _source_fences(
+        self,
+        session: AsyncSession,
+        scope: CapabilityScope,
+        sources: tuple[SourceBinding, ...],
+        *,
+        allow_new: bool = False,
+    ) -> dict[str, FenceRow]:
         fences: dict[str, FenceRow] = {}
-        for source in record.context.sources:
+        for source in sources:
             key = source_key(source.resource)
             if key in fences:
                 continue
-            fence = await session.get(FenceRow, (record.scope.workspace_id, record.scope.user_id, key))
+            fence = await session.get(FenceRow, (scope.workspace_id, scope.user_id, key))
             if fence is None and allow_new and source.source_generation == 0:
                 fence = FenceRow(
-                    workspace_id=record.scope.workspace_id,
-                    user_id=record.scope.user_id,
+                    workspace_id=scope.workspace_id,
+                    user_id=scope.user_id,
                     source_key=key,
                     generation=0,
                     blocked=False,
@@ -129,6 +146,84 @@ class SQLiteProtectionRepository:
                 raise ProtectionDeniedError("Source is unavailable, revoked or has a different generation.")
             fences[key] = fence
         return fences
+
+    async def check_sources(self, scope: CapabilityScope, sources: tuple[SourceBinding, ...]) -> None:
+        scope = CapabilityScope.model_validate(scope)
+        sources = tuple(SourceBinding.model_validate(source) for source in sources)
+        if not sources:
+            raise ProtectionDeniedError("A protected source binding is required.")
+        async with self._transaction() as session:
+            await self._source_fences(session, scope, sources, allow_new=True)
+
+    async def _active(self, session: AsyncSession, lease: ExecutionLease, gate: ExecutionGate) -> None:
+        executions = SQLiteExecutionRepository(self._sessions, clock=self._clock)
+        row = await executions._find(session, lease.execution.snapshot.context.scope, lease.execution.id)
+        executions._leased(row, lease)
+        for ancestor in await executions._lineage(session, row):
+            if ancestor.state != "running":
+                raise SecurityDenied("Execution is no longer active.")
+            if ancestor.execution_deadline is None or self._clock() >= ancestor.execution_deadline:
+                raise BudgetExceeded("duration")
+        evaluation = await gate.evaluate(_record(row))
+        if evaluation.approval.required:
+            approval = await SQLiteApprovalRepository.latest(session, row.id)
+            if (
+                approval is None
+                or approval.state != "consumed"
+                or approval.binding_hash != evaluation.binding_hash
+                or approval.expires_at <= self._clock()
+            ):
+                raise SecurityDenied("Current execution approval is not usable.")
+
+    async def check_execution(self, lease: ExecutionLease, gate: ExecutionGate) -> None:
+        async with self._transaction() as session:
+            await self._active(session, lease, gate)
+
+    async def use_bound[T, R](
+        self,
+        lease: ExecutionLease,
+        content: ProtectedContent[T],
+        binding: DataUseBinding,
+        consumer: Callable[[T], R],
+        *,
+        gate: ExecutionGate,
+        proofs: tuple[ObligationProof, ...] = (),
+    ) -> R:
+        scope = lease.execution.snapshot.context.scope
+        binding = DataUseBinding.model_validate(binding)
+        if (
+            binding.execution_id != lease.execution.id
+            or binding.actor_id != lease.execution.snapshot.context.actor_id
+            or any(
+                (item.workspace_id, item.user_id) != (scope.workspace_id, scope.user_id)
+                for item in binding.identities
+            )
+            or binding.action not in {DataAction.READ, DataAction.DISPLAY}
+        ):
+            raise ProtectionDeniedError("Protected release requires an exact live execution binding.")
+        audit = self._gate.policy.audit
+        if not isinstance(audit, SQLitePolicyAudit):
+            raise ProtectionDeniedError("Durable protection audit is unavailable.")
+        decision = None
+        try:
+            async with self._transaction() as session:
+                await self._active(session, lease, gate)
+                await self._source_fences(
+                    session, scope, content.metadata.protection_context.sources, allow_new=True
+                )
+                with audit.bind(session, scope, lease.execution.id):
+                    decision = self._gate.policy.evaluate(content.metadata.protection_context, binding)
+                await session.commit()
+            # Audit is durable before release; a new locked read fences local revocation/cancel.
+            async with self._transaction() as session:
+                await self._active(session, lease, gate)
+                await self._source_fences(
+                    session, scope, content.metadata.protection_context.sources, allow_new=True
+                )
+                return self._gate.use_decision(content, binding, decision, consumer, proofs=proofs)
+        finally:
+            if decision is not None:
+                self._gate.policy.revoke(decision.id)
 
     def _fresh_snapshots(self, record: EnterpriseMetadata) -> None:
         now = self._clock()

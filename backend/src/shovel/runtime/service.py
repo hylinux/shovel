@@ -135,6 +135,7 @@ class Runtime:
         )
         self.notifications = NotificationService(interaction_repository)
         self.operation_queries = OperationQueries(SQLiteOperationReader(sessions))
+        authentication_repository = SQLiteAuthenticationRepository(sessions)
         self.execution_engine = ExecutionEngine(
             self.invocations,
             {
@@ -153,6 +154,7 @@ class Runtime:
             },
             workflow_context=self.workflows.bind,
             wakeups=self.wakeups,
+            authentication_waits=authentication_repository,
         )
         self.platform = PlatformApplication(
             scope,
@@ -175,7 +177,7 @@ class Runtime:
                 UnavailableAuthenticationResolver(),
                 UnavailableWindowsBroker(),
             ),
-            authentication_requests=AuthenticationRequests(SQLiteAuthenticationRepository(sessions)),
+            authentication_requests=AuthenticationRequests(authentication_repository),
         )
         self.operations: OperationService = OperationService(self)
         self.retrieval: RetrievalService = RetrievalService(self)

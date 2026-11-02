@@ -154,6 +154,7 @@ class SQLiteExecutionControlRepository:
             )
             retries = int(row.execution_control.get("retry_count", 0))
             wake_at = self.clock() + policy.backoff(retries)
+            safe = safe and not row.execution_control.get("enterprise_release_started", False)
             if (
                 not safe
                 or retries + 1 >= policy.max_attempts
@@ -181,6 +182,8 @@ class SQLiteExecutionControlRepository:
         if isinstance(wake_at, int | float) and wake_at > self.clock():
             return False
         reason = _record(row).wait_reason
+        if reason == "waiting_for_authentication":
+            return False
         if reason == "waiting_for_approval":
             request = await SQLiteApprovalRepository.latest(session, row.id)
             return request is not None and request.state == "approved" and request.expires_at > self.clock()
@@ -445,7 +448,9 @@ class SQLiteExecutionControlRepository:
                 )
             )
             for row in rows:
-                replay_safe = safe(_record(row).snapshot.capability.content)
+                replay_safe = not row.execution_control.get("enterprise_release_started") and safe(
+                    _record(row).snapshot.capability.content
+                )
                 await self._finish(session, row, ExecutionState.SUSPENDED, "interrupted")
                 row.execution_control = {
                     **row.execution_control,

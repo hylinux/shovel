@@ -269,7 +269,7 @@ class AuthenticationRequest(IdentityValue):
     request: TokenRequest
     binding_digest: Digest
     reason: AuthenticationState
-    state: Literal["pending", "cancelled", "expired"]
+    state: Literal["pending", "cancelled", "expired", "satisfied"]
     requires_fresh_challenge: bool = Field(default=False, strict=True)
     created_at: UnixSeconds
     expires_at: UnixSeconds

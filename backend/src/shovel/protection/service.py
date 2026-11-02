@@ -12,6 +12,7 @@ from shovel.protection.domain import (
     Lineage,
     LineageEdge,
     ObligationProof,
+    PolicyDecision,
     ProtectedContent,
     ProtectedContentMetadata,
     ProtectedContentRef,
@@ -117,6 +118,23 @@ class ProtectionService:
     ) -> R:
         self._check_content(content)
         permit = self.policy.permit(content.metadata.protection_context, binding, proofs=proofs)
+        value = content.release(permit, binding, now=self.clock())
+        self._check_content(content)
+        return _invoke(consumer, value)
+
+    def use_decision[T, R](
+        self,
+        content: ProtectedContent[T],
+        binding: DataUseBinding,
+        decision: PolicyDecision,
+        consumer: Callable[[T], R],
+        *,
+        proofs: tuple[ObligationProof, ...] = (),
+    ) -> R:
+        self._check_content(content)
+        if decision.binding != binding:
+            raise ProtectionDeniedError("Persisted decision differs from the intended data use.")
+        permit = self.policy.authorize(decision, proofs=proofs)
         value = content.release(permit, binding, now=self.clock())
         self._check_content(content)
         return _invoke(consumer, value)

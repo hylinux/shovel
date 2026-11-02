@@ -9,6 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from shovel.capability.domain import CapabilityScope
 from shovel.db.execution_repository import _record
 from shovel.db.model.enterprise import EnterpriseConnectionProfile
+from shovel.db.model.enterprise_execution import AuthenticationCompletion
 from shovel.db.model.identity import AuthenticationRequest, IdentityProfile
 from shovel.db.model.interaction import InputRequest, Interaction, Notification, NotificationDelivery
 from shovel.db.model.runtime import Operation
@@ -134,6 +135,7 @@ class SQLiteInteractionRepository:
                 )
                 .where(
                     AuthenticationRequest.state == "pending",
+                    AuthenticationRequest.id.not_in(select(AuthenticationCompletion.request_id)),
                     or_(
                         AuthenticationRequest.expires_at <= now,
                         Operation.state.in_(("succeeded", "failed", "cancelled")),
@@ -300,7 +302,12 @@ class SQLiteInteractionRepository:
                                 Interaction.source_kind == "authentication_request",
                                 Interaction.source_id.in_(
                                     select(AuthenticationRequest.id).where(
-                                        AuthenticationRequest.state != "pending",
+                                        or_(
+                                            AuthenticationRequest.state != "pending",
+                                            AuthenticationRequest.id.in_(
+                                                select(AuthenticationCompletion.request_id)
+                                            ),
+                                        ),
                                     )
                                 ),
                             ),
@@ -313,7 +320,11 @@ class SQLiteInteractionRepository:
                 execution = await session.get(Operation, row.execution_id)
                 if row.source_kind == "authentication_request":
                     authentication = await session.get(AuthenticationRequest, row.source_id)
-                    pending = authentication is not None and authentication.state == "pending"
+                    pending = (
+                        authentication is not None
+                        and authentication.state == "pending"
+                        and await session.get(AuthenticationCompletion, row.source_id) is None
+                    )
                 elif row.source_kind == "approval":
                     approval = await session.get(ApprovalRequest, row.source_id)
                     pending = approval is not None and approval.state == "pending"

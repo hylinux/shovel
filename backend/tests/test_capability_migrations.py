@@ -59,7 +59,7 @@ async def test_version_six_database_upgrade_preserves_receipts_and_is_repeatable
             versions = list(
                 await session.scalars(select(SchemaMigration.version).order_by(SchemaMigration.version))
             )
-            assert versions == list(range(1, 18))
+            assert versions == list(range(1, 19))
         async with engine.connect() as connection:
             assert not (await connection.execute(text("PRAGMA foreign_key_check"))).all()
             tables = await connection.run_sync(lambda sync: inspect(sync).get_table_names())

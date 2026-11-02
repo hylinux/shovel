@@ -811,6 +811,7 @@ async def test_legacy_operation_migration_preserves_rows_and_is_repeatable(tmp_p
                 14,
                 15,
                 16,
+                17,
             ]
     finally:
         await context.aclose()
@@ -2216,6 +2217,7 @@ async def test_existing_database_upgrade_and_fts_backfill(tmp_path: Path) -> Non
                 14,
                 15,
                 16,
+                17,
             ]
             assert await session.scalar(text("SELECT count(*) FROM chunk_search")) == 1
             assert (

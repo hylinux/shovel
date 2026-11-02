@@ -79,6 +79,10 @@ class ChunkVectorSink(Protocol):
     async def aclose(self) -> None: ...
 
 
+class EnterpriseVectorDeletionSink(Protocol):
+    async def delete_ids(self, identifiers: tuple[str, ...]) -> None: ...
+
+
 class NullVectorSink:
     """丢弃一切写入。用于 ``--no-embed`` 与测试。"""
 
@@ -95,14 +99,8 @@ class NullVectorSink:
         return None
 
 
-class ZvecChunkSink:
-    """真正写 Zvec 的实现。
-
-    Zvec 的 Python 接口是同步的, 而编排层是 async。这里用
-    ``asyncio.to_thread`` 把它挪出事件循环 —— 和解析器同样的理由:
-    一次几千条的批量写入会阻塞事件循环好几百毫秒, 期间进度输出
-    和取消信号都会卡住。
-    """
+class _ZvecIO:
+    """Serialize native work and wait for cancellation before closing a collection."""
 
     def __init__(self, collection: Any) -> None:
         self._collection = collection
@@ -128,6 +126,16 @@ class ZvecChunkSink:
             # A cancelled coroutine must not leave native I/O racing collection.close().
             await task
             raise
+
+    async def aclose(self) -> None:
+        if self._collection is None:
+            return
+        collection, self._collection = self._collection, None
+        await self._io(collection.close)
+
+
+class ZvecChunkSink(_ZvecIO):
+    """Write personal knowledge vectors outside the event loop."""
 
     async def upsert(self, records: Sequence[VectorRecord]) -> int:
         if not records:
@@ -192,13 +200,6 @@ class ZvecChunkSink:
     async def delete_resource(self, resource_id: str) -> int:
         return await self._delete(f'resource_id = "{_escape(resource_id)}"')
 
-    async def aclose(self) -> None:
-        if self._collection is None:
-            return
-
-        collection, self._collection = self._collection, None
-        await self._io(collection.close)
-
     # ----------------------------------------------------------------- #
     # 内部
     # ----------------------------------------------------------------- #
@@ -249,6 +250,56 @@ class ZvecChunkSink:
                 "created_at": now_ts(),
             },
         )
+
+
+class ZvecEnterpriseDeletionSink(_ZvecIO):
+    """Deletion only; never opens/creates a collection or accepts content writes."""
+
+    def __init__(self, collection: Any) -> None:
+        from zvec import DataType
+
+        from shovel.vector.schema import enterprise_collection_schema
+
+        try:
+            schema = collection.schema
+            expected = enterprise_collection_schema(dim=1)
+            compatible = (
+                schema.name == expected.name
+                and {(field.name, field.data_type, field.nullable) for field in schema.fields}
+                == {(field.name, field.data_type, field.nullable) for field in expected.fields}
+                and len(schema.vectors) == 1
+                and schema.vectors[0].name == DENSE_VECTOR
+                and schema.vectors[0].data_type == DataType.VECTOR_FP32
+                and schema.vectors[0].dimension > 0
+            )
+        except Exception:
+            raise VectorSinkError("Enterprise vector schema inspection failed.") from None
+        if not compatible:
+            raise VectorSinkError("Enterprise vector collection schema is incompatible.")
+        super().__init__(collection)
+
+    async def delete_ids(self, identifiers: tuple[str, ...]) -> None:
+        from shovel.protection.persistence import EnterpriseVectorDeletion
+
+        try:
+            deletion = EnterpriseVectorDeletion(ids=identifiers)
+
+            def remove() -> None:
+                _ensure_ok(
+                    self._collection.delete([str(item) for item in deletion.ids]),
+                    "Enterprise vector deletion",
+                )
+                self._collection.flush()
+
+            await self._io(remove)
+        except Exception:
+            raise VectorSinkError("Enterprise vector deletion failed.") from None
+
+    async def aclose(self) -> None:
+        try:
+            await super().aclose()
+        except Exception:
+            raise VectorSinkError("Enterprise vector collection close failed.") from None
 
 
 def _ensure_ok(result: Any, what: str) -> None:

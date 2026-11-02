@@ -353,6 +353,20 @@ ES-2引用明确区分transient/source-resolvable/persisted artifact。durable w
 checkpoint不得依赖纯transient输出；ArtifactRef形状不证明已存在、加密或获准落盘。
 不重放已完成model child制造“恢复成功”，refetch必须匹配source version并重新授权。
 
+**ES-7 implemented slice**
+
+migration 17 将严格 context/source/snapshot/derived/embedding metadata 保存在
+enterprise_metadata，另有 scoped source fences 和不可变依赖边；没有企业正文或 vector
+buffer 字段。PERSIST 授权绑定整个 metadata digest，read 每次重新 gate，本地 tombstone
+和 context expiry/revalidation 同时参与检查。保存过的 snapshot 不是读取授权。
+派生 metadata 明确 body_recovery=unavailable，不存 transient handle、不用 source 原文
+冒充生成结果，也不自动重跑模型。索引候选先精确匹配 SQLite 的 descriptor 再重授权。
+
+独立无 text/FTS 的 enterprise schema 与 deletion-only adapter 已实施，复用既有 native I/O
+和 DeletionOutbox，flush 后才 ack；未安装的 sink 不消费企业 intent。未自动建集合、
+embedding、INDEX writer、rebuild/cutover、生产 query 或 Memory/Knowledge 接线。
+测试原生 upsert 仅在隔离 fixture 内执行。详见分析第 19 节，不扩大为生产或 H4 批准。
+
 **H4硬门槛：**后续为正文、metadata、vector、summary、control lineage、artifact、
 cache/audit分别取得retention/offline/revocation/delete矩阵；WAL/backup及不可用行为
 也在范围内，不因为metadata-only或local-first默认无限保留。
@@ -392,6 +406,16 @@ egress/写入。outbox再交给既有bus/matching，幂等admission进入唯一E
 采用at-least-once+scoped stable event/admission keys；已完成child不重复。
 业务pause/quiet/cooldown不丢security invalidation；metadata失效先完成，cleanup可以重试。
 late callbacks与rebuild在commit/release前重查generation。
+
+**ES-7 implemented slice**
+
+受审 SourceChangeAuthority 验证明确 source 事件；缺适配器默认拒绝。同事务更新
+scoped source fence/generation、全部 DATA/CONTROL dependents 与既有 vector 删除 outbox。
+原始 version/ETag/parent 变化不能逃离同一 logical source fence；撤权先于首次落盘也有效。
+event id/参数 digest/expected generation 支持幂等与冲突检测，SQLite 失败整体回滚，
+cleanup 失败不恢复读取。terminal blocked fences 不提供 reactivation。
+本阶段仅实现失效 primitive，不把 vector DeletionOutbox 复用为任意业务事件；
+durable lifecycle event/delivery/admission、observer 装配和唯一 Engine 接线仍待 ES-8。
 
 **Alternatives**
 
@@ -602,6 +626,8 @@ B05/B06/B09/B11：audit retention/tamper evidence/可用性、SQL/WAL/backup权�
 **当前边界：**ES-2契约、ES-3配置管理及ES-4身份/认证/持久交互内核已实施；
 migration 15/16只在隔离测试验证，生产Runtime的resolver/broker仍unavailable。
 ES-5只安装隔离 spike SDK并进行离线检查；ES-6只增加未接入生产出口的保护内核。
+ES-7增加 metadata/reference-only repository、migration 17、本地失效/删除与 index 基础；
+没有企业正文/自动 embedding/index writer、Runtime 或现有 Memory/Knowledge 接线。
 没有真实企业认证、主项目认证SDK、自动认证挂起/完成/恢复或enterprise deny解除。
 H1–H4仍是后续阶段硬门槛，
 不能把契约测试当作其运行时验证或组织批准。

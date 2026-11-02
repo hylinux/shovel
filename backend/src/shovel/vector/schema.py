@@ -27,6 +27,8 @@ from zvec import (
     VectorSchema,
 )
 
+from shovel.protection.persistence import ENTERPRISE_COLLECTION
+
 #: dense 向量字段名。
 DENSE_VECTOR = "dense"
 
@@ -136,9 +138,43 @@ def memory_collection_schema(name: str = "shovel_memory", *, dim: int = 1024) ->
     )
 
 
+def enterprise_collection_schema(*, dim: int) -> CollectionSchema:
+    """Declaration only: no text/FTS, collection creation or embedding admission."""
+    return CollectionSchema(
+        name=ENTERPRISE_COLLECTION,
+        fields=[
+            FieldSchema(field, DataType.STRING, index_param=InvertIndexParam())
+            for field in (
+                "metadata_id",
+                "workspace_id",
+                "user_id",
+                "tenant_id",
+                "identity_binding_digest",
+                "connection_binding_digest",
+                "classification_id",
+                "lifecycle",
+                "source_set_digest",
+                "protection_context_ref",
+                "protection_context_digest",
+                "metadata_digest",
+                "content_digest",
+                "policy_version",
+                "model_binding_digest",
+            )
+        ]
+        + [
+            FieldSchema(field, DataType.INT64, index_param=InvertIndexParam())
+            for field in ("revision", "index_generation", "model_revision", "dimension")
+        ]
+        + [FieldSchema("indexed_at", DataType.DOUBLE)],
+        vectors=_dense(dim, "cosine", 16, 200),
+    )
+
+
 __all__ = [
     "DENSE_VECTOR",
     "TEXT_FIELD",
     "chunk_collection_schema",
+    "enterprise_collection_schema",
     "metric_of",
 ]

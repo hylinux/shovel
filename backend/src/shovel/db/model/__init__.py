@@ -39,6 +39,7 @@ from .memory import (
     MemoryWorking,
     StandingQuery,
 )
+from .protection import EnterpriseMetadata, EnterpriseMetadataSource, EnterpriseSourceFence
 from .retrieval import (
     AgentScope,
     AppSetting,
@@ -68,6 +69,9 @@ __all__ = [
     "Document",
     "DocumentDerived",
     "EnterpriseConnectionProfile",
+    "EnterpriseMetadata",
+    "EnterpriseMetadataSource",
+    "EnterpriseSourceFence",
     "Entity",
     "EntityEdge",
     "EvalCase",

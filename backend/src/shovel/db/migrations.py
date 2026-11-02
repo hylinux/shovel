@@ -14,6 +14,7 @@ from shovel.db.model.enterprise import CONNECTION_DDL
 from shovel.db.model.execution import EXECUTION_DDL, KERNEL_INDEX_DDL, STEP_DDL
 from shovel.db.model.identity import AUTHENTICATION_DDL, IDENTITY_DDL
 from shovel.db.model.interaction import INPUT_DDL, INTERACTION_DDL, NOTIFICATION_DDL
+from shovel.db.model.protection import PROTECTION_DDL
 from shovel.db.model.retrieval import SchemaMigration
 from shovel.db.model.security import APPROVAL_DDL
 from shovel.execution.identity import execution_request_key
@@ -350,6 +351,15 @@ def _upgrade(connection: Connection) -> None:
                 version=16,
                 name="unavailable_identity_and_durable_authentication_requests",
                 applied_at=now_ts(),
+            )
+        )
+
+    if 17 not in versions:
+        for statement in PROTECTION_DDL:
+            connection.exec_driver_sql(statement)
+        connection.execute(
+            insert(SchemaMigration).values(
+                version=17, name="source_bound_enterprise_metadata", applied_at=now_ts()
             )
         )
 

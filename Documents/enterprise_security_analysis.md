@@ -301,6 +301,11 @@ typed metadata 可以序列化，但仍是纳管数据，不可直接作为日�
 | 企业 Memory / Knowledge | ES-7/8：现有实体的强制 protection/source binding sidecar，隔离索引与查询 | 复用现有 repository、outbox、generation；不建第二套 Memory/Knowledge engine |
 | 正文 / Artifact | 默认不落盘；源引用重授权后 refetch；transient/generated output 不保证重启恢复。只有 Policy 允许且保护机制实现后才落盘 | BlobRef 可作后续 metadata 索引参考，不预先建设第二个 CAS 或明文 Artifact Store |
 
+ES-7 实际最小切片将 context、source refs、snapshots 和 DerivedDataRecord 嵌入
+`enterprise_metadata` 的严格版本化 payload，仅将 source fence/依赖查询拆成
+`enterprise_source_fence`、`enterprise_metadata_source`；未逐一创建上述候选表，
+也未给现有 personal Document/Chunk/Memory 自动追加企业身份。详见第 19 节。
+
 ES-3 可保存 disabled Draft 及尚未可执行的 profile refs；**invoke resolution 不允许**
 未存在/未验证的 Identity/Protection profile。不能为提前通过阶段测试伪造 READY。
 这些跨阶段引用在 application/repository 验证；需要 FK 时在目标 schema 就绪后
@@ -460,7 +465,7 @@ Enterprise Provider”成为 protection bypass；其分类/ingress UX 是上线�
 | ES-4 | 已实施 Identity profile kernel、TokenRequest validation、safe diagnostics、silent-only服务、transport contract及持久交互内核 | fake broker 仅 tests；生产 unavailable，不假 READY；仅为已挂起 Execution 创建 request/projection，见第 16 节；不开放企业dispatch |
 | ES-5 | 当前仅完成另行获准的隔离 Python SDK 离线验收 spike，见第 17 节 | 真实 WAM/生产路线仍未通过；后续需 approved tenant 的显式 opt-in Windows交互测试；无真实业务 Provider |
 | ES-6 | 已实施 deny-default Data Protection kernel、保守 merge/lineage、ModelProfile 检查、safe decision/audit contract，见第 18 节 | 每种要求未满足不得 release；无生产 policy/audit adapter；AG-UI/现有模型和存储接线仍待 ES-7/8，H1 不宣称通过 |
-| ES-7 | metadata-only SQLite、安全 enterprise vector schema、sidecars/generations/invalidation | 证明 deny 时无 embedding/network/index/content write；不默认为邮件全文建立索引 |
+| ES-7 | 已实施 metadata-only SQLite、source fences/lineage/invalidation、独立无正文 vector schema、删除 adapter 与候选回查，见第 19 节 | 无自动 embedding/index writer、生产查询或旧 Memory/Knowledge 接线；不默认为邮件全文建立索引 |
 | ES-8 | test fixture Provider -> resolver -> fake auth -> transport -> protection -> safe display/deny，走既有 Engine | 原子 auth wait/restart/resume、pre-effect Approval、source invalidation、所有裸出口 containment |
 | ES-9 | 需求完整 failure/security test matrix | adversarial response、跨边界泄漏、race/recovery、Windows broker evidence；真实 Provider 仍不默认启用 |
 | ES-10 | synthetic sample、authoring/connection/auth/protection/logging/testing guides | sample 不连接真实公司、不使用真实 Token；演示 ALLOW/DENY/auth wait/derived lineage |
@@ -861,3 +866,102 @@ ES-7 负责安全持久化/index adapters；ES-8 负责唯一 Engine 的集成�
 真实组织 policy/Label/DLP/source freshness、可信 viewer、持久 audit、retention/
 revocation matrix、dispatch intent 和 WAM 尚未就绪；H1–H4、企业 deny 和 unavailable
 默认全部保持，不宣称真实 Provider 可运行或组织合规。
+
+## 19. ES-7 metadata/reference-only persistence 与 index foundation 交付边界
+
+本阶段交付未接入生产 Runtime 的持久化/index 基础切片，复用现有 SQLite UoW、
+DeletionOutbox 和 Zvec native I/O 生命周期；没有新增 Runtime、Registry、ExecutionEngine、
+企业业务副本或事件运行时。用户明确选择：派生结果只保留保护/lineage 元数据，
+正文不可恢复；不能用重跑模型、外部操作或原始 source 正文冒充恢复。
+
+### 19.1 元数据、引用与存储授权
+
+`protection\persistence.py::EnterpriseMetadata` 严格禁止额外字段；保存 scope、
+完整 ProtectionContext、DATA/CONTROL lineage、精确 identity/connection bindings、
+AuthorizationSnapshots、原始 content digest、可选 DerivedDataRecord/EmbeddingMetadata。
+原始记录仅接受匹配 DATA source/version 的 SourceContentRef；不接受 transient handle、
+ArtifactRef 或正文/vector buffer。派生记录明确 `body_recovery="unavailable"`，
+source_reference 必须为空；原始记录标记 `source_reference` 也只表达后续 refetch 的候选。
+`require_source_reference()` 不执行 provider 读取或授权，派生记录调用时明确拒绝。
+
+`db\protection_repository.py::SQLiteProtectionRepository.put` 必须取得
+PERSIST/LOCAL_SQLITE 的独立 ES-6 permit。binding 的 content_digest 是**整个待存
+metadata payload 的 canonical digest**，不是原始正文 digest；后者只作为 payload 字段。
+identity/connection/context/source/policy 均精确绑定，metadata 不能以“只是引用”为由
+绕过保护。缺策略、snapshot 不 fresh、未知/失效 context、错 owner/destination/digest、
+未满足 obligations 或未批准 retention 都拒绝。首次写 SQL 前及最后一次 SQL await 后、
+commit 前分别重查；后者失败则整个 UoW 回滚，不留下持久 metadata/fence/依赖记录。
+这不等于能在 SQLite commit 与远端撤权之间建立分布式事务。
+
+migration **17** 增加三个表与 owner/immutable/单调 generation/tombstone guards；
+`init_database` 和重复 upgrade 均安装 guards。payload 和 admission binding 不可原地替换，
+同 scope/id 相同 payload 的重试不新增记录；不同参数冲突。旧 Operation receipts、
+Capability hashes、personal FTS 和知识/Memory schema 保持原有语义。
+未访问或升级用户业务数据库，也未更改主项目依赖或原有 `uv.lock` 修改。
+
+### 19.2 查询、源版本与失效
+
+`read` 只从指定 workspace/user 取 active record，在串行 SQLite transaction 内核对
+payload/context/digest、所有本地 source fences，再独立请求 READ/WORKFLOW_STATE permit。
+原始快照是不可变 provenance，不是缓存读取许可；每次读取都依赖可信 PolicyStateProvider
+的新判断。已到 context 的 expiry/revalidate_at 时明确拒绝，不静默延长或自动刷新 metadata。
+返回的是 metadata，不是正文、DISPLAY grant 或下一次 model/store 的许可。
+
+外部候选可携带 MetadataCandidate；必须与 SQLite 的 record id/revision/metadata digest、
+完整 embedding model binding、vector digest/dimension/index generation 精确相符，
+随后仍执行 source/策略回查。候选不是索引成功 receipt，也不能绕过 SQLite 或自动进入
+reranker/model。真实模型目录当前版本、源远程 freshness 和 profile enable/revision 的
+可信生产适配仍须 ES-8 接线；这里的 descriptor 比较不冒充它们已经实现。
+
+source fence 的 key 包含 provider/connection/tenant/resource identity，不包含
+source version、ETag 或 parent，防止换版本/移动父级绕过撤权。同 scope 下先到的失效
+也能创建 tombstone，拒绝迟到的首次写入。`invalidate` 默认拒绝；必须由配置的
+SourceChangeAuthority 验证确切事件。expected generation、event id 与参数 digest
+约束并发/重试；重复同事件不重复入队，变化参数或旧 generation 冲突。
+
+同事务 bump generation、阻断该 source、更新全部 DATA/CONTROL dependents 的
+invalid/deleted state/revision，并写现有 DeletionOutbox 的精确 vector ID intent。
+SQL 失败整体回滚；cleanup 未完成也不能读取旧记录。fence/lineage/tombstone 不可回退，
+换 record id、source version、parent 或新进程不能复活旧数据。此切片没有 unblock/
+reactivation、自动 relabel/recompute 或 durable lifecycle event/admission 系统；
+后续 source 事件可以继续单调失效，但不能重新开启写入。
+
+### 19.3 隔离 Zvec 与删除传播
+
+`enterprise_collection_schema(dim=...)` 声明独立
+`shovel_enterprise_metadata_v1` collection：只有 dense vector 和用于约束的 scope、
+tenant、identity/connection/source-set digests、classification/lifecycle、
+context/content/metadata/policy/model bindings、revisions/generation/dimension/indexed_at。
+没有 text/FTS、resource 正文或派生 summary；原 personal schemas 不变。
+声明 schema **不创建集合、不打开用户路径、不生成 embedding，也不准许 INDEX**。
+
+新增 `ZvecEnterpriseDeletionSink` 只接受精确 UUID5 IDs，验证独立 collection 名称和
+无正文 schema，不提供 upsert/search API；复用既有线程锁及 cancellation/native-work
+等待，再 flush。IndexCleanupService 只有显式配置 enterprise sink 时才消费对应
+collection 的 CHUNK_IDS intents，legacy routes 不会误认这些 intent，反之亦然。
+native delete/status/flush 失败保留 pending intent，错误仅保存安全代码，重试成功且
+flush 后才 ack；取消也不提前 ack。
+
+实际 embedding 生成、受审的 INDEX writer、generation rebuild/cutover、production query
+prefilters/reranker、Memory/Knowledge sidecars 和 Runtime cleanup worker 装配尚未实施。
+测试中的原生向量写入仅是隔离 synthetic fixture，不是放开的企业写入通道。
+没有数据可重建时不得 claim index 已恢复；现有 knowledge initializer 不创建企业集合。
+
+### 19.4 验证与仍然关闭的边界
+
+新增 **49 项测试**；与 ES-2/3/4/6、旧库迁移、既有扫描/清理与 Zvec 回归合计
+**294 passed**。覆盖 default deny 零持久写入、metadata-only restart roundtrip、
+派生正文不可恢复、scope/digest/immutable binding、snapshot 与 live authority 分离、
+SQL await 越期回滚、CONTROL invalidation、先 tombstone 后迟到写入、事件幂等/冲突、
+并发撤权、outbox 原子性、错误脱敏、候选 descriptor 失配和 SQL guards。
+真实隔离 Zvec 验证无正文 fields、拒绝 personal/伪装 text schema、精确/重复删除、
+flush failure/retry/ack、close/reopen 后删除仍有效及取消后的 native 工作顺序。
+全仓 Ruff lint、Mypy（213 source files）、涉及的 13 个 Python 文件格式、
+diff whitespace 与文档链接检查通过；不将这批针对性回归称为全量测试。
+
+生产 resolver/broker、组织 policy/source observer/audit adapter 仍 unavailable/未装配；
+没有真实企业认证、模型或 embedding 网络调用，没有改动用户 stores 或生产默认行为。
+H1–H4、WAM 实测和唯一 Engine/全出口 containment 接线仍是硬门槛。
+retention ref 的逻辑 gate 不代表 H4 已批准：本切片保留保护 metadata/tombstones，
+不提供 approved retention purge、WAL/backup 安全擦除、Zvec 物理安全删除或向量加密保证，
+也不声称旧 binary/raw SQL 或同进程恶意代码受 Python adapter 隔离。

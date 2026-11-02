@@ -476,7 +476,7 @@ Enterprise Provider”成为 protection bypass；其分类/ingress UX 是上线�
 | ES-7 | 已实施 metadata-only SQLite、source fences/lineage/invalidation、独立无正文 vector schema、删除 adapter 与候选回查，见第 19 节 | 无自动 embedding/index writer、生产查询或旧 Memory/Knowledge 接线；不默认为邮件全文建立索引 |
 | ES-8 | 已实施 fixture Provider -> resolver -> fake auth -> transport -> protection -> safe display/deny，走既有 Engine，见第 20 节 | 原子 auth wait/restart/manual resume、既有 Approval、source fences、redacted audit；仅证明新增完整 buffer 路径，全出口 containment 仍未通过 |
 | ES-9 | 已实施离线 failure/security 验收矩阵与新增 35 项边界/竞态回归，见第 21 节 | synthetic、native SQLite/Zvec 与真实本地 MCP 生命周期；真实 Windows Broker/组织 trust/全出口 evidence 不冒充已通过，企业默认仍关闭 |
-| ES-10 | synthetic sample、authoring/connection/auth/protection/logging/testing guides | sample 不连接真实公司、不使用真实 Token；演示 ALLOW/DENY/auth wait/derived lineage |
+| ES-10 | 已实施 source-only synthetic Provider、架构/authoring/connection/identity/protection/logging/testing 指南及独立 threat model，见第 22 节 | 实际既有 Engine 演示 ALLOW/DENY/auth wait/resume/derived lineage；无真实 Token、网络或用户 stores，生产默认 deny 不变 |
 
 每阶段开始前重查代码和基线，列拟改文件、冲突和兼容性；实现最小完整切片并运行其
 formatter/linter/type checker/unit/integration tests。后续阶段不能以“先跑起来”
@@ -1150,3 +1150,67 @@ generation 验证；两种来源顺序均拒绝冲突，零持久写入。保留
 
 全仓 `ruff format --check .` 仍报告 **93 个文件**
 需格式化，包含未修改的文档代码块与 Python 文件；没有夹带全仓格式重写。
+
+## 22. ES-10 Documentation and Sample Provider：开发交付
+
+### 22.1 入口与指南
+
+新增 [Enterprise Provider guide](enterprise_provider_guide.md)，集中覆盖 architecture、
+Provider authoring、Connection profile、Identity integration、Data protection、
+secure logging 和 testing，不将一个扩展流程拆成多份容易漂移的指南。
+新增 [threat model](enterprise_threat_model.md)，列明资产、信任边界、攻击者、
+已实现控制/测试证据、剩余风险与真实 WAM/H1–H4 上线门槛。根 README 提供入口。
+
+独立源码示例为 `scripts\demo_enterprise.py`，从根目录运行：
+
+```powershell
+uv run --no-sync python -m scripts.demo_enterprise
+```
+
+无需 Host、用户配置、认证 SDK、模型/embedding、企业账号或 `shovel init`。
+它使用固定 synthetic 文本/无效 credential、`.example.invalid`、确定性 logical clock
+和临时 SQLite，运行实际 migrations/Registry/InvocationService/ExecutionEngine/
+FunctionExecutor，而不是复制一套伪 Engine 或导入 pytest fixtures。
+Engine/数据库先关闭，随后清理临时目录；不触及用户 SQLite/Memory/Knowledge/Zvec。
+
+### 22.2 示例路径与严格限制
+
+同一个 composition 演示 READ/DISPLAY 分别 ALLOW、READ 后 DISPLAY DENY、
+`waiting_for_authentication` 原子挂起且 timer 不唤醒、手动恢复同一个 Execution
+并 fresh acquire/保留 deadline。派生 Function 对精确 source 做纯内存固定 transform，
+继承 classification/rights/DATA lineage，随后精确绑定 EMBED/model 目的地并 DENY。
+
+报告只包含安全状态、receipt、元数据与计数：两次 display、四次 transport、五次 fake
+broker acquisition、八条持久 audit。源正文只在获准 whole-buffer callback 中显示；
+派生正文不显示、不进入 Execution result/报告/SQLite，也不调用实际 embedding sink。
+不满足预期的场景会以安全异常失败，不返回成功形状的演示结果。
+
+sample-specific publisher 仅批准固定 scope/首版本/脚本已知 content hashes；
+connection policy 仅在自己的 composition 中允许两个固定 Function/精确 connection，
+保留普通 side-effect policy。它们不替代 production confirmation ticket 或组织准入。
+Identity/Connection 持久配置仍 disabled/unavailable/draft；内存中的
+`BrokerType.PYTHON_WAM` 只是 fake broker 类型标识，不意味着调用过 Windows Broker。
+
+DERIVE handler 仅展示已 ready 的固定认证路径，通用交互映射由现有 read handler 演示。
+派生 handle 属于创建它的 ProtectionService，示例不通过私有 gate、伪 source reference
+或重跑模型假装恢复。纯 transform 的 audit UoW 在返回 receipt 前提交，不是已实现
+真实模型/网络派生输出的 adapter。临时文件删除不等于安全擦除，终端 display
+不等于受保护查看器。生产注册、schema、依赖、前端、现有 Runtime 均未改动。
+
+### 22.3 验证记录
+
+新增 `test_enterprise_sample.py` **4 项测试**：真实 Engine/临时 SQLite 的场景与安全
+边界、全部表正文/凭据哨兵、报告/诊断无泄漏、持久配置未启用/目录清理、
+display callback 失败不泄漏、publish hash 限制和默认 production deny，
+以及独立 subprocess 运行公开命令。httpx 请求在集成测试中被禁止，
+无效用户数据库环境配置不影响独立 sample。
+
+sample、enterprise execution/failures/authentication/persistence/vector 与 protection
+policy 共七个测试文件合并运行：**209 passed**，86.38 秒，无 skip。
+这是本轮 scoped 回归，包含新增 4 项，不冒充再次执行 ES-9 的完整后端套件。
+全仓 Ruff lint、两个新增 Python 文件的格式、Mypy backend + sample
+（218 source files）、新增指南的 9 个 local links 与 diff whitespace 检查通过。
+完整 sample 命令实际执行成功，输出 `synthetic_only=true`、`production_ready=false`。
+
+不修改 ES-9 已记录的全仓格式化基线，不夹带无关重排。ES-10 文档/示例交付完成
+不等于生产企业安全验收完成；真实 WAM 与 H1–H4 继续保持未接受、默认 deny。

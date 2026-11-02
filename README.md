@@ -1063,6 +1063,8 @@ check: it must exercise the installed artifact, not the source environment.
 | [Capability platform architecture](Documents/platform_architecture.md) | Implemented planes, models, permissions/approval, events/timers, persistence and migration boundaries |
 | [Capability platform ADRs](Documents/platform_adrs.md) | Fifteen architecture decisions, alternatives, consequences and compatibility |
 | [Phase 13 validation](Documents/platform_validation.md) | Five demos, final invariant matrix, verification results and remaining release blockers |
+| [Enterprise Provider guide](Documents/enterprise_provider_guide.md) | ES-10 synthetic sample, architecture and authoring/connection/identity/protection/logging/testing; production enterprise admission remains disabled |
+| [Enterprise threat model](Documents/enterprise_threat_model.md) | Trust boundaries, controls, evidence, residual risks and unaccepted production gates |
 | [Scan pipeline](Documents/scan_pipeline.md) | Ingestion, lifecycle, durable cleanup, DI and recovery contracts |
 | [Outlook integration](Documents/outlook_local.md) | Supported Outlook environment, source identity and indexing limits |
 | [Memory vector identity](Documents/db_base_memory_vector_id.md) | Deterministic IDs, lifecycle, authority checks and rebuild semantics |

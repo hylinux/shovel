@@ -670,3 +670,23 @@ resume/dispatch 与取消后迟到结果必须保持单次输出或零输出。�
 MAF Core 约束 `>=1.22.0,<1.23`，与项目 MCP 1.x 合同兼容；不做 MCP 2 迁移或假造
 SDK `Client`。真实 MCP 生命周期用例恢复通过，详细矩阵与限制见分析第 21 节。
 ES-5 真实 Windows Broker 及 H1–H4 的生产验收仍未通过，默认 enterprise deny 不变。
+
+**ES-10 开发指南与 synthetic reference composition**
+
+开发指南集中覆盖 architecture、Provider/Connection/Identity/protection/logging/testing，
+独立 threat model 列出信任假设、实际证据与剩余风险。
+`scripts\demo_enterprise.py` 仅为 source-checkout 演示，使用既有 Registry/Engine/
+FunctionExecutor、authentication lifecycle、保护与 SQLite 审计；没有新增 Runtime、
+生产 Provider 注册、依赖或 enable 开关。
+
+示例的 scoped/hash-bound publisher、精确 sample-only connection policy、enabled 内存
+副本都不构成生产准入。持久配置仍 disabled/unavailable；fake WAM enum 不证明
+Windows Broker。ALLOW/DENY、手动认证恢复、保留原 deadline 与派生 DATA lineage
+通过真实内核执行，纯 transform 之后 EMBED DENY，无模型/embedding/向量调用。
+派生 buffer 只属于创建它的 ProtectionService，保留 metadata 不提供正文恢复；
+不伪造 source reference、不重跑模型、不增加私有 gate 的公开绕行接口。
+
+开发入口见 [Provider guide](enterprise_provider_guide.md)，边界见
+[threat model](enterprise_threat_model.md)，验证见分析第 22 节。
+这份示例不是受保护查看器、真实认证/外部副作用 adapter 或全出口/物理擦除证明；
+真实 WAM 与 H1–H4 的独立验收及 production deny-default 继续有效。

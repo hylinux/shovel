@@ -140,6 +140,15 @@ pymsalruntime 0.20.7 并完成公开参数和 synthetic core binding 检查；�
 发送前 WAM-required/真实取消保证，不据此启用生产或立即选择 Native 实现。
 详细命令、测试、授权范围和未验证门槛见分析第 17 节。
 
+**WAM-required 后续路线提案（待确认）**
+
+后续独立调查重查了 Python/.NET 正式 API：两者 opt-in broker 均不能独自证明
+禁止 non-broker fallback。.NET 不是未经验证的直接替代品。
+[WAM-required 设计提案](windows_wam_required_design.md) 给出直接 Windows WAM
+公开 API 的 standalone 原型范围、精确身份/原生取消的未决门槛及后续 auth-only
+组件的安装/IPC边界。原型尚未实施，不构成批准 Native 生产路线或真实认证。
+无获准 tenant/app/account/scopes；当前 Runtime unavailable、H1–H4 不变。
+
 ## ENT-ADR-03 — Enterprise Connection Profile
 
 **Context**

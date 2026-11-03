@@ -11,9 +11,6 @@ concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
 
-env:
-  UV_DEFAULT_INDEX: https://pypi.org/simple
-
 jobs:
   windows-outlook:
     runs-on: windows-latest

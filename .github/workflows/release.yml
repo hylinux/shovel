@@ -8,9 +8,6 @@ on:
 permissions:
   contents: write     # 创建 Release 所需，无需任何 Secret
 
-env:
-  UV_DEFAULT_INDEX: https://pypi.org/simple
-
 jobs:
   release:
     runs-on: ubuntu-latest

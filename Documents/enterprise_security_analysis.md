@@ -769,6 +769,24 @@ diagnostics。此次不触发它们，不采集注册信息或账户资料。
 继续真实接受性测试需要具体授权；切换 Native 路线需先修订/批准
 ENT-ADR-02 的项目/安装/签名/caller/IPC 边界。ES-4 unavailable 默认及 H1–H4 保持。
 
+### 17.2 WAM-required 独立路线调查与待确认设计
+
+ES-9/10 推送后，用户允许不登录、不启用生产的路线 spike，要求新增 Windows 原生
+Broker 前先提交设计。重新运行原锁定 offline probe，22 项检查通过，
+authentication_attempted=false；没有真实 native/account/Token/UI 验证。
+MSAL.NET 的正式 WAM 指南也允许 browser fallback，不能仅换语言就宣称 required。
+
+[独立设计提案](windows_wam_required_design.md) 评估直接公开 Windows WAM/desktop
+interop API：先做无认证 standalone 原型，再按获准环境逐项验证；不把 Cancel 方法
+存在当作 native UI/工作停止证明，不把 organizations provider 当成 exact tenant。
+当前没有批准的测试环境，未新增原生项目、原生 SDK 依赖、IPC 或生产接线，
+真实验收仍未完成。
+
+CI 前置核查发现 Windows/Ubuntu 均因 CI 的 PyPI override 与提交的 Microsoft proxy
+lock 不一致而在 `--locked` 同步停止。用户选择仅移除 CI/release override，保留 lock/
+版本与既有 93 个格式基线文件。Windows/Linux locked sync dry-run、YAML/whitespace
+检查通过；这不是远端 CI 绿色或 Linux 已安装/实测的证明。
+
 ## 18. ES-6 默认拒绝策略与保护传播内核
 
 基线为 ES-5 spike 提交 `e585f01`。新增 `protection\policy.py`、

@@ -8,9 +8,9 @@ a Git commit; no sibling checkout is required. On Windows, use x64 Python for
 the native Zvec dependency, including under x64 emulation on ARM64:
 `uv sync --python 3.14-x86_64 --locked --all-extras --dev`.
 Keep Windows and WSL environments separate.
-The local uv default index is configured in `pyproject.toml`; CI/release override
-it with `UV_DEFAULT_INDEX=https://pypi.org/simple`. Preserve the committed lock
-when using a different package index.
+Local development and CI/release share the default index configured in
+`pyproject.toml` and the committed `uv.lock`. Changing the index requires explicit
+lock reconciliation; do not override the registry only in CI under `--locked`.
 
 Run Python commands from the repository root:
 

@@ -52,6 +52,25 @@ node --experimental-strip-types --test tests\request-recovery.test.mjs
 npm run build
 ```
 
+The isolated Windows WAM component lives under `native\`; it does not wire into
+the production Host. Run its .NET commands from `native\` to honor `global.json`:
+
+```powershell
+Set-Location native
+$env:DOTNET_CLI_TELEMETRY_OPTOUT = "1"
+$env:DOTNET_SKIP_FIRST_TIME_EXPERIENCE = "1"
+$env:TESTINGPLATFORM_TELEMETRY_OPTOUT = "1"
+dotnet restore Shovel.Wam.Tests\Shovel.Wam.Tests.csproj --configfile NuGet.Config --locked-mode
+dotnet test Shovel.Wam.Tests\Shovel.Wam.Tests.csproj --no-restore -c Release
+dotnet format Shovel.Wam\Shovel.Wam.csproj --no-restore --verify-no-changes
+dotnet format Shovel.Wam.Tests\Shovel.Wam.Tests.csproj --no-restore --verify-no-changes
+dotnet run --project Shovel.Wam\Shovel.Wam.csproj --no-build -c Release -- check
+```
+
+Tests and `check` do not query OS accounts or acquire tokens. Real silent and
+interactive authentication require a separately approved target and operation;
+never run them automatically in CI. See `native\README.md`.
+
 Initialize local configuration/stores with `uv run shovel init`, then use
 `uv run shovel run dev` from the root. This supervises Next.js on port 3000 and
 FastAPI on port 9999; either exiting stops both. Production is separate:

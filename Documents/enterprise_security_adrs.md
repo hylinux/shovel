@@ -84,8 +84,8 @@ boolean/Token、不重写旧 request CHECK/fingerprint。terminal cleanup 与挂
 
 **Context**
 
-仓库为Python 3.14 x64、Generic Host、FastAPI、MAF、静态浏览器UI；有pywin32，
-没有MSAL/.NET项目。本机有.NET SDK，但这不证明native产品组件可用。
+初始仓库为Python 3.14 x64、Generic Host、FastAPI、MAF、静态浏览器UI；有pywin32，
+没有MSAL/.NET项目。后续已新增隔离 standalone .NET 原型，但不证明native产品组件可用。
 官方PyPI的pymsalruntime 0.20.7有cp314 win_amd64 wheel，不能因ABI假设强制Native Broker。
 MSAL公开API同时说明可能静默non-broker fallback，interactive阻塞与HWND约束必须验证。
 
@@ -140,13 +140,17 @@ pymsalruntime 0.20.7 并完成公开参数和 synthetic core binding 检查；�
 发送前 WAM-required/真实取消保证，不据此启用生产或立即选择 Native 实现。
 详细命令、测试、授权范围和未验证门槛见分析第 17 节。
 
-**WAM-required 后续路线提案（待确认）**
+**WAM-required standalone 实现（生产路线仍待确认）**
 
 后续独立调查重查了 Python/.NET 正式 API：两者 opt-in broker 均不能独自证明
 禁止 non-broker fallback。.NET 不是未经验证的直接替代品。
 [WAM-required 设计提案](windows_wam_required_design.md) 给出直接 Windows WAM
 公开 API 的 standalone 原型范围、精确身份/原生取消的未决门槛及后续 auth-only
-组件的安装/IPC边界。原型尚未实施，不构成批准 Native 生产路线或真实认证。
+组件的安装/IPC边界。用户已批准并实现 `native\Shovel.Wam`：公开 WinRT silent、
+HWND-bound interactive、原生 Cancel/Close、shared deadline、late-result fence 和
+metadata-only 输出；SDK/锁定 build、synthetic 和未显示窗口的 HWND 测试独立于 Python。
+命令见 [native 指南](../native/README.md)；未执行真实 discovery/acquisition，
+不构成批准 Native 生产路线或真实认证通过。native async Canceled 不证明 UI/SSO 停止。
 无获准 tenant/app/account/scopes；当前 Runtime unavailable、H1–H4 不变。
 
 ## ENT-ADR-03 — Enterprise Connection Profile

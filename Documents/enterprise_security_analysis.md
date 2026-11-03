@@ -769,7 +769,7 @@ diagnostics。此次不触发它们，不采集注册信息或账户资料。
 继续真实接受性测试需要具体授权；切换 Native 路线需先修订/批准
 ENT-ADR-02 的项目/安装/签名/caller/IPC 边界。ES-4 unavailable 默认及 H1–H4 保持。
 
-### 17.2 WAM-required 独立路线调查与待确认设计
+### 17.2 WAM-required 独立路线调查与 standalone 实现
 
 ES-9/10 推送后，用户允许不登录、不启用生产的路线 spike，要求新增 Windows 原生
 Broker 前先提交设计。重新运行原锁定 offline probe，22 项检查通过，
@@ -779,13 +779,22 @@ MSAL.NET 的正式 WAM 指南也允许 browser fallback，不能仅换语言就�
 [独立设计提案](windows_wam_required_design.md) 评估直接公开 Windows WAM/desktop
 interop API：先做无认证 standalone 原型，再按获准环境逐项验证；不把 Cancel 方法
 存在当作 native UI/工作停止证明，不把 organizations provider 当成 exact tenant。
-当前没有批准的测试环境，未新增原生项目、原生 SDK 依赖、IPC 或生产接线，
-真实验收仍未完成。
+随后用户明确批准独立 Windows 组件，但不接生产 Host、不执行真实认证。
+现有 `native\Shovel.Wam` 使用锁定 .NET/Windows SDK 的公开 WAM silent/desktop
+interactive API、自有 HWND、原生 Cancel/Close、shared deadline、immutable target、
+late-result fence 和安全 JSON 状态；无 MSAL/fallback。验证只覆盖编译、synthetic
+async/binding/error 测试、未显示窗口 HWND 生命周期和平台 API metadata。
+[使用命令及限制](../native/README.md) 明确区分 check、opt-in authentication
+与未完成的 live acceptance。仍无获准测试环境、真实 discovery/acquisition、
+可信安装/IPC 或生产 resolver 接线；H1–H4/deny-default 不变。
 
 CI 前置核查发现 Windows/Ubuntu 均因 CI 的 PyPI override 与提交的 Microsoft proxy
 lock 不一致而在 `--locked` 同步停止。用户选择仅移除 CI/release override，保留 lock/
 版本与既有 93 个格式基线文件。Windows/Linux locked sync dry-run、YAML/whitespace
-检查通过；这不是远端 CI 绿色或 Linux 已安装/实测的证明。
+检查通过。推送修复后的 CI run 41582542490 两平台同步成功、Windows Outlook 通过；
+Ubuntu pytest 为 4 failed、1178 passed、2 skipped（既有 ANSI substring 与
+Windows-path-on-Linux 测试）。本轮另加无真实认证的 Windows WAM job，
+不修这些无关基线，也不宣称完整远端 CI 已通过。
 
 ## 18. ES-6 默认拒绝策略与保护传播内核
 

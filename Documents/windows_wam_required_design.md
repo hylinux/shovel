@@ -1,9 +1,10 @@
-# ES-5 WAM-required：独立路线 spike 与原生方案提案
+# ES-5 WAM-required：独立 Windows 原型与生产方案提案
 
-**状态：Proposed，待确认；不是已实现或已通过的认证组件。**
-用户已允许不登录、不启用生产的独立路线调查；尚未批准新增原生项目，
-也没有获准的 tenant/app/account/scopes 测试环境。本文提交设计供确认，
-不修改 [ENT-ADR-02](enterprise_security_adrs.md) 的生产决策。
+**状态：standalone 组件已实现；真实认证未执行/验收，生产路线仍 Proposed。**
+用户已明确批准可编译、可测试、包含真实 silent/interactive WAM 调用及原生取消的
+独立 Windows 组件，但不接生产 Host、不执行真实认证。实现和命令见
+[native 使用指南](../native/README.md)。仍没有获准 tenant/app/account/scopes
+环境；这不修改 [ENT-ADR-02](enterprise_security_adrs.md) 的生产决策。
 
 ## 1. 调查结论与证据边界
 
@@ -26,16 +27,20 @@ uv 在独立脚本环境从缓存安装 16 个包；主项目依赖/lock 不变�
 脚本没有构造 SDK client、访问账户或调用认证，也不验证 native WAM 初始化。
 这次结果仍是离线 SDK/API 证据，不是新一轮真实 WAM 验收通过。
 
-## 2. 提议下一步：直接 Windows WAM API 的独立原型
+## 2. 已实现：直接 Windows WAM API 的独立原型
 
-建议先评审一个 **Windows-only、auth-only、standalone** 的小原型，
+已按确认范围实现一个 **Windows-only、auth-only、standalone** 的小原型，
 通过公开 WinRT/Win32 WAM API 验证必要保证，而不是包装另一个默认允许 fallback 的
 MSAL client。原型不是新的 Runtime、Provider、HTTP business proxy 或 Workflow。
-尚不创建 `.csproj`、下载原生依赖、调用账户 API或运行任何真实认证。
+项目为 `native\Shovel.Wam`，测试为 `native\Shovel.Wam.Tests`。
+开发验证只编译、运行 synthetic 测试和平台 metadata check；没有调用真实
+provider/account discovery 或 silent/interactive acquisition。
 
-拟优先评估 .NET Windows desktop + WinRT projection；具体 SDK/TFM、投影/interop、
-包版本和锁定方式在批准原型后根据实际 build 验证选择，不在本文虚构已可用的包组合。
-若需要 C++/WinRT，另行说明工具链差异，不同时维护两套实现。
+使用 .NET SDK 10.0.403、`net10.0-windows10.0.26100.0`、WPF、自有 HWND 和公开
+WinRT projection；Windows SDK .NET reference 固定为 10.0.26100.57。
+SDK、NuGet 来源和 packages locks 位于 `native\`，主 Python lock/Runtime 不变。
+interactive 使用公开 `WebAuthenticationCoreManagerInterop`，不手写私有 COM ABI。
+未同时维护 C++/WinRT 或另一个 MSAL fallback 实现。
 初期限定 Windows 11 / x64 process；ARM64 上 x64 仿真、最低 Windows build、SDK 和
 provider/DLL 兼容各自记录，不能由 Python x64 wheel 推断。
 
@@ -61,7 +66,12 @@ identity、redirect/registration 与组织允许的部署方式仍需验证。
 不自动提供经过证明的 audience/tenant/claims contract。必须先获得正式 provider
 协议依据，并验证精确 account/client/scope/resource/authority 的映射；不能猜字段、
 默认 `/common`、假设 Token 总是 JWT，或采用示例中的 `User.Read` 作为默认授权。
-此项当前仍为 blocker，而不是“使用原生 API 已解决”。
+实现的 request 字段依据
+[Entra ID WAM API reference](https://learn.microsoft.com/en-us/entra/identity-platform/reference-entra-id-wam-api)：
+`CorrelationId`、精确 tenant `authority`、批准 `resource` 及 desktop broker
+`redirect_uri`；不关闭 authority validation。synthetic WinRT request 测试验证字段，
+但 actual tenant/principal/grants/audience 语义仍是 live blocker，不能由字段推出。
+V1 只接受 Azure Global、HTTPS resource 和既有 connected organizational account。
 
 ### 两个独立阶段
 
@@ -81,12 +91,19 @@ identity、redirect/registration 与组织允许的部署方式仍需验证。
 原型不得自动创建账号、授权新 scopes、通过 consent prompt 或移除 Windows/Office
 账户；出现此类要求时交给用户/管理员按独立批准流程处理。
 
-每次请求绑定 request/correlation、冻结 identity/connection/manifest revisions、
-原 deadline 和取消 generation。保留原生 async operation，取消时调用原生取消入口，
-等待并检查其状态，检查可见 UI 是否结束；cancel/timeout 后不交付任何结果。
+standalone 冻结一次读取的 target（scopes 不可变），生成 native correlation，
+provider/account/acquisition 共享原 deadline。生产 identity/connection/manifest
+revisions/lease/generation 绑定尚未接入。保留原生 async operation，取消时调用原生取消入口，
+等待并检查其状态；可见 WAM UI 是否结束仍需真实验证。cancel/timeout 后不交付结果。
 SDK/OS 忽略取消而迟到返回时仍拒绝交付，记录安全状态；**这仅证明不交付，
 不等于 native 操作或 UI 已停止**。不能靠杀 OS WAM/Office 进程模拟取消成功。
 无法证明真正原生取消的路线保持未接受。
+
+取消 grace 为两秒；超期报告 `cancellation_unconfirmed`。
+`native_operation_canceled` 只表示观察到原生 `AsyncStatus.Canceled`，不是 UI
+或 SSO 停止证明。迟到 decoder 被取消 fence 阻断，pending operation 完成后 drain/close；
+process 退出可中断 drain，因此不能声称 OS-side 清理已保证。
+cancel/status/close 异常只输出 enum；同步 close 失败不返回 success。
 
 初期原型不跨进程返回 Token：凭据仅在原型内短时持有，不打印、不保存、不写报告/
 stdout/stderr/audit，也不调用业务资源。报告只允许固定测试 ID、状态、计数和时长，
@@ -112,8 +129,8 @@ installation、签名/更新/回退、launcher、caller identity 与私有 IPC �
   账号或全局 SSO 状态。父进程退出、子进程异常和 late result 都必须 fail closed。
 
 同用户恶意进程、可改写的 Python checkout、管理员或被篡改的安装不是此原型能隔离的
-攻击者；生产 trusted installation/caller 仍是 H3 门槛。未批准前不新增原生项目、
-进程管理器、安装器、IPC endpoint、生产 resolver/broker 或企业 enable 开关。
+攻击者；生产 trusted installation/caller 仍是 H3 门槛。当前批准只覆盖 standalone
+项目，不覆盖进程管理器、安装器、IPC endpoint、生产 resolver/broker 或企业 enable。
 
 ## 5. 验收矩阵与停止条件
 
@@ -140,6 +157,19 @@ Global 与 China、guest/CA/claims 挑战不能互相代替，未接受的环境
 Windows/Linux 的 offline locked sync **dry-run**、lock check、YAML 与 whitespace
 检查通过；dry-run 不等于在 Linux 安装/运行成功或远端 CI 已变绿。
 
-93 个既有 Ruff 格式基线文件按用户要求不改，故不能宣称完整 CI 恢复。
-本轮只交付依赖同步修复与本设计；真实 WAM、原生项目实现、生产 admission 以及
-H1–H4 继续未接受。后续实施独立原型需要先确认第 2–5 节范围，真实认证仍需另行确认。
+已推送 `51e40d1` 对应的
+[CI run 41582542490](https://github.com/hylinux/shovel/actions/runs/41582542490)
+中，两平台依赖同步成功、Windows Outlook job 通过；Ubuntu quality 已运行 pytest，
+结果为 4 failed、1178 passed、2 skipped。失败为既有 CLI ANSI substring 与三个
+Windows-path-on-Linux 测试，不是本原型引起。93 个本地 Ruff 格式基线文件仍按要求不改。
+
+本轮新增 Windows-only locked restore/build/format/synthetic test/platform check job，
+没有 live auth、账号、tenant 或凭据配置。standalone 实现不意味着新 CI 已远端通过，
+也不替代第 5 节真实验收。生产 admission、ENT-ADR-02 trusted IPC 及 H1–H4 仍未接受。
+
+本机验证：从 `native\` 解析 SDK 10.0.403，locked restore、Release build、
+两项目 `dotnet format --verify-no-changes` 通过，**21 个无认证测试通过**。
+包含真实 WinRT request 字段构造、真实未显示 HWND 的同线程/跨线程/关闭验证，
+以及 synthetic cancellation/timeout/late-result/cleanup-failure 测试。
+`check` 返回 `status=success, stage=platform`，两个 acceptance flag 均为 false；
+这仅确认平台/API metadata 可用，未执行真实 provider/account/token API。

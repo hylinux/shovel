@@ -31,6 +31,42 @@ jobs:
           backend\tests\test_chunker.py
           backend\tests\test_scan_pipeline.py
 
+  windows-wam:
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: pwsh
+        working-directory: native
+    env:
+      DOTNET_CLI_TELEMETRY_OPTOUT: "1"
+      DOTNET_SKIP_FIRST_TIME_EXPERIENCE: "1"
+      TESTINGPLATFORM_TELEMETRY_OPTOUT: "1"
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-dotnet@v4
+        with:
+          global-json-file: native\global.json
+      - name: Restore locked native dependencies
+        run: dotnet restore Shovel.Wam.Tests\Shovel.Wam.Tests.csproj --configfile NuGet.Config --locked-mode
+      - name: Check native formatting
+        run: |
+          dotnet format Shovel.Wam\Shovel.Wam.csproj --no-restore --verify-no-changes
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          dotnet format Shovel.Wam.Tests\Shovel.Wam.Tests.csproj --no-restore --verify-no-changes
+      - name: Build and test without authentication
+        run: dotnet test Shovel.Wam.Tests\Shovel.Wam.Tests.csproj --no-restore -c Release
+      - name: Check platform metadata without account or token calls
+        run: |
+          $json = dotnet run --project Shovel.Wam\Shovel.Wam.csproj --no-build -c Release -- check
+          $code = $LASTEXITCODE
+          $receipt = $json | ConvertFrom-Json
+          if ($code -notin @(0, 3) -or $receipt.status -notin @("success", "unavailable") -or
+              $receipt.scope -ne "standalone_wam" -or $receipt.production_ready -or
+              $receipt.live_acceptance_complete) {
+            throw "Unexpected WAM platform-check receipt."
+          }
+          exit 0
+
   quality:
     runs-on: ubuntu-latest
     steps:

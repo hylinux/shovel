@@ -18,6 +18,9 @@ wheels/
 .pytest_cache/
 .ruff_cache/
 .mypy_cache/
+native/**/bin/
+native/**/obj/
+native/**/TestResults/
 
 .DS_Store
 

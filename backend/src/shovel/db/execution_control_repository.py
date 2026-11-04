@@ -150,6 +150,10 @@ class SQLiteExecutionControlRepository:
                 session, lease.execution.snapshot.context.scope, lease.execution.id
             )
             self.executions._leased(row, lease)
+            if await self.executions.effect_rows(session, row):
+                await self._finish(session, row, ExecutionState.SUSPENDED, "external_effect_uncertain")
+                await session.commit()
+                return _record(row)
             policy = RetryPolicy.model_validate(
                 row.execution_control.get("retry_policy", policy.model_dump(mode="json"))
             )
@@ -178,6 +182,8 @@ class SQLiteExecutionControlRepository:
 
     async def _ready(self, session: AsyncSession, row: Operation, depth: int = 0) -> bool:
         if depth >= 32 or _record(row).state.terminal:
+            return False
+        if await self.executions.effects_blocked(session, row):
             return False
         wake_at = row.execution_control.get("wake_at")
         if isinstance(wake_at, int | float) and wake_at > self.clock():
@@ -449,13 +455,19 @@ class SQLiteExecutionControlRepository:
                 )
             )
             for row in rows:
-                replay_safe = not row.execution_control.get("enterprise_release_started") and safe(
-                    _record(row).snapshot.capability.content
+                replay_safe = (
+                    not row.execution_control.get("enterprise_release_started")
+                    and not await self.executions.effect_rows(session, row)
+                    and safe(_record(row).snapshot.capability.content)
                 )
                 await self._finish(session, row, ExecutionState.SUSPENDED, "interrupted")
                 row.execution_control = {
                     **row.execution_control,
-                    "wait_reason": "interrupted",
+                    "wait_reason": (
+                        "waiting_for_reconciliation"
+                        if await self.executions.effects_blocked(session, row)
+                        else "interrupted"
+                    ),
                     "replay_safe": replay_safe,
                 }
             for row in rows:

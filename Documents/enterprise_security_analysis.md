@@ -1403,3 +1403,79 @@ child/thread 传播、serialized ref 拒绝、实际 MAF tool round/SDK 零外�
 全仓 Ruff lint、修改文件格式、Mypy backend + sample（225 source files）及 whitespace
 检查通过。拒绝经 SDK 包装后仍返回安全 403，而不是泄漏内部连接错误；
 没有真实组织网络、WAM 登录、生产启用或新可信 adapter 部署。
+
+## 25. H2 既有 Execution 的外部效果安全
+
+用户确认采用保守恢复策略：**所有不确定发送先 reconciliation，再显式恢复**，
+包括支持 Provider 幂等键的操作。不是“把 external_write 标成 retry-safe”。
+
+### 25.1 装配与持久事实
+
+Host 总是装配 `ExternalEffectService`，effectful 非 Workflow 叶子只调用安装的
+`ExternalEffectAdapter`；普通 handler、MAF、用户配置和动态 import 不能充当 fallback。
+生产 adapter map 为空，H3 只读组织 policy、Connection admission 和 native WAM
+没有获得写权限。既有离线低层 Engine fixture 可以继续使用旧的隔离装配，
+但它不是生产 Host 安装，也不能作为启用真实写入的方式。
+
+Migration **20** 增加 `external_effect` 与 append-only `external_effect_event`，
+通过 FK 归属原 Operation/ExecutionAttempt；仍只有一个 Engine/Runtime。
+每个 Function 一个逻辑效果，多步通过既有 Workflow child 表达。
+数据库保存 snapshot/input/contract/target/request/bindings 的 fingerprint、
+Runtime 幂等键、phase/evidence hash、attempt、revision 和恢复隔离事实。
+不保存 HTTP 正文、凭据、完整 URL/headers、Provider 原始异常或动态业务响应。
+原来普通 Execution input 的持久化行为没有被伪装成 no-storage；企业正文仍受 H1 拒绝。
+
+### 25.2 发送与崩溃窗口
+
+先验证安装时固定 completion output 与原 schema，持久提交 intent，
+随后复查 current adapter binding、active claim/ancestor/deadline、capability
+availability、permission/Policy/consumed Approval 和 H1，提交 wire-phase intent，
+再允许 trusted adapter 单次发送。wire-phase 不是“已送达”证明。
+
+同一 Execution 的稳定幂等键跨 attempt 不变，已提交 applied receipt 复用而不重发。
+改变原参数或目标冲突；同一 owner/operation/规范化 target/request 的未知效果，
+也阻止通过新 Execution/request key 绕过隔离。幂等键不是外部系统支持幂等的证明。
+
+只有尚未进入 wire-phase 的当前调用可以证明 not_sent。intent 后 crash、SQLite
+dispatch commit 不明、wire timeout/401/challenge、receipt commit 丢失默认 uncertain。
+迟到 response 在取消后仍保存 metadata fact，不复活终态、不延长 deadline。
+冲突/跨 attempt 矛盾回执形成不可自动清除的 quarantine；后续普通 applied 或
+reconciliation 不能掩盖已失效的终态合同，须调查 Provider。未解决的效果也不能被
+repository 标为成功。
+普通 retry（即使传 safe=true）、timer、auth wait 和 startup recovery 不能清除隔离；
+Workflow root 的隔离涵盖所有后代，完成的 child 不重复。
+
+### 25.3 显式 reconciliation 与恢复
+
+`execution.reconcile` 仅调用原目标的受信只读 reconciler，前后重新验证授权与
+exact bindings。并发 claim 有界到期；超时/取消不等于未生效。not_applied 必须是
+旧请求不可能再迟到生效的可信终态证明，not-found/401/timeout/幂等键过期不够。
+binding/contract 改变后不自动改用新目标、身份或 policy；无法证明的原效果保持隔离。
+
+`execution.resume_effect` 只在全部效果已解决后，显式重新排队原 root；原 deadline、
+snapshot 和新的 business Approval 要求保留。两个 action 分别要求 server preview /
+single-use human confirmation，ticket 固定 root/revision/effect revisions。
+Main Agent 的 `execution_human_action` 只返回 pending action，不能签发或消费 ticket。
+API 是既有 `/api/v1/platform/commands`；CLI 为 `execution reconcile` 和
+`execution resume-effect`。reconciliation 本身不排队任何写操作。
+
+### 25.4 证据与限制
+
+`test_external_effects.py` 覆盖实际 Engine/SQLite 的三个 crash window、
+发送前权限/binding/Approval 变化、同键参数冲突、新 request-key 绕过、commit 不明、
+auth challenge、取消迟到结果、receipt 存储失败、只读核对并发/失效/unknown、
+原 deadline、不可替换/不可变事实和 H1 零外发。
+`test_platform_demos.py` 使用 Host/API/Workflow 验证 root 协调、人工 ticket、
+核对不自动恢复及 applied child 不再发送；所有外部动作均为离线 fixture。
+
+**没有新增真实写入 Provider、真实组织网络或 native WAM 写入验收。**
+真实 adapter 仍必须证明单次 wire/SDK 禁止内部重试、目标/认证/权限/source/出口检查、
+receipt 终态语义、取消和幂等键 retention；需要认证的核对须走受权只读 Engine 路径，
+不能给旧 write 伪造 lease。当前生产保持 default deny，不声称 Exactly Once，
+也不把受管 Python 路径当作任意扩展/MCP 的沙箱；H4 物理存储安全仍未完成。
+
+最终定向回归：上述 H2/Workflow/Host、既有 Execution/control/security/Registry、
+H1/H3、enterprise persistence/execution/failures/sample 与 protection policy 共
+18 个测试文件 **638 passed**，367.15 秒。全仓 Ruff lint、全部修改 Python 文件格式、
+Mypy backend + sample（228 source files）通过；两个新增 CLI 命令的 help 实际可用。
+未运行真实 Provider/WAM 写入，不将这些离线结果视为生产企业验收。

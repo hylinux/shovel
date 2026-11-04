@@ -21,6 +21,7 @@ from shovel.execution.domain import (
     ExecutorResult,
     FrozenVersionUnavailable,
 )
+from shovel.execution.effects import ExternalEffectService, ExternalEffectUncertain
 from shovel.execution.invocation import InvocationService
 from shovel.execution.ports import CapabilityExecutor, ExecutorContext
 from shovel.execution.validation import validate_data
@@ -49,6 +50,7 @@ class ExecutionEngine:
         workflow_context: Callable[[ExecutionLease], WorkflowContext] | None = None,
         wakeups: ExecutionWakeupService | None = None,
         authentication_waits: AuthenticationExecutionLifecycle | None = None,
+        effects: ExternalEffectService | None = None,
     ) -> None:
         if set(executors) != set(CapabilityKind):
             raise ValueError("Exactly one executor is required for every capability kind.")
@@ -57,6 +59,7 @@ class ExecutionEngine:
         self._workflow_context = workflow_context
         self.wakeups = wakeups
         self.authentication_waits = authentication_waits
+        self.effects = effects
         self._active: dict[str, asyncio.Task[ExecutorResult]] = {}
         self._dispatches: set[asyncio.Future[None]] = set()
         self._log = structlog.get_logger("shovel.execution")
@@ -134,6 +137,13 @@ class ExecutionEngine:
         async def execute_owned() -> ExecutorResult:
             token = authentication_execution_lease.set(lease)
             try:
+                if (
+                    self.effects is not None
+                    and execution.snapshot.capability.kind != CapabilityKind.WORKFLOW
+                    and execution.snapshot.capability.content.side_effect_profile.kind
+                    in {"external_write", "destructive"}
+                ):
+                    return await self.effects.execute(context)
                 return await executor.execute(context)
             finally:
                 authentication_execution_lease.reset(token)
@@ -165,6 +175,13 @@ class ExecutionEngine:
             return await self.repository.get(scope, identifier)
         except BudgetExceeded, TimeoutError:
             return await self.fail(lease, error_code="budget_exceeded")
+        except ExternalEffectUncertain:
+            return await self.repository.finish(
+                lease,
+                ExecutionState.SUSPENDED,
+                ExecutorResult(suspended=True),
+                error="external_effect_uncertain",
+            )
         except AuthenticationWaitRequired as wait:
             if self.authentication_waits is None:
                 return await self.fail(lease, error_code="authentication_unavailable")

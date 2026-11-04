@@ -125,12 +125,17 @@ def agent_tools(application: PlatformApplication) -> list[Callable[..., Any]]:
         )
 
     async def execution_human_action(
-        action: Literal["approve", "reject", "provide_input"],
+        action: Literal["approve", "reject", "provide_input", "reconcile", "resume_effect"],
         execution_id: str,
-        request_id: str,
+        request_id: str | None = None,
         response_json: str = "null",
     ) -> dict[str, Any]:
         """Request explicit user action for exact IDs. Chat text is never an approval."""
+        if action in {"reconcile", "resume_effect"}:
+            return await application.execute(
+                PlatformCommand.model_validate({"action": f"execution.{action}", "identifier": execution_id}),
+                human=False,
+            )
         return await application.execute(
             PlatformCommand.model_validate(
                 {

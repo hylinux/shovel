@@ -88,6 +88,43 @@ Engine；Provider 不创建 Schedule、不拥有业务触发器。connection/ide
 
 ## 3. Provider authoring
 
+### H2 外部写入
+
+受管 Host 对 `external_write`/`destructive` 叶子使用
+`execution\effects.py` 的 `ExternalEffectAdapter`，而非普通 Function handler。
+必须由受控安装同时提供匹配的 FunctionContract、独立 write permission 和 adapter；
+Agent 参数、个人 TOML、动态 Python 路径和普通 connection ref 不能安装它。
+生产 map 为空；现有 H3 catalog、native WAM 和企业出口没有因此获得 WRITE 权限。
+
+`prepare` 不发送，返回 contract、稳定 target、request、当前 identity/connection/source/
+policy bindings 的 SHA-256。target digest 在 revision 改变后仍标识同一规范化目标，
+revision 放 binding digest；request digest 包含全部业务参数。不得用重新生成的随机值
+或 execution ID 隐藏同一请求。`authorize` 必须复查实际外部权限与独立出口授权；
+`send` 只发送一次，不能在 SDK 内 refresh/retry/redirect。Runtime 提供稳定幂等键，
+不意味着外部系统真的支持幂等。正文/Token/URL/headers/error 不能进入 EffectEvidence；
+只允许 outcome 和 hash。`completion_output` 是安装时固定的非正文收据模板，
+发送前验证原 Function output schema，不从 Provider body 回填它。
+
+`reconcile` 只能读原请求的效果，必须前后独立授权；若需登录，应通过同一 Engine
+的受权只读查询取得证据，不得伪造旧 write lease 或绕过 native WAM resolver。
+必须证明请求已 applied 或**不能再迟到 applied**才返回 not_applied；
+没找到、超时、401、凭据过期、幂等键过期都只得到 unknown。未知效果一律隔离，
+即便 Provider 宣称支持幂等，也不自动重发。外部操作和 SQLite 不能原子提交。
+
+查询 `execution show <root-id>` 可见安全 receipt metadata。以下 CLI 使用既有
+preview/确认流程（HTTP 对应 `/api/v1/platform/commands` 的 `execution.reconcile`、
+`execution.resume_effect`，分别 `prepare: true` 后消费同意图 confirmation_id）：
+
+```powershell
+uv run shovel execution reconcile <root-id>
+uv run shovel execution resume-effect <root-id>
+```
+
+reconcile 不恢复业务执行；unknown 仍阻止恢复。resume-effect 仅在所有事实已解决后
+重新排队原 root，必要的新 business Approval 仍必须完成，原 deadline 不重置。
+取消/失败的终态只允许核对事实，不能复活。普通 resume、timer、retry 和重启不能代替它。
+这些命令不能装配真实写入服务；运行前仍须组织批准可信 adapter 与网络/认证合同。
+
 先声明 Manifest，再安装 FunctionContract/handler，最后才创建并发布匹配的 Capability。
 Contract 与 content 必须一致，包含 exact required permissions、connection requirements、
 input/output schema、risk/side effects 和 retry contract；Capability 还须显式设置

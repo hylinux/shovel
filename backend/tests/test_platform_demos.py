@@ -44,11 +44,11 @@ from shovel.capability.domain import (
 from shovel.capability.registry import CapabilityRegistry
 from shovel.cli.app import app as cli
 from shovel.db.database import create_async_database_engine, create_async_session_factory
-from shovel.execution.domain import Execution, ExecutionState, ExecutorResult
-from shovel.execution.executors import FunctionExecutor
-from shovel.execution.ports import ExecutorContext
+from shovel.execution.domain import Execution, ExecutionState
+from shovel.execution.effects import EffectEvidence, EffectIntent
 from shovel.platform.agent_tools import agent_tools
 from shovel.platform.domain import PlatformCommand
+from shovel.protection.domain import content_digest
 from shovel.runtime.api import configure_api
 from shovel.runtime.client import _decode
 from shovel.runtime.platform_client import _perform
@@ -123,10 +123,158 @@ class Model:
             200, json={"created": 1, "choices": [{"message": {"role": "assistant", "content": answer}}]}
         )
 
-    async def send_demo(self, context: ExecutorContext) -> ExecutorResult:
-        assert context.execution.input == {"draft": "Draft response, not sent"}
-        self.receipts.append(context.execution.id)
-        return ExecutorResult(output={"demo_only": True, "sent": False})
+
+class DemoEffectAdapter:
+    permission = SEND
+
+    def __init__(self, model: Model) -> None:
+        self.model = model
+        self.completion_output = {"demo_only": True, "sent": False}
+        self.lose_response = False
+        self.probes = 0
+
+    async def prepare(self, execution):
+        return EffectIntent(
+            implementation_id="demo.send_email",
+            contract_digest=content_digest({"contract": "fixture-only-v1"}),
+            target_digest=content_digest({"target": "no-mail-is-sent.invalid"}),
+            request_digest=content_digest(execution.input),
+            binding_digest=content_digest({"binding": "offline-fixture"}),
+        )
+
+    async def authorize(self, lease, intent):
+        assert SEND in lease.execution.snapshot.granted_permissions
+        assert intent == await self.prepare(lease.execution)
+
+    async def send(self, execution, intent, *, idempotency_key):
+        assert execution.input == {"draft": "Draft response, not sent"}
+        self.model.receipts.append(execution.id)
+        if self.lose_response:
+            raise TimeoutError("Synthetic lost receipt; no real mail was sent.")
+        return EffectEvidence(outcome="applied", evidence_digest=content_digest({"key": idempotency_key}))
+
+    async def authorize_reconciliation(self, execution, receipt):
+        assert receipt.execution_id == execution.id
+        assert SEND in execution.snapshot.granted_permissions
+
+    async def reconcile(self, execution, receipt, *, idempotency_key):
+        self.probes += 1
+        return EffectEvidence(
+            outcome="applied" if execution.id in self.model.receipts else "not_applied",
+            evidence_digest=content_digest({"fixture": execution.id}),
+        )
+
+
+async def test_h2_host_workflow_requires_confirmed_reconciliation_and_resume(demo: Demo) -> None:
+    send = await demo.publish(
+        "Offline receipt",
+        CapabilityContent(
+            implementation=FunctionImplementation(implementation_id=SEND_CONTRACT.implementation_id),
+            input_schema=MAIL,
+            output_schema=RECEIPT,
+            required_permissions=(SEND,),
+            permission_boundary=(SEND,),
+            risk_profile=SEND_CONTRACT.risk_profile,
+            side_effect_profile=SEND_CONTRACT.side_effect_profile,
+        ),
+    )
+    parent = await demo.publish(
+        "Offline receipt workflow",
+        workflow(
+            WorkflowNode(
+                id="send",
+                kind="function",
+                capability=reference(send),
+                input_mapping={"draft": binding("input", "text")},
+            ),
+            dependencies=(send,),
+            output={
+                "demo_only": binding("nodes", "send", "demo_only"),
+                "sent": binding("nodes", "send", "sent"),
+            },
+            external=True,
+        ),
+    )
+    adapter = demo.runtime.external_effects._adapters["demo.send_email"]
+    adapter.lose_response = True
+    queued = await demo.command(
+        PlatformCommand(
+            action="execution.run",
+            identifier=parent.capability_id,
+            version=1,
+            request_key="h2-host",
+            input={"text": "Draft response, not sent"},
+        )
+    )
+
+    async def drive_approvals() -> Execution:
+        for _ in range(12):
+            current = await demo.pump(queued["id"])
+            pending = [
+                row
+                for row in (await demo.api.get("/api/v1/platform/approvals")).json()["items"]
+                if row["state"] == "pending"
+            ]
+            if not pending:
+                return current
+            for approval in pending:
+                await demo.command(
+                    PlatformCommand(
+                        action="approval.approve",
+                        identifier=approval["id"],
+                        execution_id=approval["execution_id"],
+                    ),
+                    confirm=True,
+                )
+        pytest.fail("H2 fixture exceeded its bounded approval driver")
+
+    current = await drive_approvals()
+    assert current.state == ExecutionState.SUSPENDED and len(demo.model.receipts) == 1
+    command = PlatformCommand(action="execution.reconcile", identifier=current.id)
+    tools = {tool.__name__: tool for tool in agent_tools(demo.runtime.platform)}
+    pending = await tools["execution_human_action"]("reconcile", current.id)
+    assert pending["requires_confirmation"] and adapter.probes == 0
+    no_ticket = await demo.api.post("/api/v1/platform/commands", json=command.model_dump(mode="json"))
+    assert no_ticket.status_code == 409
+    preview = await demo.command(command.model_copy(update={"prepare": True}))
+    payload = command.model_copy(update={"confirmation_id": preview["confirmation_id"]}).model_dump(
+        mode="json"
+    )
+    response = await demo.api.post("/api/v1/platform/commands", json=payload)
+    assert response.status_code == 200 and adapter.probes == 1
+    (receipt,) = response.json()["effects"]
+    assert receipt["state"] == "applied" and receipt["resume_required"]
+    assert (await demo.api.post("/api/v1/platform/commands", json=payload)).status_code == 409
+    normal_resume = PlatformCommand(action="execution.resume", identifier=current.id)
+    assert (
+        await demo.api.post("/api/v1/platform/commands", json=normal_resume.model_dump(mode="json"))
+    ).status_code == 409
+    await demo.runtime.wakeups.run_due()
+    assert not await demo.runtime.execution_engine.run_once()
+    assert (await demo.execution(current.id)).state == ExecutionState.SUSPENDED
+    resume = PlatformCommand(action="execution.resume_effect", identifier=current.id)
+    preparation = await demo.api.post(
+        "/api/v1/platform/commands",
+        json=resume.model_copy(update={"prepare": True}).model_dump(mode="json"),
+    )
+    assert preparation.status_code == 200
+    stamp = preparation.json()
+    changed = resume.model_copy(
+        update={"identifier": receipt["execution_id"], "confirmation_id": stamp["confirmation_id"]}
+    )
+    assert (
+        await demo.api.post("/api/v1/platform/commands", json=changed.model_dump(mode="json"))
+    ).status_code == 409
+    stamp = await demo.command(resume.model_copy(update={"prepare": True}))
+    response = await demo.api.post(
+        "/api/v1/platform/commands",
+        json=resume.model_copy(update={"confirmation_id": stamp["confirmation_id"]}).model_dump(mode="json"),
+    )
+    assert response.status_code == 202 and response.json()["state"] == "queued"
+    completed = await drive_approvals()
+    assert completed.state == ExecutionState.SUCCEEDED
+    assert completed.output == {"demo_only": True, "sent": False}
+    assert len(demo.model.receipts) == 1
 
 
 @dataclass
@@ -197,10 +345,6 @@ async def demo(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> AsyncIterator
         "shovel.runtime.service.CapabilityRegistry",
         lambda repository: CapabilityRegistry(repository, functions=(SEND_CONTRACT,)),
     )
-    monkeypatch.setattr(
-        "shovel.runtime.service.FunctionExecutor",
-        lambda _: FunctionExecutor({"demo.send_email": model.send_demo}),
-    )
     settings = settings_at(tmp_path)
     settings.platform.security = UserSecurityPolicy(
         user_grants=GRANTS, platform_constraints=GRANTS, allowed_side_effects=("none", "external_write")
@@ -212,6 +356,7 @@ async def demo(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> AsyncIterator
     managed = create_runtime(settings, engine, sessions, ResourceService(sessions))
     try:
         runtime = await anext(managed)
+        runtime.external_effects._adapters["demo.send_email"] = DemoEffectAdapter(model)
         runtime.chat.agent._client = httpx.AsyncClient(transport=httpx.MockTransport(model.respond))
         now = [datetime(2030, 1, 1, 8, 59, 59, tzinfo=UTC).timestamp()]
         runtime.proactive.clock = runtime.proactive.repository.clock = lambda: now[0]

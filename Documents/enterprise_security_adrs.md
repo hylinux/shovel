@@ -525,6 +525,38 @@ SQLite提交和HTTP发送不可能一个原子事务。崩溃恢复只有可信n
 证据才能重试；“intent已写但未见response”不能推断未发出，默认uncertain并reconcile。
 非幂等外部effects无法因token refresh、401或timeout盲重放，不另建dispatch Runtime。
 
+**H2 已实施切片**
+
+受管 Host 在既有 Engine 装配 `ExternalEffectService`，`external_write`/`destructive`
+叶子只交给受控安装的 Function adapter；不回退普通 handler、MAF 或用户 import。
+生产 adapter map 为空，原 H3 metadata/read-only admission 与 native WAM 限制不扩权。
+Migration 20 的 intent/append-only events 以 FK 关联原 Operation/attempt；不另建 Engine。
+持久 intent、wire-phase intent、metadata-only evidence 与静态 completion 分离；先验证
+output schema，再提交 intent，复查 active lease/ancestor/deadline、当前 capability
+availability、permission/Policy/consumed Approval、adapter 精确 bindings 和 H1，才进入 wire。
+
+幂等键由 Runtime 产生，同一 Execution/Function 跨 attempt 保持；fingerprint 冻结
+snapshot/input/contract/target/request/bindings，改变参数冲突。相同 owner、operation、
+稳定 target 和请求的未知 effect 还会阻止用新 Execution/request key 绕过隔离。
+已提交 applied receipt 在显式恢复后复用，不重发。意图提交而没有响应不能证明未发；
+commit 不确定、wire error/challenge、receipt commit 丢失、crash 都保持 uncertain。
+所有不确定发送（包括 Provider 支持幂等键的情况）均先 reconciliation，不自动 replay。
+
+reconciliation 仅让受信 adapter 只读查询原请求，当前权限及 bindings 前后复查。
+not_applied 必须证明旧请求不能再迟到生效，not-found/401/timeout 不够。unknown、
+取消或失败不能清除隔离；并发 claim 有界到期，迟到 receipt 保留事实但不复活终态。
+矛盾/跨 attempt 回执具有 sticky conflict fence，不允许后续普通成功证明抹掉冲突；
+须调查 Provider 合同，未解决的效果不能由 repository 标为成功。
+`execution.reconcile` 与 `execution.resume_effect` 分别要求精确 server preview 和
+single-use human confirmation；Main Agent 只能返回 pending action。前者不排队执行，
+后者不替代新的 business Approval，也不延长原 deadline。普通 resume、retry、
+timer、startup recovery 不能清除隔离，Workflow 以 root 协调、已完成 child 不重复。
+
+这仍不是 Exactly Once：安装的 transport 必须真实禁止 SDK/HTTP/auth retry，
+提供可验证的 receipt/终态合同，并独立实现网络、认证、source 和出口授权。需要
+认证的 receipt 查询须使用既有 Engine 的受权只读路径，不能给旧 write 伪造有效 lease。
+当前只有离线 fixture，没有真实写入 Provider、真实 reconciliation endpoint 或上线验收。
+
 **ES-8 implemented slice**
 
 可信只读 Function 将 manifest/profile/source/permission 固定到既有 Execution，并在

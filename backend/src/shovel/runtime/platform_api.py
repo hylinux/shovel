@@ -24,7 +24,13 @@ def platform_router(dependency: Any) -> APIRouter:
                 raise RuntimeFailure("Idempotency-Key conflicts with request_key.", status=409)
             body = body.model_copy(update={"request_key": request_key})
         result = await rt.platform.execute(body, human=True)
-        status = 202 if body.action in {"execution.run", "proactive.run", "execution.resume"} else 200
+        status = (
+            202
+            if not body.prepare
+            and body.action
+            in {"execution.run", "proactive.run", "execution.resume", "execution.resume_effect"}
+            else 200
+        )
         return JSONResponse(result, status_code=status)
 
     @router.get("/capabilities")

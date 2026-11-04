@@ -377,6 +377,28 @@ def _register_executions() -> None:
 _register_executions()
 
 
+def _register_effect_actions() -> None:
+    for action in ("reconcile", "resume_effect"):
+
+        def register(name: str) -> None:
+            @execution.command(name.replace("_", "-"))
+            @command_handler()
+            def manage(identifier: str) -> None:
+                _run(
+                    PlatformCommand.model_validate(
+                        {
+                            "action": f"execution.{name}",
+                            "identifier": identifier,
+                        }
+                    )
+                )
+
+        register(action)
+
+
+_register_effect_actions()
+
+
 @interaction.command("list")
 @command_handler()
 def list_interactions() -> None:

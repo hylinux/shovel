@@ -17,6 +17,7 @@ from .capability import (
 from .config import Resource, ScanProfile, Schedule
 from .content import BlobRef, Chunk, Document, DocumentDerived
 from .control import ExecutionWakeup
+from .effect import ExternalEffect, ExternalEffectEvent
 from .enterprise import EnterpriseConnectionProfile
 from .enterprise_execution import AuthenticationCompletion, ProtectionAudit
 from .execution import ExecutionAttempt, ExecutionStep, Job, JobEvent
@@ -81,6 +82,8 @@ __all__ = [
     "ExecutionAttempt",
     "ExecutionStep",
     "ExecutionWakeup",
+    "ExternalEffect",
+    "ExternalEffectEvent",
     "FactDecision",
     "FactEvent",
     "FactMessage",

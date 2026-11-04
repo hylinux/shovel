@@ -14,6 +14,8 @@ synthetic whole-buffer read/display 路径。它不是 penetration test、合规
 H1 已接入受管 Host 的拒绝式 containment，见分析第 24 节；没有可信正向适配器的
 企业模型/Artifact/clipboard/Memory/Knowledge 等出口继续拒绝。ES-10 示例本身仍只是离线证据；
 不把现有个人聊天、MCP、上传、Memory/Knowledge 自动变成受保护企业入口。
+H2 已在受管 Host 接入受信 Function 的 durable intent/receipt、未知效果隔离与显式
+reconciliation/resume；生产写入 adapter 仍为空，没有真实企业写入或 Exactly Once 验收。
 
 ## 资产、攻击者和信任假设
 
@@ -66,7 +68,7 @@ Python 进程**不是沙箱**：恶意同进程代码可以读取内存、调用
 | 派生结果洗掉限制/用旧 body 假恢复 | conservative merge、全部 DATA/CONTROL lineage、source-bound generation、transient process ownership；protection/persistence tests | 跨进程派生 body 恢复、实际模型输出 adapter 不在当前接受范围 |
 | 撤权/删除/policy 变更后旧缓存再现 | query/materialization 回查、source fence、fresh snapshot、逐 binding generation；persistence/failure/vector tests | durable source-change admission/observer/delivery 尚未装配；信号未到达不能承诺即时撤权 |
 | 重放 wait/completion/timer 或并发恢复 | atomic suspension、append-only completion、lease/claim、认证等待不被 timer 覆盖、原 deadline；execution/failure tests | 真实 broker、进程 crash 与组织外部系统仍需端到端验收 |
-| display 后 crash 重复外部 effect | 释放前 durable intent/replay guard，未知显示不盲重放；execution tests | H2 通用 external-write dispatch/reconciliation 未实现，不声称 Exactly Once |
+| write/display 后 crash 重复外部 effect | 原 Execution/attempt 上的 durable intent、稳定 key、metadata receipt、未知 effect 跨 key fence、只读 reconciliation 与单次人工恢复；`test_external_effects.py`、`test_platform_demos.py` | 真实 Provider 的 wire/幂等/终态合同、SDK 内部重试与认证 receipt 查询仍须验收；不声称 Exactly Once |
 | 审计失败仍释放/DoS 无限等待 | explicit audit UoW、释放前 commit、bounded auth/deadline、audit failure tests | mandatory audit/retention/可用性/队列容量须组织定义；受控进程不是无限资源隔离 |
 | 终端/屏幕/本地存储绕过 no-copy | DISPLAY 也按 destination/rights/obligation gate；未实现保护义务则拒绝 | 显示后不能靠按钮限制截图/redirect；没有通用受保护查看器 |
 | SQLite/WAL/backup/vector 物理残留或篡改 | metadata-only、owner/revision constraints、删除意图与重查 | H4 encryption、WAL/backup purge、tamper evidence、native vector 安全擦除未证明 |

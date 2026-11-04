@@ -23,6 +23,8 @@ type Action = Literal[
     "execution.show",
     "execution.cancel",
     "execution.resume",
+    "execution.reconcile",
+    "execution.resume_effect",
     "execution.find",
     "proactive.create",
     "proactive.update",

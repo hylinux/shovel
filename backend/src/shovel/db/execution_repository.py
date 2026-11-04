@@ -13,6 +13,7 @@ from shovel.capability.domain import CapabilityScope
 from shovel.db.authentication_lifecycle import retire_authentication
 from shovel.db.base import new_id
 from shovel.db.model.capability import CapabilityDefinition, CapabilityVersion, CapabilityVersionAvailability
+from shovel.db.model.effect import ExternalEffect, record_effect
 from shovel.db.model.enterprise_execution import AuthenticationCompletion
 from shovel.db.model.execution import ExecutionAttempt as AttemptRow
 from shovel.db.model.execution import ExecutionStep as StepRow
@@ -465,6 +466,30 @@ class SQLiteExecutionRepository:
     async def _end_attempt(
         self, session: AsyncSession, row: Operation, state: ExecutionState, *, reason: str | None = None
     ) -> None:
+        if state != ExecutionState.SUCCEEDED:
+            facts = list(
+                await session.scalars(
+                    select(ExternalEffect).where(
+                        ExternalEffect.execution_id == row.id,
+                        ExternalEffect.claim_token == row.claim_token,
+                    )
+                )
+            )
+            for fact in facts:
+                if fact.state in {"intent", "dispatched"}:
+                    fact.state = "uncertain"
+                fact.resume_required = True
+                record_effect(session, fact, self.clock(), "attempt_closed")
+            if facts:
+                row.execution_control = {
+                    **row.execution_control,
+                    "wait_reason": (
+                        "waiting_for_reconciliation"
+                        if any(fact.state == "uncertain" for fact in facts)
+                        else "waiting_for_effect_resume"
+                    ),
+                    "replay_safe": False,
+                }
         if row.claim_token:
             attempt = await session.scalar(
                 select(AttemptRow).where(AttemptRow.claim_token == row.claim_token)
@@ -512,6 +537,8 @@ class SQLiteExecutionRepository:
             row = await self._find(session, lease.execution.snapshot.context.scope, lease.execution.id)
             self._leased(row, lease)
             ExecutionStateMachine.check(ExecutionState(row.state), state)
+            if state == ExecutionState.SUCCEEDED and await self.effects_blocked(session, row):
+                raise RuntimeFailure("External-effect outcomes are not settled.", status=409)
             children = await self._children(session, row)
             if state != ExecutionState.FAILED and any(
                 not ExecutionState(item.state).terminal
@@ -542,7 +569,25 @@ class SQLiteExecutionRepository:
             await session.commit()
             return cancelled
 
+    async def effect_rows(self, session: AsyncSession, row: Operation) -> list[ExternalEffect]:
+        identifiers = [row.id, *(child.id for child in await self._children(session, row))]
+        return list(
+            await session.scalars(
+                select(ExternalEffect)
+                .where(ExternalEffect.execution_id.in_(identifiers))
+                .order_by(ExternalEffect.id)
+            )
+        )
+
+    async def effects_blocked(self, session: AsyncSession, row: Operation) -> bool:
+        return any(
+            fact.resume_required or fact.state in {"intent", "dispatched", "uncertain"}
+            for fact in await self.effect_rows(session, row)
+        )
+
     async def ensure_resumable(self, session: AsyncSession, row: Operation) -> None:
+        if await self.effects_blocked(session, row):
+            raise RuntimeFailure("External effects require reconciliation and explicit resume.", status=409)
         if row.execution_control.get("enterprise_release_started"):
             raise RuntimeFailure(
                 "Enterprise output may have been released; reconciliation is required.", status=409
@@ -595,7 +640,11 @@ class SQLiteExecutionRepository:
                 .limit(1)
             )
             if dispatched is not None:
-                raise RuntimeFailure("A dispatched external effect cannot be blindly resumed.", status=409)
+                facts = await self.effect_rows(session, row)
+                if not any(fact.execution_id == row.id for fact in facts):
+                    raise RuntimeFailure(
+                        "A dispatched external effect cannot be blindly resumed.", status=409
+                    )
 
     async def resume(self, scope: CapabilityScope, identifier: str) -> Execution:
         async with sqlite_write(self.sessions) as session:

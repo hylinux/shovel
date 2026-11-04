@@ -10,6 +10,7 @@ from shovel.db.base import Base, now_ts
 from shovel.db.model.automation import PROACTIVE_DDL
 from shovel.db.model.capability import CAPABILITY_DDL
 from shovel.db.model.control import WAKEUP_DDL
+from shovel.db.model.effect import EFFECT_DDL
 from shovel.db.model.enterprise import CONNECTION_DDL
 from shovel.db.model.enterprise_execution import ENTERPRISE_EXECUTION_DDL
 from shovel.db.model.execution import EXECUTION_DDL, KERNEL_INDEX_DDL, STEP_DDL
@@ -380,6 +381,15 @@ def _upgrade(connection: Connection) -> None:
         connection.execute(
             insert(SchemaMigration).values(
                 version=19, name="organization_policy_and_source_tombstones", applied_at=now_ts()
+            )
+        )
+
+    if 20 not in versions:
+        for statement in EFFECT_DDL:
+            connection.exec_driver_sql(statement)
+        connection.execute(
+            insert(SchemaMigration).values(
+                version=20, name="external_effect_intents_receipts_and_reconciliation", applied_at=now_ts()
             )
         )
 

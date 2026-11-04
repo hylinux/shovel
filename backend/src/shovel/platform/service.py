@@ -48,6 +48,8 @@ CONFIRMED_ACTIONS = frozenset(
         "approval.reject",
         "interaction.input",
         "automation.resume",
+        "execution.reconcile",
+        "execution.resume_effect",
     }
 )
 
@@ -121,6 +123,9 @@ class PlatformApplication:
                     services.append(preview)
             return {"control": _json(control), "services": services}, ()
         identifier = _required(command.identifier, "identifier")
+        if command.action in {"execution.reconcile", "execution.resume_effect"}:
+            effects = _required(self.engine.effects, "external effect service")
+            return await effects.preview(self.scope, identifier), ()
         if command.action == "capability.publish":
             number = _required(command.version, "version")
             revision = _required(command.expected_revision, "expected_revision")
@@ -454,7 +459,12 @@ class PlatformApplication:
             return {"execution": (await self._execution_views([found]))[0] if found else None}
         if action.startswith("execution."):
             identifier = _required(identifier, "identifier")
-            if action == "execution.cancel":
+            if action in {"execution.reconcile", "execution.resume_effect"}:
+                effects = _required(self.engine.effects, "external effect service")
+                if action == "execution.reconcile":
+                    return dict(await effects.reconcile(scope, identifier))
+                await effects.resume(scope, identifier)
+            elif action == "execution.cancel":
                 await self.engine.cancel(scope, identifier)
             elif action == "execution.resume":
                 execution = await self.engine.repository.get(scope, identifier)
@@ -470,6 +480,14 @@ class PlatformApplication:
                 "attempt_history": [
                     _json(row) for row in await self.engine.repository.attempts(scope, identifier)
                 ],
+                "external_effects": (
+                    [
+                        row.model_dump(mode="json")
+                        for row in (await self.engine.effects.repository.inspect(scope, identifier))[1]
+                    ]
+                    if self.engine.effects is not None
+                    else []
+                ),
             }
         if action == "proactive.list":
             return {"items": [await self._service_view(row) for row in await self.proactive.list(scope)]}

@@ -79,7 +79,12 @@ async def platform_command(
             return await runtime.platform.execute(body, human=True)
 
         result = await _perform(local, command, confirm)
-        if command.action in {"execution.run", "proactive.run", "execution.resume"}:
+        if command.action in {
+            "execution.run",
+            "proactive.run",
+            "execution.resume",
+            "execution.resume_effect",
+        }:
             identifier = result["id"]
             while result["state"] in {"queued", "running"}:
                 if runtime.stopping.is_set():

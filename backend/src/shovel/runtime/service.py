@@ -19,6 +19,7 @@ from shovel.config.settings import AppSettings
 from shovel.db.approval_repository import SQLiteApprovalRepository
 from shovel.db.authentication_repository import SQLiteAuthenticationRepository
 from shovel.db.capability_repository import SQLiteCapabilityRepository
+from shovel.db.effect_repository import SQLiteEffectRepository
 from shovel.db.enterprise_repository import SQLiteConnectionRepository
 from shovel.db.execution_control_repository import SQLiteExecutionControlRepository
 from shovel.db.execution_repository import SQLiteExecutionRepository
@@ -33,6 +34,7 @@ from shovel.enterprise.organization_service import OrganizationService
 from shovel.enterprise.service import ConnectionService
 from shovel.exceptions.pipeline import VectorSinkError
 from shovel.execution.control import ExecutionWakeupService, RecoveryService
+from shovel.execution.effects import ExternalEffectService
 from shovel.execution.engine import ExecutionEngine
 from shovel.execution.executors import AgentExecutor, FunctionExecutor, SkillExecutor, WorkflowExecutor
 from shovel.execution.invocation import InvocationService
@@ -137,6 +139,9 @@ class Runtime:
         self.notifications = NotificationService(interaction_repository)
         self.operation_queries = OperationQueries(SQLiteOperationReader(sessions))
         authentication_repository = SQLiteAuthenticationRepository(sessions)
+        self.external_effects = ExternalEffectService(
+            SQLiteEffectRepository(sessions), self.invocations.security, {}
+        )
         self.execution_engine = ExecutionEngine(
             self.invocations,
             {
@@ -156,6 +161,7 @@ class Runtime:
             workflow_context=self.workflows.bind,
             wakeups=self.wakeups,
             authentication_waits=authentication_repository,
+            effects=self.external_effects,
         )
         self.native_wam = NativeWamBroker()
         authentication = AuthenticationService(

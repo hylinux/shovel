@@ -12,6 +12,7 @@ from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import padding, rsa
 from cryptography.x509.oid import ExtendedKeyUsageOID, NameOID
 from pydantic import SecretStr, ValidationError
+from scripts.synthetic_storage import synthetic_governance
 from sqlalchemy import select, text
 
 from shovel.capability.domain import (
@@ -290,6 +291,7 @@ def make_service(catalog, signer, *, now=None, document=None):
         runtime_version="0.1.2",
         loader=lambda: holder[0],
         clock=lambda: now[0],
+        governance=synthetic_governance(SCOPE, lambda: now[0])[0],
     )
     return service, holder, now
 
@@ -423,6 +425,7 @@ async def metadata_flow(kernel, signer):
         loader=lambda: holder[0],
         clock=lambda: now[0],
         client=KustoMetadataClient(transport=httpx.MockTransport(reply), clock=lambda: now[0]),
+        governance=synthetic_governance(SCOPE, lambda: now[0])[0],
     )
     await service.refresh_policy()
     permission = Permission(action="enterprise.read", resource=record.profile.id)

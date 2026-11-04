@@ -182,7 +182,10 @@ class VerifiedOrganizationPolicy:
     digest: str
 
 
-def verify_policy(envelope: bytes, anchor: OrganizationAnchor, *, now: float) -> VerifiedOrganizationPolicy:
+def verify_signed_document(
+    envelope: bytes, anchor: OrganizationAnchor, *, now: float
+) -> tuple[object, str, float]:
+    """Verify pinned organization bytes without changing either signed document format."""
     try:
         if len(envelope) > 1024 * 1024 or hashlib.sha256(envelope).hexdigest() != anchor.envelope_sha256:
             raise ValueError("Organization envelope pin mismatch.")
@@ -210,19 +213,31 @@ def verify_policy(envelope: bytes, anchor: OrganizationAnchor, *, now: float) ->
         ):
             raise ValueError("Organization signing authority rejected.")
         key.verify(signature, payload, padding.PKCS1v15(), hashes.SHA256())
-        policy = OrganizationPolicy.model_validate(unique_json(payload))
+        return (
+            unique_json(payload),
+            hashlib.sha256(payload).hexdigest(),
+            certificate.not_valid_after_utc.timestamp(),
+        )
+    except Exception:
+        raise ProtectionDeniedError("Organization document signature is unavailable.") from None
+
+
+def verify_policy(envelope: bytes, anchor: OrganizationAnchor, *, now: float) -> VerifiedOrganizationPolicy:
+    try:
+        document, digest, certificate_expiry = verify_signed_document(envelope, anchor, now=now)
+        policy = OrganizationPolicy.model_validate(document)
         if (
             policy.organization_id != anchor.organization_id
             or policy.revision != anchor.revision
             or not policy.issued_at <= now < policy.expires_at
-            or policy.expires_at > certificate.not_valid_after_utc.timestamp()
+            or policy.expires_at > certificate_expiry
         ):
             raise ValueError("Organization policy scope or validity rejected.")
         if not policy.revoked:
             for connection in policy.connections:
                 if connection.active:
                     policy.validate_connection(connection)
-        return VerifiedOrganizationPolicy(policy, hashlib.sha256(payload).hexdigest())
+        return VerifiedOrganizationPolicy(policy, digest)
     except Exception:
         raise ProtectionDeniedError(
             "Organization policy signature, scope or freshness is unavailable."

@@ -272,3 +272,54 @@ unknown protection、source 删除/撤权、policy 变更、审计失败、并�
 应另有明确 opt-in、批准的 tenant/account/测试数据、实际 SDK/出口与恢复证明。
 H1 全出口、H2 external-write reconciliation、H3 组织 trust/source lifecycle、
 H4 retention/physical storage 仍是上线门槛，详见威胁模型。
+
+## 9. H4 治理与存储 authority 接入边界
+
+`protection\governance.py` 定义单独的组织签名文档
+`shovel.organization.governance.v1`。须完整声明 body、metadata、vector、summary、
+control_lineage、artifact、cache、audit 八类规则，明确 storage deny/encrypted、
+retention/offline、revocation/delete、backup retention、erasure 等级及保留依据；
+另外绑定 scope、organization、retention/protection policy refs、storage 和 key authority。
+使用原有组织证书/envelope pins 校验机制，但不改变 H3 文档或旧版本 hash。
+`scripts\synthetic_storage.py` 内签名者、期限、encrypted evidence 均为合成验收，禁止用于生产。
+
+存储证明只能由受控安装 bootstrap 经 `configure_governance_host()` 注册的可信实现
+提供；个人设置、Agent、连接参数或 workspace Python 文件不能供应生产信任根。
+authority 需要实际验证 SQLite/WAL/SHM/temp、相关 native index/文件和 backup 的保护，
+非导出密钥、consumer/旧程序访问边界、外部单调撤权/版本、防回滚和完整备份 inventory。
+每次返回绑定精确 request digest、nonce、owner、物理 store/destination 的短时证明。
+“在 BitLocker 盘上”不证明单条数据可加密销毁；删除 keyring entry 不证明旧 key copy 消失。
+这里没有默认 authority，也没有 SQLCipher/卷加密/KMS 的模拟生产实现。
+
+`authorize()` 必须复查当前授权对象和全部治理义务，不能用恢复的 SQLite ledger 当
+外部权威。`retire()` 按 scope/store/record 或 source 做单调、幂等退休；nonce 不是幂等键。
+丢回复或本地提交失败可重做同一退休，不得重新放行旧 generation。
+retired 状态说明访问退休，不独自证明完成 physical/cryptographic erasure。
+H4 不是 H1 的授权替代：READ/PERSIST 仍不授予 INDEX、备份、模型或其他出口。
+
+`SQLiteProtectionRepository` 要求 metadata 和所有涉及的 CONTROL/summary/vector 类别
+分别通过门禁。新 sidecar 固定原期限与 generation，新规则只能进一步收窄旧数据；
+缺旧 sidecar 的历史记录不自动迁入。既有 Host refresh 执行到期/失效清理，
+payload/admission binding 清空与 vector intent 同事务提交；sink flush 后才 ack。
+H2 receipts、source fences、不可变 audit 不会被此 worker 顺便删除。
+control/audit 的实际保留/擦除须由已验证存储系统满足；不能满足就拒绝企业 admission。
+
+`db\governance_maintenance.py` 仅提供 operator 调用的离线 helper，无 Agent/REST/CLI
+公开入口。operator 授权、源/目的存储证明及 RuntimeLock 不可用时拒绝操作。
+backup 使用 SQLite backup API，不盲拷主文件；恢复候选须重查当前密钥、来源、
+inventory、各类 backup policy 和期限，检查通过也不自动激活或恢复正文使用权限。
+不确定/未注册副本保持隔离；helper 不销毁旧备份，不操作真实卷或密钥。
+源 journal 尚有受保护的退休事实时保守拒绝备份，不能以“逻辑撤权”作为物理清理证明。
+当前 helper 不支持 H2 journal 恢复：当前库或候选已有 external-effect facts 时拒绝，
+包括“备份后才产生首个未知发送”的场景。不能丢掉新 journal 后再重试非幂等动作。
+这不替代恢复集外的 control-recovery 防回滚证明，也不批准手工覆写当前库。
+
+隔离验收命令：
+
+```powershell
+uv run --no-sync pytest backend\tests\test_enterprise_governance.py backend\tests\test_enterprise_vector.py --no-cov
+```
+
+WAL/backup 文件及 native Zvec 均使用临时数据。哨兵不再出现在重打包文件，
+和 Zvec close/reopen 后不再命中，仅分别证明文件级处理、索引逻辑删除，
+**不证明 SSD、快照、OS/cloud backup 或其他副本不可恢复**。生产仍保持关闭。

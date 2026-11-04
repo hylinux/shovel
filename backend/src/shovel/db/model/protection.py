@@ -80,15 +80,25 @@ PROTECTION_DDL = (
     BEGIN SELECT RAISE(ABORT,'Enterprise metadata requires exact ownership'); END""",
     """CREATE TRIGGER IF NOT EXISTS enterprise_metadata_immutable BEFORE UPDATE ON enterprise_metadata
     WHEN NEW.workspace_id IS NOT OLD.workspace_id OR NEW.user_id IS NOT OLD.user_id
-      OR NEW.id IS NOT OLD.id OR NEW.payload IS NOT OLD.payload
+      OR NEW.id IS NOT OLD.id
       OR NEW.metadata_digest IS NOT OLD.metadata_digest
-      OR NEW.admission_binding IS NOT OLD.admission_binding OR NEW.vector_id IS NOT OLD.vector_id
+      OR NEW.vector_id IS NOT OLD.vector_id
       OR NEW.revision != OLD.revision + 1
-      OR NOT ((OLD.state='active' AND NEW.state IN ('invalid','deleted'))
-        OR (OLD.state='invalid' AND NEW.state='deleted'))
+      OR NOT (
+        ((OLD.state='active' AND NEW.state IN ('invalid','deleted'))
+          OR (OLD.state='invalid' AND NEW.state='deleted'))
+          AND NEW.payload IS OLD.payload AND NEW.admission_binding IS OLD.admission_binding
+        OR NEW.state='deleted' AND NEW.payload='{}' AND NEW.admission_binding='{}'
+          AND OLD.payload!='{}' AND EXISTS (SELECT 1 FROM enterprise_retention r
+            WHERE r.workspace_id=OLD.workspace_id AND r.user_id=OLD.user_id
+              AND r.metadata_id=OLD.id AND r.state='purged' AND r.retirement_digest IS NOT NULL))
     BEGIN SELECT RAISE(ABORT,'Enterprise metadata is immutable and cannot be resurrected'); END""",
     """CREATE TRIGGER IF NOT EXISTS enterprise_metadata_tombstone BEFORE DELETE ON enterprise_metadata
     BEGIN SELECT RAISE(ABORT,'Enterprise metadata requires a retained tombstone'); END""",
+    """CREATE TRIGGER IF NOT EXISTS enterprise_metadata_no_replace BEFORE INSERT ON enterprise_metadata
+    WHEN EXISTS (SELECT 1 FROM enterprise_metadata WHERE workspace_id=NEW.workspace_id
+      AND user_id=NEW.user_id AND id=NEW.id)
+    BEGIN SELECT RAISE(ABORT,'Enterprise metadata cannot be replaced'); END""",
     """CREATE TRIGGER IF NOT EXISTS enterprise_source_fence_monotonic BEFORE UPDATE ON enterprise_source_fence
     WHEN NEW.workspace_id IS NOT OLD.workspace_id OR NEW.user_id IS NOT OLD.user_id
       OR NEW.source_key IS NOT OLD.source_key OR NEW.blocked != 1
@@ -96,6 +106,11 @@ PROTECTION_DDL = (
     BEGIN SELECT RAISE(ABORT,'Source fences cannot be rewound or reactivated'); END""",
     """CREATE TRIGGER IF NOT EXISTS enterprise_source_fence_tombstone BEFORE DELETE ON enterprise_source_fence
     BEGIN SELECT RAISE(ABORT,'Source revocation fences must survive deletion'); END""",
+    """CREATE TRIGGER IF NOT EXISTS enterprise_source_fence_no_replace BEFORE INSERT
+    ON enterprise_source_fence
+    WHEN EXISTS (SELECT 1 FROM enterprise_source_fence WHERE workspace_id=NEW.workspace_id
+      AND user_id=NEW.user_id AND source_key=NEW.source_key)
+    BEGIN SELECT RAISE(ABORT,'Source revocation fences cannot be replaced'); END""",
     """CREATE TRIGGER IF NOT EXISTS enterprise_metadata_source_current BEFORE INSERT
     ON enterprise_metadata_source
     WHEN NOT EXISTS (SELECT 1 FROM enterprise_source_fence f WHERE f.workspace_id=NEW.workspace_id

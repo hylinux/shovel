@@ -10,6 +10,7 @@ from tempfile import TemporaryDirectory
 from typing import Literal, Never
 
 from pydantic import JsonValue, SecretStr
+from scripts.synthetic_storage import synthetic_governance
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -420,7 +421,17 @@ class Sample:
         self.state = SyntheticPolicy(provider, self.broker)
         self.audit = SQLitePolicyAudit()
         self.policy = ProtectionPolicy(self.audit, provider=self.state, clock=now)
-        self.protection = SQLiteProtectionRepository(sessions, self.policy, clock=now)
+        self.protection = SQLiteProtectionRepository(
+            sessions,
+            self.policy,
+            clock=now,
+            governance=synthetic_governance(
+                SCOPE,
+                now,
+                retention_policy_refs=("synthetic-transient-retention",),
+                protection_policy_refs=("synthetic-policy",),
+            )[0],
+        )
         self.authentication = AuthenticationService(
             SyntheticAuthenticationResolver(provider), self.broker, clock=now
         )

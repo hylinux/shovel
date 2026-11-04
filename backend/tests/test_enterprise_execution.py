@@ -3,6 +3,7 @@ import json
 
 import pytest
 from pydantic import SecretStr
+from scripts.synthetic_storage import synthetic_governance
 from sqlalchemy import event, select, text
 from sqlalchemy.exc import IntegrityError, OperationalError
 
@@ -205,6 +206,7 @@ class Flow:
             ProtectionPolicy(self.audit, provider=self.data_policy, clock=lambda: kernel.now[0]),
             source_authority=self,
             clock=lambda: kernel.now[0],
+            governance=synthetic_governance(SCOPE, lambda: kernel.now[0])[0],
         )
         self.authentication = AuthenticationService(self, self.broker, clock=lambda: kernel.now[0])
 

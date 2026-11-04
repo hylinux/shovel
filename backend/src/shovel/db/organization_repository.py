@@ -10,7 +10,7 @@ from shovel.enterprise.domain import EnterpriseResourceRef
 from shovel.enterprise.kusto import KustoObservation, metadata_resource
 from shovel.enterprise.organization import MetadataConnection, VerifiedOrganizationPolicy
 from shovel.protection.domain import ProtectionDeniedError, content_digest
-from shovel.protection.persistence import SourceChange
+from shovel.protection.persistence import SourceChange, source_key
 
 
 class SQLiteOrganizationRepository:
@@ -42,7 +42,16 @@ class SQLiteOrganizationRepository:
     async def accept(self, verified: VerifiedOrganizationPolicy) -> None:
         policy = verified.policy
         scope = policy.scope
-        async with sqlite_write(self.sessions) as session:
+        self.protection.governance.require(
+            scope=scope,
+            organization_id=policy.organization_id,
+            store_binding=self.protection.store_binding,
+            kind="control_lineage",
+            record_digest=verified.digest,
+            created_at=self.protection._clock(),
+            operation="persist",
+        )
+        async with sqlite_write(self.sessions, durable=True) as session:
             key = scope.workspace_id, scope.user_id, policy.organization_id
             current = await session.get(OrganizationRevision, key)
             if current is not None:
@@ -82,6 +91,16 @@ class SQLiteOrganizationRepository:
     ) -> EnterpriseResourceRef:
         policy, scope = verified.policy, verified.policy.scope
         resource = metadata_resource(connection, observation.version)
+        self.protection.governance.require(
+            scope=scope,
+            organization_id=policy.organization_id,
+            store_binding=self.protection.store_binding,
+            kind="control_lineage",
+            record_digest=verified.digest,
+            created_at=self.protection._clock(),
+            operation="persist",
+            source_keys=(source_key(resource),),
+        )
         denied = False
         async with sqlite_write(self.sessions) as session:
             revision = await session.get(

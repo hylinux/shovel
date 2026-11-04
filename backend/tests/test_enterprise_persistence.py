@@ -3,6 +3,7 @@ import json
 
 import pytest
 from pydantic import ValidationError
+from scripts.synthetic_storage import synthetic_governance
 from sqlalchemy import event, func, select, text
 from sqlalchemy.exc import IntegrityError, OperationalError
 
@@ -156,11 +157,25 @@ class Harness:
         self.authority = Authority()
         self.policy = ProtectionPolicy(self.audit, provider=self.provider, clock=lambda: self.now)
         self.sessions = sessions
+        self.governance, self.storage_authority = synthetic_governance(SCOPE, lambda: self.now)
         self.store = self.restart()
 
     def restart(self):
         return SQLiteProtectionRepository(
-            self.sessions, self.policy, source_authority=self.authority, clock=lambda: self.now
+            self.sessions,
+            self.policy,
+            source_authority=self.authority,
+            clock=lambda: self.now,
+            governance=self.governance,
+        )
+
+    def scoped_store(self, scope):
+        return SQLiteProtectionRepository(
+            self.sessions,
+            self.policy,
+            source_authority=self.authority,
+            clock=lambda: self.now,
+            governance=synthetic_governance(scope, lambda: self.now)[0],
         )
 
     def approve(self, value, *, write=False):
@@ -322,8 +337,9 @@ async def test_scope_and_payload_digest_cannot_be_substituted(harness):
         await harness.store.put(different, harness.approve(value, write=True))
     other_scope = CapabilityScope(workspace_id="other", user_id="owner")
     other = record(scope=other_scope)
-    await harness.store.put(other, harness.approve(other, write=True))
-    assert await harness.store.read(other_scope, other.id, harness.approve(other)) == other
+    other_store = harness.scoped_store(other_scope)
+    await other_store.put(other, harness.approve(other, write=True))
+    assert await other_store.read(other_scope, other.id, harness.approve(other)) == other
     assert other.vector_id != value.vector_id
     assert await counts(harness.sessions) == (2, 2, 2, 0)
 
@@ -474,8 +490,9 @@ async def test_generations_and_event_arguments_are_monotonic_and_scope_bound(har
         assert row.state == "deleted"
         assert row.revision == 3
     other = record(scope=CapabilityScope(workspace_id="other", user_id="owner"))
-    await harness.store.put(other, harness.approve(other, write=True))
-    assert await harness.store.read(other.scope, other.id, harness.approve(other)) == other
+    other_store = harness.scoped_store(other.scope)
+    await other_store.put(other, harness.approve(other, write=True))
+    assert await other_store.read(other.scope, other.id, harness.approve(other)) == other
 
 
 async def test_invalidation_and_cleanup_intent_roll_back_together_on_sql_failure(harness):
@@ -495,7 +512,8 @@ async def test_invalidation_and_cleanup_intent_roll_back_together_on_sql_failure
         assert "PRIVATE-SDK-ERROR" not in str(error.value)
     finally:
         event.remove(engine.sync_engine, "before_cursor_execute", reject)
-    assert await harness.store.read(SCOPE, value.id, harness.approve(value)) == value
+    with pytest.raises(ProtectionDeniedError):
+        await harness.store.read(SCOPE, value.id, harness.approve(value))
     async with harness.sessions() as session:
         fence = await session.get(FenceRow, ("workspace", "owner", source_key(change.resource)))
         assert fence.generation == 0 and not fence.blocked
@@ -647,7 +665,7 @@ async def test_migration_seventeen_upgrades_old_store_repeatably_without_legacy_
     async with catalog.sessions() as session:
         assert list(
             await session.scalars(select(SchemaMigration.version).order_by(SchemaMigration.version))
-        ) == list(range(1, 21))
+        ) == list(range(1, 22))
         triggers = set(await session.scalars(text("SELECT name FROM sqlite_master WHERE type='trigger'")))
         assert {statement.split("EXISTS ", 1)[1].split()[0] for statement in PROTECTION_DDL} <= triggers
         assert (

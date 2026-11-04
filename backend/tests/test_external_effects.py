@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from unittest.mock import AsyncMock
 
 import pytest
-from sqlalchemy import select, text
+from sqlalchemy import event, select, text
 from sqlalchemy.exc import IntegrityError
 
 from shovel.capability.domain import (
@@ -576,3 +576,27 @@ async def test_another_execution_context_cannot_borrow_the_active_lease(effects:
     with pytest.raises(SecurityDenied, match="exact owned"):
         await effects.service.execute(context)
     assert not effects.adapter.calls and not await effects.facts(queued.id)
+
+
+async def test_effect_facts_use_full_sync_before_wire_and_after_receipt(effects: Effects):
+    engine = effects.kernel.catalog.sessions.kw["bind"]
+    durability = []
+
+    def observe(connection, _cursor, statement, _parameters, _context, _many):
+        if statement.startswith(("INSERT INTO external_effect", "UPDATE external_effect")):
+            durability.append(connection.exec_driver_sql("PRAGMA synchronous").scalar_one())
+
+    event.listen(engine.sync_engine, "before_cursor_execute", observe)
+    try:
+        queued = await effects.ready()
+
+        async def before_wire():
+            assert (await effects.facts(queued.id))[0].state == "dispatched"
+            assert durability and all(value == 2 for value in durability)
+
+        effects.adapter.before_send = before_wire
+        assert (await effects.kernel.engine.run(SCOPE, queued.id)).state == ExecutionState.SUCCEEDED
+        assert (await effects.facts(queued.id))[0].state == "applied"
+        assert durability and all(value == 2 for value in durability)
+    finally:
+        event.remove(engine.sync_engine, "before_cursor_execute", observe)

@@ -52,6 +52,7 @@ from shovel.protection.domain import (
     SourceContentRef,
     content_digest,
 )
+from shovel.protection.governance import GovernanceService
 from shovel.protection.policy import (
     DataRule,
     PolicyState,
@@ -106,6 +107,7 @@ class OrganizationService:
         loader: OrganizationLoader | None = None,
         client: KustoMetadataClient | None = None,
         clock: Callable[[], float] = time.time,
+        governance: GovernanceService | None = None,
     ) -> None:
         self.loader = loader if loader is not None else installed_organization_loader()
         self.authentication, self.engine, self.clock = authentication, engine, clock
@@ -117,7 +119,9 @@ class OrganizationService:
         self.policy = ProtectionPolicy(
             SQLitePolicyAudit(), provider=OrganizationPolicyProvider(self), clock=clock
         )
-        self.protection = SQLiteProtectionRepository(sessions, self.policy, clock=clock)
+        self.protection = SQLiteProtectionRepository(
+            sessions, self.policy, clock=clock, governance=governance
+        )
         self.journal = SQLiteOrganizationRepository(sessions, self.protection)
         self.catalog = OrganizationCatalog(self, runtime_version)
         self._accepted: VerifiedOrganizationPolicy | None = None
@@ -130,7 +134,19 @@ class OrganizationService:
             return None
         try:
             supplied = self.loader()
-            return None if supplied is None else verify_policy(supplied[1], supplied[0], now=self.clock())
+            if supplied is None:
+                return None
+            current = verify_policy(supplied[1], supplied[0], now=self.clock())
+            self.protection.governance.require(
+                scope=current.policy.scope,
+                organization_id=current.policy.organization_id,
+                store_binding=self.protection.store_binding,
+                kind="control_lineage",
+                record_digest=current.digest,
+                created_at=self.clock(),
+                operation="persist",
+            )
+            return current
         except ProtectionDeniedError:
             raise
         except Exception:
@@ -163,6 +179,7 @@ class OrganizationService:
             self._last_failure = False
             if current == self._accepted:
                 if current is not None:
+                    await self.protection.purge_retention()
                     self._evidence = {
                         key: value
                         for key, value in self._evidence.items()
@@ -182,6 +199,8 @@ class OrganizationService:
             elif previous is not None:
                 await self.journal.revoke_all(previous)
             self._accepted = current
+            if current is not None:
+                await self.protection.purge_retention()
 
     def _trusted(self) -> VerifiedOrganizationPolicy:
         current = self.current()

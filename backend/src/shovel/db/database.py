@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 from collections.abc import AsyncGenerator
+from pathlib import Path
 from typing import Any
 
 from sqlalchemy import create_engine, event
@@ -23,6 +24,24 @@ from sqlalchemy.sql.dml import Insert, Update
 from sqlalchemy.sql.selectable import Alias, FromClause
 
 from shovel.db.base import Base
+
+
+def sqlite_storage_binding(database: str | Path) -> str:
+    import os
+
+    from shovel.protection.domain import ProtectionDeniedError, content_digest
+
+    if str(database) == ":memory:":
+        raise ProtectionDeniedError("Governed persistence requires a bound file-backed SQLite store.")
+    return content_digest({"sqlite": os.path.normcase(str(Path(database).expanduser().resolve()))})
+
+
+def session_storage_binding(sessions: async_sessionmaker[AsyncSession]) -> str:
+    bind = sessions.kw.get("bind")
+    if not isinstance(bind, AsyncEngine) or not bind.url.database:
+        raise ValueError("Governed persistence requires a bound SQLite engine.")
+    return sqlite_storage_binding(bind.url.database)
+
 
 #: Per-connection pragmas. journal_mode is persistent (stored in the file
 #: header); the rest must be re-applied on every connection.

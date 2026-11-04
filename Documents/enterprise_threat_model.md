@@ -16,6 +16,9 @@ H1 已接入受管 Host 的拒绝式 containment，见分析第 24 节；没有�
 不把现有个人聊天、MCP、上传、Memory/Knowledge 自动变成受保护企业入口。
 H2 已在受管 Host 接入受信 Function 的 durable intent/receipt、未知效果隔离与显式
 reconciliation/resume；生产写入 adapter 仍为空，没有真实企业写入或 Exactly Once 验收。
+H4 已增加组织签名治理矩阵、存储/密钥证据门禁、metadata retirement/redaction 与隔离
+SQLite WAL/backup、native vector 恢复验收。真实 storage/KMS authority 仍未安装；
+正式组织矩阵与加密/介质擦除未验收，企业持久化继续拒绝，不能把绿色测试当作物理证明。
 
 ## 资产、攻击者和信任假设
 
@@ -71,7 +74,8 @@ Python 进程**不是沙箱**：恶意同进程代码可以读取内存、调用
 | write/display 后 crash 重复外部 effect | 原 Execution/attempt 上的 durable intent、稳定 key、metadata receipt、未知 effect 跨 key fence、只读 reconciliation 与单次人工恢复；`test_external_effects.py`、`test_platform_demos.py` | 真实 Provider 的 wire/幂等/终态合同、SDK 内部重试与认证 receipt 查询仍须验收；不声称 Exactly Once |
 | 审计失败仍释放/DoS 无限等待 | explicit audit UoW、释放前 commit、bounded auth/deadline、audit failure tests | mandatory audit/retention/可用性/队列容量须组织定义；受控进程不是无限资源隔离 |
 | 终端/屏幕/本地存储绕过 no-copy | DISPLAY 也按 destination/rights/obligation gate；未实现保护义务则拒绝 | 显示后不能靠按钮限制截图/redirect；没有通用受保护查看器 |
-| SQLite/WAL/backup/vector 物理残留或篡改 | metadata-only、owner/revision constraints、删除意图与重查 | H4 encryption、WAL/backup purge、tamper evidence、native vector 安全擦除未证明 |
+| SQLite/WAL/backup/vector 物理残留或篡改 | H4 签名矩阵、精确短时 storage/key proof、到期拒绝/metadata redaction、既有删除 outbox、离线 WAL 重打包与备份恢复检查；`test_enterprise_governance.py` | 实际加密、密钥系统、防旧 binary、审计生命周期和 native vector/介质擦除仍需可信后端证明；无生产 authority |
+| 恢复旧 DB/备份撤销删除、key retirement 或 source fence | 恢复时必须查询恢复集外的当前 authority/inventory；外部单调退休先于本地提交，旧 generation/未注册或 pre-H4 数据拒绝 | 外部权威必须真实独立并防回滚；本地 SQLite tombstone/receipt 自身不是恢复授权，真实灾备未验收 |
 
 ## ES-10 示例额外约束
 

@@ -1479,3 +1479,105 @@ H1/H3、enterprise persistence/execution/failures/sample 与 protection policy �
 18 个测试文件 **638 passed**，367.15 秒。全仓 Ruff lint、全部修改 Python 文件格式、
 Mypy backend + sample（228 source files）通过；两个新增 CLI 命令的 help 实际可用。
 未运行真实 Provider/WAM 写入，不将这些离线结果视为生产企业验收。
+
+## 26. H4 治理框架与隔离存储验收
+
+### 26.1 明确批准的实施范围
+
+用户选择复用现有 SQLite/Zvec，增加可信受管存储/密钥证据门禁，能力不足即拒绝企业
+持久化；先做组织签名治理矩阵、执行闭环与隔离数据清理/恢复验收。
+**这不是组织正式矩阵、实际加密/KMS 部署或物理介质擦除验收。**
+未改当前用户数据、磁盘、密钥库或设置，没有新企业 DB、Runtime、Engine 或 scheduler。
+
+`protection\governance.py` 的新签名文档 purpose 为
+`shovel.organization.governance.v1`，使用现有证书/envelope pin、签名/期限和 duplicate
+JSON 验证机制，但不改变 H3 文档或任何既有 published payload/hash。
+完整矩阵必须包括 body、metadata、vector、summary、control_lineage、artifact、cache、
+audit 八类，各自声明 storage、retention/offline、revocation/delete、backup retention、
+erasure 和保留依据；另绑定组织、owner scope、policy refs、storage/key authority。
+没有默认生产期限，`scripts\synthetic_storage.py` 的签名者和所有存储证明仅为合成数据。
+
+### 26.2 存储/密钥准入，不以配置代替能力
+
+生产 `StorageAuthority` **仍未安装**。只有受控安装 bootstrap 才能注册组织 loader 和
+可信实现；没有 settings enable、workspace provider import 或 Agent 下发证明入口。
+每次授权/退休要求新 nonce 和 exact request digest，绑定 owner、policy revision、
+store/destination、record/source、generation、期限和所需清理等级，并复查当前签名文档。
+缺能力、过期、错 binding、重复旧证明、policy 切换、旧 key generation 均拒绝。
+
+可信实现须实际证明 SQLite/WAL/SHM/temp、相关 vector/artifact/cache 与 backup 的保护，
+非导出密钥、consumer/旧程序访问边界、retention 执行、备份 inventory 和恢复集外的
+单调 source/control/H2 防回滚。普通 BitLocker 状态、keyring 可用、DB 内 ledger、
+单独的加密 key 或任意 boolean 都不满足合同。
+即使 H1 已批准 PERSIST/READ，仍不能代替 H4；H4 也不授予 H1 的其他用途/出口。
+未装配时 metadata 持久读写、组织 source observer 持久事实、受管释放审计均保持拒绝。
+
+### 26.3 既有 metadata、撤权和 cleanup 闭环
+
+Migration **21** 为现有 enterprise metadata 增加 `enterprise_retention` sidecar：
+保存原 policy digest、store/key authority IDs、generation、准入时刻、最迟期限、
+单调 retirement/redaction 状态和 evidence digest。期限/原绑定不可延长或替换；
+旧无 sidecar 的 metadata 隔离，不能自动补 H4 默认允许。
+metadata、CONTROL 和涉及的派生 summary/vector 分别通过规则，取最早有效期。
+read 最后重新核验 current authority，保存的 snapshot/allow 或 vector hit 不能复用授权。
+
+source 撤权/删除先由外部 authority 做单调、幂等 retirement，再提交本地 source fence。
+外部已退休而 SQLite 失败或回滚时仍不能读取；重试同一退休不会恢复旧数据。
+更短期限、storage deny、source 失效均立即阻断相应用途；现有 Host policy refresh
+调用 retention sweep，不新增后台 worker。
+经过可信退休后，metadata payload 与 admission binding 清空，保留最小 ID/digest/fence，
+与既有 vector DeletionOutbox intent 同事务提交；sink 删除且 flush 后才 ack。
+SQLite 失败不丢 outbox 原子性，authority 失败不伪造删除成功。
+
+企业 metadata UoW 与 H2 effect journal 使用 SQLite FULL 同步和 secure_delete；
+H2 在 intent/wire/receipt 实际写入连接上验证 FULL，避免继续把个人链路的 NORMAL
+假设沿用到这些安全事实。该配置测试不冒充硬件断电/控制器持久性验收。
+未决 external effects、source fences 和 append-only audit 不被此 worker 顺便删除。
+control/audit 的实际生命周期、归档与组织例外须由可信存储系统兑现；
+不能兼容必要安全事实的保留时拒绝正向 admission，而不是默认无限保留获批。
+
+### 26.4 WAL、backup、restore 与 vector 的真实隔离验收
+
+`db\governance_maintenance.py` 仅提供 operator 调用的离线 helper，无新增 Agent/REST/
+CLI 入口。需要独立操作授权、精确源/目的存储证明及现有 RuntimeLock。
+backup 使用 SQLite backup API，不盲拷主文件；按实际 metadata/CONTROL/summary/vector/
+audit 类别检查独立 backup policy、原数据期限和备份期限，生成绑定 hash 的 receipt。
+复制后 policy 变化不发成功 receipt，残留副本保持隔离，不自动删除或伪称已经擦除。
+
+恢复检查不复制/激活文件。它复查当前外部 inventory、keys、sources、期限、原 storage/
+key authority，检查 scope、integrity、lineage 和 metadata 原准入事实。
+先以 receipt 中的候选身份取得可信存储/密钥授权，再读取备份字节核验 hash；
+密钥 authority 不可用时，连用于核验的备份字节读取也被阻断。
+伪造 receipt、手工注册不了的旧副本、pre-H4 数据、未完成 redaction 和 retained source
+journal 均不能静默恢复。H3 source journal 即使没有 enterprise_metadata 行，
+恢复旧副本也须核验外部 source retirement。
+当前 helper **不支持恢复 H2 journal**：当前库或候选有 external-effect facts 时拒绝，
+包括备份之后才出现首个 uncertain send。恢复集外的完整 control 防回滚证明仍不可缺，
+这些检查不批准手工覆写当前库，也不能在丢失 H2 事实后重发非幂等操作。
+
+文件维护只执行 secure_delete、checkpoint/TRUNCATE、VACUUM、integrity/lineage 检查
+和 fsync；busy WAL/运行中 Host 不返回成功报告。隔离测试在真实 SQLite 主文件/WAL
+中先确认合成 metadata 哨兵存在，退休/redaction/重打包后再检查文件及 fence 完整性。
+报告固定 `media_erasure_verified=false`、`key_destruction_verified=false`、
+`backup_copies_erased=false`、`vector_files_sanitized=false`。
+这不证明 SSD wear leveling、文件系统快照、OS/cloud backup 或其他副本不可恢复。
+
+真实临时 Zvec 验证 retirement/outbox/flush，close/reopen 后旧 ID 不再返回，
+旧 descriptor 也不能通过 SQLite 重新释放；不把逻辑删除当作 index 文件物理擦除。
+没有新增企业 embedding/index writer、正文落盘、rebuild/cutover 或 generated body 恢复。
+
+### 26.5 验证范围与仍未接受的保证
+
+22 个文件的联合定向回归 **758 passed（420.98s）**，覆盖 H1–H4、H2 effect、
+Engine、Host、schema upgrade、sample、Workflow 和个人 Outlook 路径，不是全仓测试。
+最终 H4 **48 项测试**与 standalone sample 四项回归合计 **52 passed（34.41s）**，
+包括密钥不可用时禁止读取备份字节的新用例；
+另验证 H2 journal 的实际 FULL 写入和发送前已提交 dispatched fact。
+全仓 Ruff lint、24 个变更 Python 文件的格式检查与 Mypy **232 source files** 均通过。
+sample 显式注入同一合成 storage authority，不把它注册到生产 Host，
+保持原只读/派生演示、零组织网络、无真实 Token 与临时数据边界。
+
+正式组织 retention/offline/revocation/delete 矩阵、受管加密存储/KMS、
+非导出/密钥轮换销毁/旧 binary、审计生命周期、原生 vector 物理清理和真实灾备
+尚未验收；没有声称已实现 SQLCipher、卷加密、cryptographic erase 或 device erase。
+**本轮完成框架与隔离证据，生产企业持久化继续关闭，不等于 H4 物理保证全面通过。**

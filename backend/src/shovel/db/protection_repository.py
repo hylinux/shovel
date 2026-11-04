@@ -11,8 +11,10 @@ from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from shovel.capability.domain import CapabilityScope
+from shovel.db.database import session_storage_binding
 from shovel.db.execution_repository import SQLiteExecutionRepository
 from shovel.db.model.enterprise import EnterpriseConnectionProfile as ConnectionRow
+from shovel.db.model.governance import EnterpriseRetention as RetentionRow
 from shovel.db.model.identity import IdentityProfile as IdentityRow
 from shovel.db.model.protection import EnterpriseMetadata as MetadataRow
 from shovel.db.model.protection import EnterpriseMetadataSource as SourceRow
@@ -36,6 +38,7 @@ from shovel.protection.domain import (
     TransientContentHandle,
     content_digest,
 )
+from shovel.protection.governance import GovernanceService, StorageEvidence, installed_governance
 from shovel.protection.persistence import (
     ENTERPRISE_COLLECTION,
     EnterpriseMetadata,
@@ -59,20 +62,76 @@ class SQLiteProtectionRepository:
         policy: ProtectionPolicy,
         *,
         source_authority: SourceChangeAuthority | None = None,
+        governance: GovernanceService | None = None,
         clock: Callable[[], float] = time.time,
     ) -> None:
         self._sessions = sessions
         self._gate = ProtectionService(policy, clock=clock)
         self._source_authority = source_authority
         self._clock = clock
+        self.governance = governance if governance is not None else installed_governance()
+
+    @property
+    def store_binding(self) -> str:
+        return session_storage_binding(self._sessions)
 
     @asynccontextmanager
     async def _transaction(self) -> AsyncIterator[AsyncSession]:
         try:
-            async with sqlite_write(self._sessions) as session:
+            async with sqlite_write(self._sessions, durable=True) as session:
                 yield session
         except SQLAlchemyError:
             raise ProtectionAdapterError("Enterprise metadata transaction failed.") from None
+
+    def _govern_record(
+        self,
+        record: EnterpriseMetadata,
+        retention: RetentionRow | None,
+        *,
+        retire: bool = False,
+    ) -> tuple[StorageEvidence, float, str, str]:
+        current, _ = self.governance.policy()
+        if retention is not None and (
+            retention.state != "active"
+            or retention.store_binding != self.store_binding
+            or retention.storage_id != current.storage_id
+            or retention.key_authority_id != current.key_authority_id
+        ):
+            raise ProtectionDeniedError("Enterprise retention is retired or differently stored.")
+        deadline = None if retention is None else retention.expires_at
+        generation = None if retention is None else retention.authority_generation
+        receipts = []
+        policy_digest = None
+        for kind in record.storage_classes:
+            evidence, limit, digest = self.governance.require(
+                scope=record.scope,
+                store_binding=self.store_binding,
+                kind=kind,
+                record_digest=content_digest({"id": record.id, "metadata": record.digest}),
+                created_at=record.created_at,
+                operation="retire" if retire else ("persist" if retention is None else "read"),
+                source_keys=tuple(source_key(source.resource) for source in record.context.sources),
+                expected_generation=generation,
+                expires_at=None if retention is None else retention.expires_at,
+                retention_policy_ref=record.context.retention_policy_ref,
+                protection_policy_ref=record.context.policy_source_ref,
+            )
+            if policy_digest is not None and digest != policy_digest:
+                raise ProtectionDeniedError("Governance changed across a derived storage admission.")
+            if retention is not None and (
+                evidence.storage_id != retention.storage_id
+                or evidence.key_authority_id != retention.key_authority_id
+            ):
+                raise ProtectionDeniedError("The original storage/key authority cannot be substituted.")
+            if generation is not None and not retire and evidence.generation != generation:
+                raise ProtectionDeniedError("Storage authority changed across a derived admission.")
+            generation = evidence.generation
+            deadline = limit if deadline is None else min(deadline, limit)
+            policy_digest = digest
+            receipts.append(evidence.evidence_digest)
+        if generation is None or policy_digest is None or deadline is None:
+            raise ProtectionDeniedError("Derived storage governance evidence is unavailable.")
+        return evidence, deadline, policy_digest, content_digest(receipts)
 
     def _authorize(
         self,
@@ -226,14 +285,33 @@ class SQLiteProtectionRepository:
             raise ProtectionDeniedError("Durable protection audit is unavailable.")
         decision = None
         try:
+
+            def authorize_audit() -> None:
+                self.governance.require(
+                    scope=scope,
+                    store_binding=self.store_binding,
+                    kind="audit",
+                    record_digest=binding.digest,
+                    created_at=self._clock(),
+                    operation="persist",
+                    source_keys=tuple(
+                        source_key(source.resource) for source in content.metadata.protection_context.sources
+                    ),
+                    retention_policy_ref=content.metadata.protection_context.retention_policy_ref,
+                    protection_policy_ref=content.metadata.protection_context.policy_source_ref,
+                )
+
             async with self._transaction() as session:
                 await self._active(session, lease, gate)
                 await self._profiles(session, binding)
                 await self._source_fences(
                     session, scope, content.metadata.protection_context.sources, allow_new=True
                 )
+                authorize_audit()
                 with audit.bind(session, scope, lease.execution.id):
                     decision = self._gate.policy.evaluate(content.metadata.protection_context, binding)
+                await session.flush()
+                authorize_audit()
                 await session.commit()
             # Audit is durable before release; a new locked read fences local revocation/cancel.
             async with self._transaction() as session:
@@ -242,6 +320,7 @@ class SQLiteProtectionRepository:
                 await self._source_fences(
                     session, scope, content.metadata.protection_context.sources, allow_new=True
                 )
+                authorize_audit()
                 return self._gate.use_decision(content, binding, decision, consumer, proofs=proofs)
         finally:
             if decision is not None:
@@ -276,6 +355,12 @@ class SQLiteProtectionRepository:
             self._fresh_snapshots(record)
             self._authorize(record, binding, DataAction.PERSIST, DataDestination.LOCAL_SQLITE, proofs)
             row = await session.get(MetadataRow, (record.scope.workspace_id, record.scope.user_id, record.id))
+            retention = await session.get(
+                RetentionRow, (record.scope.workspace_id, record.scope.user_id, record.id)
+            )
+            if row is not None and retention is None:
+                raise ProtectionDeniedError("Legacy enterprise metadata has no governed admission.")
+            evidence, deadline, policy_digest, _ = self._govern_record(record, retention)
             if row is not None:
                 if (
                     row.state != "active"
@@ -300,6 +385,19 @@ class SQLiteProtectionRepository:
                     )
                 )
                 await session.flush()
+                retention = RetentionRow(
+                    workspace_id=record.scope.workspace_id,
+                    user_id=record.scope.user_id,
+                    metadata_id=record.id,
+                    policy_digest=policy_digest,
+                    store_binding=self.store_binding,
+                    authority_generation=evidence.generation,
+                    storage_id=evidence.storage_id,
+                    key_authority_id=evidence.key_authority_id,
+                    admitted_at=self._clock(),
+                    expires_at=deadline,
+                )
+                session.add(retention)
                 session.add_all(
                     SourceRow(
                         workspace_id=record.scope.workspace_id,
@@ -314,6 +412,8 @@ class SQLiteProtectionRepository:
             # SQL awaits must not extend an expired/revoked admission into a committed write.
             self._fresh_snapshots(record)
             self._authorize(record, binding, DataAction.PERSIST, DataDestination.LOCAL_SQLITE, proofs)
+            await session.flush()
+            self._govern_record(record, retention)
             await session.commit()
 
     async def read(
@@ -333,6 +433,9 @@ class SQLiteProtectionRepository:
             row = await session.get(MetadataRow, (scope.workspace_id, scope.user_id, record_id))
             if row is None or row.state != "active":
                 raise ProtectionDeniedError("Metadata is unavailable for this owner.")
+            retention = await session.get(RetentionRow, (scope.workspace_id, scope.user_id, record_id))
+            if retention is None:
+                raise ProtectionDeniedError("Legacy enterprise metadata has no governed admission.")
             try:
                 record = EnterpriseMetadata.model_validate(row.payload)
             except ValidationError:
@@ -353,7 +456,63 @@ class SQLiteProtectionRepository:
                 raise ProtectionDeniedError("Vector candidate is stale or differently bound.")
             await self._fences(session, record)
             self._authorize(record, binding, DataAction.READ, DataDestination.WORKFLOW_STATE, proofs)
+            self._govern_record(record, retention)
             return record
+
+    async def purge_retention(self) -> int:
+        """Retire externally, redact locally and queue vectors atomically; not media erasure."""
+        policy, _ = self.governance.policy()
+        scope, purged = policy.scope, 0
+        rules = {rule.kind: rule for rule in policy.rules}
+        async with self._transaction() as session:
+            rows = await session.scalars(
+                select(MetadataRow, RetentionRow)
+                .join(
+                    RetentionRow,
+                    (RetentionRow.workspace_id == MetadataRow.workspace_id)
+                    & (RetentionRow.user_id == MetadataRow.user_id)
+                    & (RetentionRow.metadata_id == MetadataRow.id),
+                )
+                .where(
+                    MetadataRow.workspace_id == scope.workspace_id,
+                    MetadataRow.user_id == scope.user_id,
+                    RetentionRow.state == "active",
+                )
+            )
+            for row in rows:
+                retention = await session.get(RetentionRow, (scope.workspace_id, scope.user_id, row.id))
+                if retention is None:
+                    raise ProtectionAdapterError("Enterprise retention fact is unavailable.")
+                record = EnterpriseMetadata.model_validate(row.payload)
+                current_deadline = min(
+                    record.created_at + rules[kind].retention_seconds for kind in record.storage_classes
+                )
+                storage_denied = any(rules[kind].storage == "deny" for kind in record.storage_classes)
+                if (
+                    row.state == "active"
+                    and not storage_denied
+                    and self._clock() < min(retention.expires_at, current_deadline)
+                ):
+                    continue
+                _, _, _, evidence_digest = self._govern_record(record, retention, retire=True)
+                retention.state = "purged"
+                retention.retirement_digest = evidence_digest
+                retention.purged_at = self._clock()
+                await session.flush()
+                row.state, row.payload, row.admission_binding = "deleted", {}, {}
+                row.revision += 1
+                session.add(
+                    DeletionOutbox(
+                        scope=DeletionScope.CHUNK_IDS,
+                        collection=ENTERPRISE_COLLECTION,
+                        filter={"ids": [row.vector_id]},
+                        requested_at=int(self._clock()),
+                    )
+                )
+                await session.flush()
+                purged += 1
+            await session.commit()
+        return purged
 
     async def invalidate(self, change: SourceChange) -> int:
         change = SourceChange.model_validate(change)
@@ -382,6 +541,17 @@ class SQLiteProtectionRepository:
         generation = fence.generation if fence is not None else 0
         if generation != change.expected_generation:
             raise RuntimeFailure("Source generation changed.", status=409)
+        if self.governance.authority is not None:
+            self.governance.require(
+                scope=scope,
+                store_binding=self.store_binding,
+                kind="control_lineage",
+                record_digest=content_digest({"source": key}),
+                source_keys=(key,),
+                created_at=self._clock(),
+                operation="retire",
+                retirement_scope="source",
+            )
         if fence is None:
             fence = FenceRow(workspace_id=scope.workspace_id, user_id=scope.user_id, source_key=key)
             session.add(fence)

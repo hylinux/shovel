@@ -21,6 +21,7 @@ from .effect import ExternalEffect, ExternalEffectEvent
 from .enterprise import EnterpriseConnectionProfile
 from .enterprise_execution import AuthenticationCompletion, ProtectionAudit
 from .execution import ExecutionAttempt, ExecutionStep, Job, JobEvent
+from .governance import EnterpriseRetention
 from .identity import AuthenticationRequest, IdentityProfile
 from .interaction import InputRequest, Interaction, Notification, NotificationDelivery
 from .knowledge import (
@@ -75,6 +76,7 @@ __all__ = [
     "EnterpriseConnectionProfile",
     "EnterpriseMetadata",
     "EnterpriseMetadataSource",
+    "EnterpriseRetention",
     "EnterpriseSourceFence",
     "Entity",
     "EntityEdge",

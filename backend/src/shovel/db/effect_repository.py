@@ -66,7 +66,7 @@ class SQLiteEffectRepository:
                 "execution": execution.id,
             }
         )
-        async with sqlite_write(self.sessions) as session:
+        async with sqlite_write(self.sessions, durable=True) as session:
             await self.executions._active(session, lease, gate)
             await self.executions._check_snapshot(
                 session, execution.snapshot.capability, execution.snapshot.context.scope
@@ -116,7 +116,7 @@ class SQLiteEffectRepository:
             return _receipt(row), row.idempotency_key
 
     async def dispatch(self, lease: ExecutionLease, identifier: str, gate: ExecutionGate) -> None:
-        async with sqlite_write(self.sessions) as session:
+        async with sqlite_write(self.sessions, durable=True) as session:
             await self.executions._active(session, lease, gate)
             await self.executions._check_snapshot(
                 session, lease.execution.snapshot.capability, lease.execution.snapshot.context.scope
@@ -134,7 +134,7 @@ class SQLiteEffectRepository:
             await session.commit()
 
     async def not_sent(self, lease: ExecutionLease, identifier: str) -> bool:
-        async with sqlite_write(self.sessions) as session:
+        async with sqlite_write(self.sessions, durable=True) as session:
             row = await session.get(ExternalEffect, identifier)
             if row is None or row.execution_id != lease.execution.id or row.claim_token != lease.token:
                 raise RuntimeFailure("External effect has no matching send intent.", status=409)
@@ -149,7 +149,7 @@ class SQLiteEffectRepository:
     async def received(
         self, lease: ExecutionLease, identifier: str, evidence: EffectEvidence
     ) -> EffectReceipt:
-        async with sqlite_write(self.sessions) as session:
+        async with sqlite_write(self.sessions, durable=True) as session:
             row = await session.get(ExternalEffect, identifier)
             if row is None or row.execution_id != lease.execution.id:
                 raise RuntimeFailure("External-effect receipt has no matching intent.", status=409)
@@ -202,7 +202,7 @@ class SQLiteEffectRepository:
     async def claim_reconciliation(
         self, scope: CapabilityScope, identifier: str, receipt: EffectReceipt
     ) -> tuple[str, str]:
-        async with sqlite_write(self.sessions) as session:
+        async with sqlite_write(self.sessions, durable=True) as session:
             owner = await self.executions._find(session, scope, identifier)
             lineage = await self.executions._lineage(session, owner)
             tree = [owner, *await self.executions._children(session, owner)]
@@ -233,7 +233,7 @@ class SQLiteEffectRepository:
         token: str,
         evidence: EffectEvidence,
     ) -> None:
-        async with sqlite_write(self.sessions) as session:
+        async with sqlite_write(self.sessions, durable=True) as session:
             owner = await self.executions._find(session, scope, identifier)
             facts = await self.executions.effect_rows(session, owner)
             row = next((fact for fact in facts if fact.id == effect_id), None)
@@ -251,7 +251,7 @@ class SQLiteEffectRepository:
             await session.commit()
 
     async def resume(self, scope: CapabilityScope, identifier: str) -> Execution:
-        async with sqlite_write(self.sessions) as session:
+        async with sqlite_write(self.sessions, durable=True) as session:
             row = await self.executions._find(session, scope, identifier)
             if row.parent_execution_id is not None:
                 raise RuntimeFailure(

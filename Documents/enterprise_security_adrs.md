@@ -413,6 +413,42 @@ embedding、INDEX writer、rebuild/cutover、生产 query 或 Memory/Knowledge �
 cache/audit分别取得retention/offline/revocation/delete矩阵；WAL/backup及不可用行为
 也在范围内，不因为metadata-only或local-first默认无限保留。
 
+**H4 已实施的框架范围（不是组织批准或真实介质验收）**
+
+本轮明确选择复用现有 SQLite/Zvec，实施独立组织签名治理矩阵、可信存储/密钥能力
+门禁和隔离数据清理/恢复验收，不部署 SQLCipher、BitLocker 或实际 KMS。
+`shovel.organization.governance.v1` 与既有 H3 metadata 签名格式分离；
+八种数据类别必须完整给出保留、离线、撤权/删除、备份期限和所需清理等级。
+没有默认组织期限，测试值不是生产模板。已有 published content/hash 不重写。
+
+可信 `StorageAuthority` 必须在可恢复数据集之外验证当前 policy revision、密钥/
+consumer binding、source retirement、备份 inventory 和 retention/offline 执行能力；
+证明精确绑定 scope、store/destination、request nonce/digest 并短时有效。
+单独的加密卷、OS keyring 可用、配置 boolean、SQLite 内 tombstone 或本地回滚 ledger
+都不满足该合同。未安装此 authority 时企业 metadata 持久读写、source observer
+持久事实和释放审计均拒绝；个人链路不因此变成企业路径。
+
+Migration 21 增加原有企业 metadata 的 retention/retirement sidecar，不增设第二企业 DB、
+Runtime、scheduler 或 Execution 生命周期。metadata/CONTROL/派生 summary/vector
+取各自允许条件与最早期限；源码撤权先提交外部单调 retirement，再提交本地 fence。
+外部 retirement 已生效而 SQLite 回滚时仍保持拒绝，不试图“回滚撤权”。
+到期、storage deny 或本地失效后，Host 既有 policy refresh 路径重试 retirement、
+原子清空 metadata payload/admission binding 并追加既有 DeletionOutbox。
+最小身份/摘要/源 fence 保留，H2 未决效果与不可变审计事实不被 retention worker 删除。
+组织要求与这些事实的安全保留冲突、或后端不能实际兑现控制/审计生命周期时，
+不得签发正向存储证明；不是默认无限保留获批。
+
+离线维护 helper 需要独立 operator 授权与现有 RuntimeLock，SQLite backup API、
+当前 authority/inventory/各类 backup rule、恢复候选 key/source 再核验均不可跳过。
+恢复检查不复制或激活备份；旧 pre-H4 metadata 隔离，不能补默认批准。
+尚有未完成的 metadata redaction 或 retained source journal 时备份拒绝。
+FULL/secure_delete、checkpoint/TRUNCATE、VACUUM 与 integrity 检查只产生文件维护报告；
+报告明确不证明介质擦除、密钥销毁、旧备份消失或 native vector 文件被擦除。
+Zvec 删除/flush/重开仅验证逻辑删除及旧候选不释放，没有新增企业 INDEX writer/rebuild。
+
+生产 storage/key authority 仍未安装，正式矩阵、可信加密/密钥系统与物理验收仍为硬门槛。
+详细证据和限制见分析第 26 节。
+
 **Security assumptions**
 
 所有direct SQL/CLI/search/fallback路径纳管；at-rest protections已兑现才persist。

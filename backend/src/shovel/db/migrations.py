@@ -14,6 +14,7 @@ from shovel.db.model.effect import EFFECT_DDL
 from shovel.db.model.enterprise import CONNECTION_DDL
 from shovel.db.model.enterprise_execution import ENTERPRISE_EXECUTION_DDL
 from shovel.db.model.execution import EXECUTION_DDL, KERNEL_INDEX_DDL, STEP_DDL
+from shovel.db.model.governance import GOVERNANCE_DDL
 from shovel.db.model.identity import AUTHENTICATION_DDL, IDENTITY_DDL
 from shovel.db.model.interaction import INPUT_DDL, INTERACTION_DDL, NOTIFICATION_DDL
 from shovel.db.model.organization import ORGANIZATION_DDL
@@ -390,6 +391,16 @@ def _upgrade(connection: Connection) -> None:
         connection.execute(
             insert(SchemaMigration).values(
                 version=20, name="external_effect_intents_receipts_and_reconciliation", applied_at=now_ts()
+            )
+        )
+
+    if 21 not in versions:
+        connection.exec_driver_sql("DROP TRIGGER IF EXISTS enterprise_metadata_immutable")
+        for statement in (*PROTECTION_DDL, *GOVERNANCE_DDL):
+            connection.exec_driver_sql(statement)
+        connection.execute(
+            insert(SchemaMigration).values(
+                version=21, name="enterprise_retention_and_retirement_guards", applied_at=now_ts()
             )
         )
 

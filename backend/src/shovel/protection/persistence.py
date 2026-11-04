@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Literal, Protocol
+from typing import TYPE_CHECKING, Literal, Protocol
 from uuid import NAMESPACE_URL, uuid5
 
 from pydantic import UUID5, Field, model_validator
@@ -22,6 +22,9 @@ from shovel.protection.domain import (
 )
 
 ENTERPRISE_COLLECTION = "shovel_enterprise_metadata_v1"
+
+if TYPE_CHECKING:
+    from shovel.protection.governance import DataClass
 
 
 def source_key(resource: EnterpriseResourceRef) -> str:
@@ -168,6 +171,15 @@ class EnterpriseMetadata(ProtectionValue):
     @property
     def digest(self) -> str:
         return content_digest(self.model_dump(mode="json"))
+
+    @property
+    def storage_classes(self) -> tuple[DataClass, ...]:
+        kinds: list[DataClass] = ["metadata", "control_lineage"]
+        if self.embedding is not None:
+            kinds.append("vector")
+        if self.derivation is not None and self.derivation.output_type == "summary":
+            kinds.append("summary")
+        return tuple(kinds)
 
     @property
     def vector_id(self) -> str:

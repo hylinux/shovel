@@ -252,6 +252,9 @@ class SQLiteExecutionRepository:
         parent: ExecutionLease | None = None,
         child_key: str | None = None,
     ) -> Execution:
+        from shovel.protection.egress import EgressChannel, require_ordinary
+
+        require_ordinary(EgressChannel.PERSISTENCE, payload)
         ensure_no_credentials(snapshot)
         ensure_no_credentials(payload)
         payload = deepcopy(payload)
@@ -498,8 +501,11 @@ class SQLiteExecutionRepository:
         *,
         error: str | None = None,
     ) -> Execution:
+        from shovel.protection.egress import require_safe_completion
+
         ensure_no_credentials(result)
         result = ExecutorResult.model_validate(result.model_dump(mode="json"))
+        require_safe_completion(result.output)
         if state not in {ExecutionState.SUCCEEDED, ExecutionState.FAILED, ExecutionState.SUSPENDED}:
             raise RuntimeFailure("Invalid execution completion state.", status=409)
         async with sqlite_write(self.sessions) as session:

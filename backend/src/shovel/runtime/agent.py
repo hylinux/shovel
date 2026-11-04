@@ -42,6 +42,8 @@ from openai import APIError, AsyncAzureOpenAI, AsyncOpenAI
 
 from shovel.config.model_settings import DefaultAgentModelSettings, ModelProviderType
 from shovel.platform.agent_tools import agent_tools
+from shovel.protection.domain import ProtectionDeniedError
+from shovel.protection.egress import EgressChannel, require_ordinary
 from shovel.runtime.agent_extensions import AgentExtensions
 from shovel.runtime.agent_instructions import BUILTIN_INSTRUCTIONS as SYSTEM
 from shovel.runtime.agent_instructions import (
@@ -181,6 +183,8 @@ def model_endpoint(settings: DefaultAgentModelSettings) -> str:
 def create_framework_client(
     settings: DefaultAgentModelSettings, http_client: httpx.AsyncClient, *, max_iterations: int
 ) -> tuple[AsyncOpenAI, OpenAIChatCompletionClient[Any]]:
+    if _guard_model_request not in http_client.event_hooks["request"]:
+        http_client.event_hooks["request"].append(_guard_model_request)
     endpoint = model_endpoint(settings)
     common: dict[str, Any] = {
         "api_key": settings.security_key or "local-no-key",
@@ -205,6 +209,10 @@ def create_framework_client(
             "include_detailed_errors": False,
         },
     )
+
+
+async def _guard_model_request(request: httpx.Request) -> None:
+    require_ordinary(EgressChannel.MODEL)
 
 
 @dataclass
@@ -512,6 +520,7 @@ class ContextBudgetMiddleware(ChatMiddleware):
         self.include_tool_schema = include_tool_schema
 
     async def process(self, context: ChatContext, call_next: Callable[[], Awaitable[None]]) -> None:
+        require_ordinary(EgressChannel.MODEL, context.messages)
         started = perf_counter()
         call_id = uuid4().hex
         message_chars = sum(
@@ -682,10 +691,12 @@ class ToolDiagnosticsMiddleware(FunctionMiddleware):
     async def process(
         self, context: FunctionInvocationContext, call_next: Callable[[], Awaitable[None]]
     ) -> None:
+        require_ordinary(EgressChannel.TOOL, context.arguments)
         started = perf_counter()
         trace("agent.tool.started", tool_name=context.function.name)
         try:
             await call_next()
+            require_ordinary(EgressChannel.TOOL, context.result)
         except BaseException as exc:
             trace("agent.tool.failed", tool_name=context.function.name, error_type=type(exc).__name__)
             if not isinstance(exc, asyncio.CancelledError):
@@ -939,6 +950,8 @@ class ShovelAgent:
         except (APIError, ChatClientException) as exc:
             cause: BaseException | None = exc
             while cause is not None:
+                if isinstance(cause, ProtectionDeniedError):
+                    raise RuntimeFailure("Enterprise data egress denied.", status=403) from None
                 if isinstance(cause, RuntimeFailure):
                     raise cause from None
                 cause = cause.__cause__

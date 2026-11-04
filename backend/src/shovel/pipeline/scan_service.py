@@ -99,6 +99,7 @@ from shovel.pipeline.parsers import ParsedDocument, ParseHint, can_parse, parse_
 from shovel.pipeline.parsers.base import DEFAULT_MAX_CHARS
 from shovel.pipeline.parsers.registry import parser_versions
 from shovel.pipeline.sink import ChunkVectorSink, NullVectorSink, VectorRecord
+from shovel.protection.egress import EgressChannel, require_ordinary
 from shovel.runtime.diagnostics import trace
 from shovel.services.connector_base import (
     Connector,
@@ -234,6 +235,7 @@ class ScanService:
         每一个被发现的条目写进 document 表, 只是其中一部分停在 PENDING。
         """
 
+        require_ordinary(EgressChannel.KNOWLEDGE)
         resource, profile, connector, scan_mode = await self._preflight(
             ref,
             mode=mode,
@@ -817,6 +819,7 @@ class ScanService:
         整轮扫描的成果; 同时 UI 在扫描进行中就能查到已完成的部分。
         """
 
+        require_ordinary(EgressChannel.KNOWLEDGE, (parsed, drafts))
         async with self._sessions() as session:
             document = await session.get(Document, (item.uri, resource.id))
 

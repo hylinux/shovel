@@ -14,6 +14,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from shovel.config.model_settings import DefaultAgentModelSettings, ModelProviderType
 from shovel.memory.domain import MemoryCandidate, MemoryRecord, MemoryType
+from shovel.protection.egress import EgressChannel, require_ordinary
 from shovel.runtime.agent import ModelOptions, create_framework_client
 
 EXTRACTION = """Extract only durable facts explicitly asserted by this user.
@@ -112,6 +113,7 @@ class AgentFrameworkMemoryExtractor:
         text: str,
         related: Sequence[MemoryRecord] = (),
     ) -> list[MemoryCandidate]:
+        require_ordinary(EgressChannel.MODEL, (text, related))
         if len(text) > self.settings.max_input_chars - len(EXTRACTION) - 1000:
             raise ValueError("Memory extraction input exceeds model.max_input_chars.")
         options = self._options()
@@ -155,6 +157,7 @@ class AgentFrameworkMemoryExtractor:
         return [MemoryCandidate(**{**c.model_dump(), "kind": MemoryType(c.kind)}) for c in parsed.candidates]
 
     async def summarize(self, previous: str, messages: list[dict[str, str]], limit: int) -> str:
+        require_ordinary(EgressChannel.MODEL, (previous, messages))
         payload = json.dumps({"previous_summary": previous, "messages": messages}, ensure_ascii=False)
         if len(payload) > self.settings.max_input_chars - 1000:
             raise ValueError("Session summary input exceeds model.max_input_chars.")

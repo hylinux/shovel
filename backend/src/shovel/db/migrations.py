@@ -15,6 +15,7 @@ from shovel.db.model.enterprise_execution import ENTERPRISE_EXECUTION_DDL
 from shovel.db.model.execution import EXECUTION_DDL, KERNEL_INDEX_DDL, STEP_DDL
 from shovel.db.model.identity import AUTHENTICATION_DDL, IDENTITY_DDL
 from shovel.db.model.interaction import INPUT_DDL, INTERACTION_DDL, NOTIFICATION_DDL
+from shovel.db.model.organization import ORGANIZATION_DDL
 from shovel.db.model.protection import PROTECTION_DDL
 from shovel.db.model.retrieval import SchemaMigration
 from shovel.db.model.security import APPROVAL_DDL
@@ -370,6 +371,15 @@ def _upgrade(connection: Connection) -> None:
         connection.execute(
             insert(SchemaMigration).values(
                 version=18, name="enterprise_execution_authentication_and_audit", applied_at=now_ts()
+            )
+        )
+
+    if 19 not in versions:
+        for statement in ORGANIZATION_DDL:
+            connection.exec_driver_sql(statement)
+        connection.execute(
+            insert(SchemaMigration).values(
+                version=19, name="organization_policy_and_source_tombstones", applied_at=now_ts()
             )
         )
 

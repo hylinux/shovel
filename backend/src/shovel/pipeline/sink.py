@@ -37,6 +37,7 @@ from typing import Any, Protocol
 
 from shovel.db.base import now_ts
 from shovel.exceptions.pipeline import VectorSinkError
+from shovel.protection.egress import EgressChannel, require_ordinary
 from shovel.vector.schema import DENSE_VECTOR, TEXT_FIELD
 
 
@@ -138,6 +139,7 @@ class ZvecChunkSink(_ZvecIO):
     """Write personal knowledge vectors outside the event loop."""
 
     async def upsert(self, records: Sequence[VectorRecord]) -> int:
+        require_ordinary(EgressChannel.INDEX, records)
         if not records:
             return 0
 

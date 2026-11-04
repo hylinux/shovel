@@ -12,6 +12,8 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from shovel.capability.domain import CapabilityScope
 from shovel.db.execution_repository import SQLiteExecutionRepository
+from shovel.db.model.enterprise import EnterpriseConnectionProfile as ConnectionRow
+from shovel.db.model.identity import IdentityProfile as IdentityRow
 from shovel.db.model.protection import EnterpriseMetadata as MetadataRow
 from shovel.db.model.protection import EnterpriseMetadataSource as SourceRow
 from shovel.db.model.protection import EnterpriseSourceFence as FenceRow
@@ -161,6 +163,42 @@ class SQLiteProtectionRepository:
         async with self._transaction() as session:
             await self._active(session, lease, gate)
 
+    async def _profiles(self, session: AsyncSession, binding: DataUseBinding) -> None:
+        for identity in binding.identities:
+            row = await session.get(IdentityRow, identity.identity_profile_id)
+            if (
+                row is None
+                or (row.workspace_id, row.user_id) != (identity.workspace_id, identity.user_id)
+                or row.revision != identity.identity_revision
+                or row.configuration["tenant_binding"] != identity.tenant_id
+            ):
+                raise ProtectionDeniedError("Protected identity was changed or disabled.")
+        for connection in binding.connections:
+            profile = await session.get(ConnectionRow, connection.connection_profile_id)
+            bound_identity = next(
+                (
+                    item
+                    for item in binding.identities
+                    if item.identity_profile_id == connection.identity_profile_id
+                ),
+                None,
+            )
+            if (
+                profile is None
+                or bound_identity is None
+                or profile.status == "disabled"
+                or (profile.workspace_id, profile.user_id)
+                != (bound_identity.workspace_id, bound_identity.user_id)
+                or profile.revision != connection.connection_revision
+                or profile.manifest_digest != connection.manifest_digest
+                or profile.manifest_version != connection.provider_version
+                or profile.configuration["provider_id"] != connection.provider_id
+                or profile.configuration["identity_profile_ref"] != bound_identity.identity_profile_id
+                or profile.configuration["tenant_binding"] != connection.tenant_id
+                or profile.configuration["endpoint"] != connection.endpoint
+            ):
+                raise ProtectionDeniedError("Protected connection was changed or disabled.")
+
     async def use_bound[T, R](
         self,
         lease: ExecutionLease,
@@ -190,6 +228,7 @@ class SQLiteProtectionRepository:
         try:
             async with self._transaction() as session:
                 await self._active(session, lease, gate)
+                await self._profiles(session, binding)
                 await self._source_fences(
                     session, scope, content.metadata.protection_context.sources, allow_new=True
                 )
@@ -199,6 +238,7 @@ class SQLiteProtectionRepository:
             # Audit is durable before release; a new locked read fences local revocation/cancel.
             async with self._transaction() as session:
                 await self._active(session, lease, gate)
+                await self._profiles(session, binding)
                 await self._source_fences(
                     session, scope, content.metadata.protection_context.sources, allow_new=True
                 )
@@ -325,59 +365,57 @@ class SQLiteProtectionRepository:
             raise
         except Exception:
             raise ProtectionAdapterError("Source change verification failed.") from None
-        scope = change.scope
-        key = source_key(change.resource)
-        digest = content_digest(change.model_dump(mode="json"))
         async with self._transaction() as session:
-            fence = await session.get(FenceRow, (scope.workspace_id, scope.user_id, key))
-            if fence is not None and fence.event_id == change.event_id:
-                if fence.event_digest != digest:
-                    raise RuntimeFailure("Source change identifier has different arguments.", status=409)
-                return fence.generation
-            generation = fence.generation if fence is not None else 0
-            if generation != change.expected_generation:
-                raise RuntimeFailure("Source generation changed.", status=409)
-            if fence is None:
-                fence = FenceRow(
-                    workspace_id=scope.workspace_id,
-                    user_id=scope.user_id,
-                    source_key=key,
+            generation = await self._invalidate(session, change)
+            await session.commit()
+            return generation
+
+    async def _invalidate(self, session: AsyncSession, change: SourceChange) -> int:
+        """Shared transactional adapter primitive; callers must verify their authority first."""
+        scope, key = change.scope, source_key(change.resource)
+        digest = content_digest(change.model_dump(mode="json"))
+        fence = await session.get(FenceRow, (scope.workspace_id, scope.user_id, key))
+        if fence is not None and fence.event_id == change.event_id:
+            if fence.event_digest != digest:
+                raise RuntimeFailure("Source change identifier has different arguments.", status=409)
+            return fence.generation
+        generation = fence.generation if fence is not None else 0
+        if generation != change.expected_generation:
+            raise RuntimeFailure("Source generation changed.", status=409)
+        if fence is None:
+            fence = FenceRow(workspace_id=scope.workspace_id, user_id=scope.user_id, source_key=key)
+            session.add(fence)
+        fence.generation = generation + 1
+        fence.blocked, fence.event_id, fence.event_digest = True, change.event_id, digest
+        await session.flush()
+        rows = list(
+            await session.scalars(
+                select(MetadataRow)
+                .join(
+                    SourceRow,
+                    (SourceRow.workspace_id == MetadataRow.workspace_id)
+                    & (SourceRow.user_id == MetadataRow.user_id)
+                    & (SourceRow.metadata_id == MetadataRow.id),
                 )
-                session.add(fence)
-            fence.generation = generation + 1
-            fence.blocked = True
-            fence.event_id = change.event_id
-            fence.event_digest = digest
-            await session.flush()
-            rows = list(
-                await session.scalars(
-                    select(MetadataRow)
-                    .join(
-                        SourceRow,
-                        (SourceRow.workspace_id == MetadataRow.workspace_id)
-                        & (SourceRow.user_id == MetadataRow.user_id)
-                        & (SourceRow.metadata_id == MetadataRow.id),
-                    )
-                    .where(
-                        SourceRow.workspace_id == scope.workspace_id,
-                        SourceRow.user_id == scope.user_id,
-                        SourceRow.source_key == key,
-                        MetadataRow.state.in_(
-                            ("active", "invalid") if change.reason == "source_deleted" else ("active",)
-                        ),
-                    )
+                .where(
+                    SourceRow.workspace_id == scope.workspace_id,
+                    SourceRow.user_id == scope.user_id,
+                    SourceRow.source_key == key,
+                    MetadataRow.state.in_(
+                        ("active", "invalid") if change.reason == "source_deleted" else ("active",)
+                    ),
                 )
             )
-            for row in rows:
-                row.state = "deleted" if change.reason == "source_deleted" else "invalid"
-                row.revision += 1
-                session.add(
-                    DeletionOutbox(
-                        scope=DeletionScope.CHUNK_IDS,
-                        collection=ENTERPRISE_COLLECTION,
-                        filter={"ids": [row.vector_id]},
-                        requested_at=int(self._clock()),
-                    )
+        )
+        for row in rows:
+            row.state = "deleted" if change.reason == "source_deleted" else "invalid"
+            row.revision += 1
+            session.add(
+                DeletionOutbox(
+                    scope=DeletionScope.CHUNK_IDS,
+                    collection=ENTERPRISE_COLLECTION,
+                    filter={"ids": [row.vector_id]},
+                    requested_at=int(self._clock()),
                 )
-            await session.commit()
-            return fence.generation
+            )
+        return fence.generation

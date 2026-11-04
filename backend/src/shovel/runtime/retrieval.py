@@ -23,6 +23,7 @@ from shovel.domain.enums import (
 )
 from shovel.pipeline.embedder import Embedder, build_embedder
 from shovel.pipeline.embedding_cache import EmbeddingCache
+from shovel.protection.egress import EgressChannel, require_ordinary
 from shovel.runtime.diagnostics import trace, trace_duration
 from shovel.runtime.errors import RuntimeFailure
 from shovel.runtime.schemas import SearchInput
@@ -52,6 +53,7 @@ class RetrievalService:
         self._embedding_slots = asyncio.Semaphore(64)
 
     async def embed_query(self, query: str) -> tuple[list[float], str]:
+        require_ordinary(EgressChannel.EMBEDDING, query)
         if self._embedder is None:
             self._embedder = build_embedder(
                 self.runtime.settings.embedding, expected_dimension=self.runtime.settings.zvec.dim
@@ -166,6 +168,7 @@ class RetrievalService:
         return identifiers
 
     async def search(self, request: SearchInput) -> dict[str, Any]:
+        require_ordinary(EgressChannel.PROCESS, request)
         started = perf_counter()
         with trace_duration("retrieval.scope.completed"):
             scope = await self._scope(request.resource_ids)

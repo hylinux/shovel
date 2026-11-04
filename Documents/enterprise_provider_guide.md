@@ -193,6 +193,19 @@ Policy audit 不是普通 debug log：使用 safe schema，绑定确切 session/
 凭据；这些元数据仍需访问控制和组织 retention 审批。不要为“排查认证”打开 raw SDK
 wire logging，也不要以 synthetic 的终端展示证明真实企业内容可以输出到终端。
 
+### Host 的 H1 legacy containment
+
+Chat 与 Execution 已建立企业数据处理范围；范围内创建/释放 ProtectedContent 后，
+裸字符串、工具结果与派生 dict 也不能进入旧 AG-UI、模型、MCP、Memory/Knowledge、
+embedding/cache/index 或个人正文存储链路。子 task/线程共享标记，不能靠嵌套 scope
+清除。该标记只用于保守拒绝，不是 source classification 或组织授权。
+
+自定义 Provider 不得先 unwrap/stringify 再调用普通 client；READ/DISPLAY 不授予其他
+action/destination。受保护的正向出口必须另有可信、逐使用授权、保留上下文的 adapter；
+没有这些能力时显式拒绝，不能通过 ALLOW 设置或换本地模型绕过。Artifact/clipboard
+目前无可信应用 adapter。synthetic derive handler 不向普通 Execution output 写正文或
+派生 payload；示例报告只由外层控制器投影固定状态。细节见分析第 24 节。
+
 ## 8. Testing 与验收
 
 示例专用回归：

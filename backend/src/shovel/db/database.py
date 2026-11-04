@@ -19,6 +19,8 @@ from sqlalchemy.ext.asyncio import (
     create_async_engine,
 )
 from sqlalchemy.orm import Session, sessionmaker
+from sqlalchemy.sql.dml import Insert, Update
+from sqlalchemy.sql.selectable import Alias, FromClause
 
 from shovel.db.base import Base
 
@@ -33,6 +35,20 @@ PRAGMAS = {
     "cache_size": "-64000",  # ~64 MB: helpful, still polite on a laptop
     "mmap_size": "268435456",  # 256 MB
 }
+
+
+def _contain_enterprise_write(
+    connection: Any, cursor: Any, statement: str, parameters: Any, context: Any, executemany: bool
+) -> None:
+    from shovel.protection.egress import require_personal_table_write
+
+    compiled = context.compiled
+    command = compiled.statement if compiled is not None else None
+    if isinstance(command, Insert | Update):
+        target: FromClause[Any] = command.table
+        while isinstance(target, Alias):
+            target = target.element
+        require_personal_table_write(getattr(target, "name", None), update=isinstance(command, Update))
 
 
 def create_database_engine(
@@ -54,6 +70,7 @@ def create_database_engine(
     )
 
     event.listen(engine, "connect", _apply_pragmas)
+    event.listen(engine, "before_cursor_execute", _contain_enterprise_write)
 
     return engine
 
@@ -117,6 +134,7 @@ async def create_async_database_engine(
     )
 
     event.listen(engine.sync_engine, "connect", _apply_pragmas)
+    event.listen(engine.sync_engine, "before_cursor_execute", _contain_enterprise_write)
 
     try:
         yield engine

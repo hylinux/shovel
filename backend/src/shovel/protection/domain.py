@@ -624,6 +624,9 @@ class ProtectedContent[T](Ephemeral):
         self._metadata = metadata
         self._released = False
         self._lock = Lock()
+        from shovel.protection.egress import mark_enterprise
+
+        mark_enterprise()
 
     @property
     def metadata(self) -> ProtectedContentMetadata:
@@ -653,4 +656,7 @@ class ProtectedContent[T](Ephemeral):
         permit.consume(binding, now=now)
         if content_digest(self._value) != metadata.reference.content_digest:
             raise ProtectionDeniedError("Content changed during protection revalidation.")
+        from shovel.protection.egress import mark_enterprise
+
+        mark_enterprise()
         return self._value

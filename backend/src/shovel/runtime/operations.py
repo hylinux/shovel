@@ -59,6 +59,9 @@ class OperationService:
         cancel_jobs: bool = False,
         initial_result: dict[str, Any] | None = None,
     ) -> Operation:
+        from shovel.protection.egress import EgressChannel, require_ordinary
+
+        require_ordinary(EgressChannel.PERSISTENCE, (payload, initial_result))
         if kind == EXECUTION_KIND:
             raise RuntimeFailure("Versioned capabilities must be submitted through InvocationService.")
         fingerprint = request_fingerprint(kind, payload, request_ref)

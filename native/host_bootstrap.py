@@ -168,6 +168,35 @@ def main() -> None:
     from shovel.identity.native_wam import configure_installed_host
 
     configure_installed_host(content, load)
+    from shovel.enterprise.organization import OrganizationAnchor, configure_organization_host
+
+    def organization_policy():
+        trust_key = r"SOFTWARE\Shovel\EnterpriseTrust"
+        try:
+            key = winreg.OpenKey(
+                winreg.HKEY_LOCAL_MACHINE,
+                trust_key,
+                access=winreg.KEY_READ | winreg.KEY_WOW64_64KEY,
+            )
+        except FileNotFoundError:
+            return None
+        with key:
+            protected("MACHINE\\" + trust_key, 4)
+            policy_path = winreg.QueryValueEx(key, "PolicyPath")[0]
+            anchor = OrganizationAnchor(
+                organization_id=winreg.QueryValueEx(key, "OrganizationId")[0],
+                revision=winreg.QueryValueEx(key, "Revision")[0],
+                certificate_sha256=winreg.QueryValueEx(key, "SignerCertificateSha256")[0],
+                envelope_sha256=winreg.QueryValueEx(key, "PolicySha256")[0],
+            )
+        protected(policy_path)
+        if not Path(policy_path).is_absolute():
+            raise ValueError("Organization policy path must be absolute.")
+        with Path(policy_path).open("rb") as stream:
+            envelope = stream.read(1024 * 1024 + 1)
+        return anchor, envelope
+
+    configure_organization_host(organization_policy)
     from shovel.cli import app
 
     sys.argv[:] = ["shovel", "run", "prd"]

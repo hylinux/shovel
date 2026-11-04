@@ -9,8 +9,10 @@ synthetic whole-buffer read/display 路径。它不是 penetration test、合规
 [ADRs](enterprise_security_adrs.md)；示例和接口指南见
 [Provider guide](enterprise_provider_guide.md)。
 
-**当前生产企业 admission 关闭**。真实 broker/resolver、Provider、组织 policy/trust、
-source lifecycle adapters 没有装配。ES-10 只增加 source-checkout 示例与文档；
+**当前生产企业 admission 关闭**。后续已实现受控安装 native WAM 桥接及 H3 Kusto
+元数据组织签名/观察组件，但尚未部署或通过真实组织认证验收。
+H1 已接入受管 Host 的拒绝式 containment，见分析第 24 节；没有可信正向适配器的
+企业模型/Artifact/clipboard/Memory/Knowledge 等出口继续拒绝。ES-10 示例本身仍只是离线证据；
 不把现有个人聊天、MCP、上传、Memory/Knowledge 自动变成受保护企业入口。
 
 ## 资产、攻击者和信任假设
@@ -60,7 +62,7 @@ Python 进程**不是沙箱**：恶意同进程代码可以读取内存、调用
 | 静默失败自动换登录方式/冒用账号 | silent-only resolver/acquire；typed wait、原 deadline、fresh acquire；`test_enterprise_authentication.py` | ES-5 真实 WAM broker-required/non-fallback、Windows UI/取消未验收 |
 | Token/SDK 异常泄漏到 Agent/log/SQLite | ephemeral single-use credential、safe exception/repr、固定 schema、所有表哨兵扫描；`test_enterprise_failures.py`/`test_enterprise_sample.py` | 真实 SDK logger/telemetry 必须各自验证，内存不防恶意同进程代码 |
 | unlabelled ingress / prompt laundering | missing/unknown protection deny，source DATA lineage 及 decoder identity 检查；execution/protection tests | 既有 MCP/粘贴/上传无法可靠识别所有企业数据，不允许以“未经过 Provider”为豁免 |
-| READ 后直接 model/embed/index/persist | 每个 action/destination/model 独立 permit；`test_protection_policy.py`、实际 native Zvec 零写入测试 | 生产 AG-UI/MAF/Artifact/clipboard/Memory/Knowledge 等全出口 H1 未接线 |
+| READ 后直接 model/embed/index/persist | 独立 permit；Host task 范围 containment、实际 AG-UI/model/tool/SQLite/embedding/index 前拒绝；`test_enterprise_egress.py` | 未纳管 ingress、可信正向企业模型/Artifact/clipboard、真实全链路验收仍未完成 |
 | 派生结果洗掉限制/用旧 body 假恢复 | conservative merge、全部 DATA/CONTROL lineage、source-bound generation、transient process ownership；protection/persistence tests | 跨进程派生 body 恢复、实际模型输出 adapter 不在当前接受范围 |
 | 撤权/删除/policy 变更后旧缓存再现 | query/materialization 回查、source fence、fresh snapshot、逐 binding generation；persistence/failure/vector tests | durable source-change admission/observer/delivery 尚未装配；信号未到达不能承诺即时撤权 |
 | 重放 wait/completion/timer 或并发恢复 | atomic suspension、append-only completion、lease/claim、认证等待不被 timer 覆盖、原 deadline；execution/failure tests | 真实 broker、进程 crash 与组织外部系统仍需端到端验收 |
@@ -87,7 +89,7 @@ sample-specific publisher hash allowlist、enabled 内存副本和 connection po
 | 门槛 | 仍需取得的证据 |
 |---|---|
 | 真实 WAM | 明确批准的 tenant/app/account，Windows broker-required/non-fallback、交互/取消/超时与组织策略实测 |
-| H1 全出口 containment | 所有 ingress、stream、model/tool、Artifact、export/clipboard、Memory/Knowledge、persist/index 的真实 gate 与无泄漏证明 |
+| H1 全出口 containment | 已接入现有受管出口的拒绝式 gate；仍需完整 ingress 与获准正向适配器、stream buffer/DLP、模型派生内容及真实组织全链路证据 |
 | H2 外部副作用 | durable dispatch receipts、幂等/reconciliation、crash-window 与取消后的效果判定；禁止盲重试 |
 | H3 组织 trust/lifecycle | 已安装组织 trust root/policy adapters、完整性/撤销、真实 source observer 与 durable delivery/admission |
 | H4 retention/存储 | 组织批准的 retention/offline/revocation/delete 矩阵、访问控制、WAL/backup/vector 清理及加密/审计完整性策略 |

@@ -10,6 +10,7 @@ from agent_framework import Agent, AgentSession, ChatOptions, SupportsChatGetRes
 from shovel.capability.domain import AgentImplementation, FunctionImplementation, SkillImplementation
 from shovel.execution.domain import BudgetUsage, ExecutorResult
 from shovel.execution.ports import ExecutorContext
+from shovel.protection.egress import EgressChannel, require_ordinary
 from shovel.runtime.errors import RuntimeFailure
 from shovel.workflow.executor import WorkflowExecutor as WorkflowExecutor
 
@@ -45,6 +46,7 @@ class SkillExecutor:
         implementation = context.execution.snapshot.capability.content.implementation
         if self._client is None or not isinstance(implementation, SkillImplementation):
             raise RuntimeFailure("Skill model adapter is not configured.", status=501)
+        require_ordinary(EgressChannel.MODEL, context.execution.input)
         await context.consume(BudgetUsage(agent_turns=1))
         agent = Agent(
             client=self._client(),
@@ -76,6 +78,7 @@ class AgentExecutor:
         implementation = context.execution.snapshot.capability.content.implementation
         if not isinstance(implementation, AgentImplementation):
             raise RuntimeFailure("Agent executor received another capability kind.")
+        require_ordinary(EgressChannel.MODEL, context.execution.input)
         await context.consume(BudgetUsage(agent_turns=1))
         # A fresh, tool-free Agent cannot inherit mutable workspace extensions or parent privileges.
         agent = Agent(

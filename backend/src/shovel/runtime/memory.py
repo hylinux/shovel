@@ -35,6 +35,7 @@ from shovel.memory.service import view
 from shovel.memory.sqlite_repository import SQLiteMemoryRepository
 from shovel.memory.zvec_index import ZvecMemoryIndex
 from shovel.pipeline.embedder import build_embedder
+from shovel.protection.egress import EgressChannel, require_ordinary
 from shovel.runtime.diagnostics import trace
 from shovel.runtime.errors import NotFound, RuntimeFailure
 
@@ -142,6 +143,7 @@ class MemoryService:
         }
 
     async def search(self, query: str, *, conversation_id: str = "") -> list[dict[str, Any]]:
+        require_ordinary(EgressChannel.PROCESS, query)
         started = perf_counter()
         try:
             result = await self.application.retrieve(query, conversation_id)

@@ -34,6 +34,7 @@ from shovel.memory.domain import (
     conflicts,
     same_fact,
 )
+from shovel.protection.egress import EgressChannel, require_ordinary
 from shovel.runtime.errors import NotFound, RuntimeFailure
 
 type Row = NativeMemory
@@ -229,6 +230,7 @@ class SQLiteMemoryRepository:
         generation: int | None = None,
         replace_id: str | None = None,
     ) -> list[MemoryRecord]:
+        require_ordinary(EgressChannel.MEMORY, candidates)
         results = []
         async with self.sessions() as session:
             await session.execute(text("BEGIN IMMEDIATE"))

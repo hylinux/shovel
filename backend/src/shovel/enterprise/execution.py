@@ -31,6 +31,7 @@ from shovel.protection.domain import (
     SourceContentRef,
     content_digest,
 )
+from shovel.protection.egress import record_displayed_receipt
 from shovel.security.domain import SecurityDenied
 from shovel.security.ports import ExecutionGate
 
@@ -246,6 +247,7 @@ class EnterpriseReadHandler:
                 lambda value: self.display.display(execution.id, value),
                 gate=self.gate,
             )
+            record_displayed_receipt()
             return ExecutorResult(output={"status": "displayed"})
         finally:
             credential.close()

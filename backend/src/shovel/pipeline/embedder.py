@@ -35,6 +35,7 @@ from shovel.exceptions.pipeline import (
     EmbeddingError,
     EmbeddingNotConfiguredError,
 )
+from shovel.protection.egress import EgressChannel, require_ordinary
 
 #: 值得重试的 HTTP 状态码。
 #:
@@ -116,6 +117,7 @@ class HttpEmbedder:
         return self._dimension or self._expected
 
     async def embed(self, texts: list[str]) -> list[list[float]]:
+        require_ordinary(EgressChannel.EMBEDDING, texts)
         if not texts:
             return []
 
@@ -145,6 +147,7 @@ class HttpEmbedder:
     # 内部
     # ----------------------------------------------------------------- #
     async def _embed_batch(self, batch: list[str]) -> list[list[float]]:
+        require_ordinary(EgressChannel.EMBEDDING, batch)
         import httpx
 
         url, headers, body = self._request(batch)

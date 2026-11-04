@@ -197,6 +197,7 @@ class ExecutionMaintenanceWorker(BackgroundService):  # type: ignore[misc]
         runtime = await resolve_runtime(self._provider)
         try:
             while not stopping.is_set():
+                await runtime.enterprise.refresh_policy()
                 if await runtime.wakeups.run_due():
                     runtime.wake.set()
                 await runtime.interactions.refresh()

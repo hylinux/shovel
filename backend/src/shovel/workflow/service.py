@@ -7,6 +7,7 @@ from shovel.automation.domain import NormalizedEvent
 from shovel.automation.ports import EventBus
 from shovel.capability.domain import CapabilityScope, WorkflowNode
 from shovel.execution.domain import ExecutionLease
+from shovel.protection.egress import EgressChannel, require_ordinary
 from shovel.runtime.errors import RuntimeFailure
 from shovel.security.ports import ExecutionGate
 from shovel.workflow.domain import InputRequest, WorkflowCheckpoint
@@ -24,6 +25,7 @@ class _Bound:
         await self.repository.save(self.lease, checkpoint, self.gate)
 
     async def ask(self, node: WorkflowNode) -> InputRequest:
+        require_ordinary(EgressChannel.DISPLAY, node)
         return await self.repository.ask(self.lease, node)
 
     async def notify(self, node: WorkflowNode, payload: dict[str, JsonValue]) -> str:
@@ -31,6 +33,7 @@ class _Bound:
         return await self.repository.notify(self.lease, node, payload)
 
     async def emit(self, node: WorkflowNode, payload: dict[str, JsonValue]) -> str:
+        require_ordinary(EgressChannel.TOOL, payload)
         if self.bus is None or node.event_type is None:
             raise RuntimeFailure("Workflow EventBus is not configured.")
         await self.repository.check(self.lease, self.gate)

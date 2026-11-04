@@ -26,6 +26,7 @@ from agent_framework.openai import OpenAIChatCompletionClient
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from shovel.config.agent_config import AgentSettings
+from shovel.protection.egress import EgressChannel, require_ordinary
 from shovel.runtime.errors import RuntimeFailure
 from shovel.runtime.workspace_config import content_revision as mcp_revision
 
@@ -75,6 +76,7 @@ def _environment(value: str) -> str:
 async def run_skill_script(
     skill: FileSkill, script: FileSkillScript, args: dict[str, Any] | list[str] | None = None
 ) -> str:
+    require_ordinary(EgressChannel.TOOL, args)
     path = await asyncio.to_thread(Path(script.full_path).resolve)
     root = await asyncio.to_thread(Path(skill.path).resolve)
     if path.suffix != ".py" or not path.is_relative_to(root):
@@ -116,6 +118,7 @@ class AgentExtensions:
         self.mcp_revision: str | None = None
 
     async def load(self, client: OpenAIChatCompletionClient[Any]) -> None:
+        require_ordinary(EgressChannel.TOOL)
         async with self._lock:
             if self._stack is not None:
                 return

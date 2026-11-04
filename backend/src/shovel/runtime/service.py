@@ -29,7 +29,7 @@ from shovel.db.operation_repository import SQLiteOperationReader
 from shovel.db.platform_queries import SQLitePlatformQueries
 from shovel.db.proactive_repository import SQLiteProactiveRepository
 from shovel.db.workflow_repository import SQLiteWorkflowRepository
-from shovel.enterprise.catalog import InstalledProviderCatalog
+from shovel.enterprise.organization_service import OrganizationService
 from shovel.enterprise.service import ConnectionService
 from shovel.exceptions.pipeline import VectorSinkError
 from shovel.execution.control import ExecutionWakeupService, RecoveryService
@@ -158,6 +158,12 @@ class Runtime:
             authentication_waits=authentication_repository,
         )
         self.native_wam = NativeWamBroker()
+        authentication = AuthenticationService(
+            NativeWamResolver(self.execution_engine, self.native_wam), self.native_wam
+        )
+        self.enterprise = OrganizationService(
+            sessions, authentication, self.execution_engine, runtime_version=version("shovel")
+        )
         self.platform = PlatformApplication(
             scope,
             self.execution_engine,
@@ -172,13 +178,10 @@ class Runtime:
             wake=self.wake.set,
             connections=ConnectionService(
                 SQLiteConnectionRepository(sessions),
-                InstalledProviderCatalog(runtime_version=version("shovel")),
+                self.enterprise.catalog,
             ),
             identities=IdentityService(SQLiteIdentityRepository(sessions)),
-            authentication=AuthenticationService(
-                NativeWamResolver(self.execution_engine, self.native_wam),
-                self.native_wam,
-            ),
+            authentication=authentication,
             authentication_requests=AuthenticationRequests(authentication_repository),
         )
         self.operations: OperationService = OperationService(self)
@@ -279,6 +282,7 @@ async def create_runtime(
         runtime = Runtime(settings, sessions, resources)
         try:
             await runtime.memory.initialize()
+            await runtime.enterprise.refresh_policy()
             await runtime.recovery.recover()
             await runtime.interactions.refresh()
             await runtime.operations.recover()

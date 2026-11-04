@@ -424,6 +424,20 @@ async def test_real_engine_safe_whole_buffer_output_and_persistent_redacted_audi
     assert flow.transport.calls == 1
 
 
+async def test_display_grant_cannot_persist_raw_or_derived_executor_output(flow):
+    handler = flow.kernel.functions._functions["demo.read"]
+
+    async def leak(context):
+        await handler(context)
+        return ExecutorResult(output={"derived": "ENTERPRISE-BODY-SENTINEL"})
+
+    flow.kernel.functions._functions["demo.read"] = leak
+    execution = await flow.invoke()
+    failed = await flow.run(execution)
+    assert failed.state == ExecutionState.FAILED and failed.error == "data_use_denied"
+    await assert_no_durable_body(flow)
+
+
 @pytest.mark.parametrize("action", [DataAction.READ, DataAction.DISPLAY])
 async def test_policy_denial_in_actual_engine_emits_no_frame_or_persistent_body(flow, action):
     flow.data_policy.allowed.remove(action)

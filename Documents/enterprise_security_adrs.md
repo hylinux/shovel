@@ -290,6 +290,15 @@ process-local authority 只认可自身签发的一次性 ALLOW，并在消费/p
 服务只向受审 consumer 交付完整 buffer；尚未接入 AG-UI/模型/存储现有出口，
 H1–H4 保持，详见分析第 18 节。
 
+**H1 后续实施切片：**用户确认普通内容兼容，企业/派生内容缺少可信出口适配器时拒绝。
+Host Chat/Execution 已接入共享任务范围的 containment；创建/释放保护 envelope 后，
+AG-UI queue 两端、MAF/model HTTP、tool/MCP、Memory/Knowledge、embedding/cache/
+index、Operation/Workflow 和个人正文 SQLite 写入不能以裸字符串继续运行。
+既有完整 buffer READ/DISPLAY 保持逐绑定授权；固定安全完成收据不携带正文，
+不把 READ 或 DISPLAY 升级为模型、持久化或复制权限。Artifact/clipboard 没有可信
+应用适配器，继续不支持；企业正向模型/派生交付及真实全链路验收未接受。
+详见分析第 24 节，不能把拒绝式 containment 当作所有出口均已具备 ALLOW 能力。
+
 ## ENT-ADR-05 — ProtectedContent, ProtectionContext and Derived Data
 
 **Context**
@@ -634,6 +643,14 @@ console/Windows通知只发送safe status；terminal重定向也属于数据目�
 **H3硬门槛：**组织policy来自可信、完整性/版本/撤销受验证的安装/catalog/DI，
 个人TOML/AppSetting只可收窄；不允许用户布尔值或Agent参数替换组织approval、
 authority、obligation verifier和model分类边界。具体信任根与验证实现仍需组织决策。
+
+后续用户选择了独立机器信任锚和组织签名策略，并实施首批 **Kusto 数据库/表元数据**
+adapter：HKLM EnterpriseTrust pin、RSA/Code Signing 验证、SQLite 单调 policy ledger、
+签名 catalog/connection/label-rights、PolicyStateProvider 与事务 source fence。
+详见分析第 23 节。只支持显式的 unprotected/non-DLP metadata READ/DISPLAY；
+不把 Kusto RBAC 当内容 rights，不声称 schema 版本覆盖行数据、RLS 或即时撤权。
+保留 terminal tombstone，变化不自动恢复旧执行；尚未部署/真实认证/实测，
+不改变 H1/H2/H4 或生产默认关闭边界。
 
 **Security assumptions**
 

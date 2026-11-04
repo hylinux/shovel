@@ -40,6 +40,7 @@ from .memory import (
     MemoryWorking,
     StandingQuery,
 )
+from .organization import OrganizationRevision, OrganizationSource
 from .protection import EnterpriseMetadata, EnterpriseMetadataSource, EnterpriseSourceFence
 from .retrieval import (
     AgentScope,
@@ -100,6 +101,8 @@ __all__ = [
     "Notification",
     "NotificationDelivery",
     "Operation",
+    "OrganizationRevision",
+    "OrganizationSource",
     "ProactiveService",
     "ProtectionAudit",
     "Resource",

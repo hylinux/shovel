@@ -211,6 +211,9 @@ class ZvecMemoryIndex:
             ]
 
     async def upsert(self, record: MemoryRecord) -> None:
+        from shovel.protection.egress import EgressChannel, require_ordinary
+
+        require_ordinary(EgressChannel.INDEX, record)
         from zvec import Doc
 
         await self.initialize()

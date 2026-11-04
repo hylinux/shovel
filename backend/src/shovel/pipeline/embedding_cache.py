@@ -8,6 +8,8 @@ from collections import OrderedDict
 from time import monotonic
 from typing import Any
 
+from shovel.protection.egress import EgressChannel, require_ordinary
+
 
 class EmbeddingCache:
     """Bounded, process-local vectors; each provider instance owns its cache."""
@@ -20,11 +22,13 @@ class EmbeddingCache:
 
     @staticmethod
     def key(args: Any, kwargs: Any) -> str:
+        require_ordinary(EgressChannel.CACHE, (args, kwargs))
         return hashlib.sha256(
             json.dumps([args, kwargs], sort_keys=True, ensure_ascii=True).encode("utf-8")
         ).hexdigest()
 
     def get(self, key: str) -> list[float] | None:
+        require_ordinary(EgressChannel.CACHE)
         with self._lock:
             item = self._values.pop(key, None)
             if item is None or monotonic() - item[0] >= self.seconds:
@@ -33,6 +37,7 @@ class EmbeddingCache:
             return list(item[1])
 
     def put(self, key: str, vector: list[float]) -> None:
+        require_ordinary(EgressChannel.CACHE, vector)
         if (
             not self.entries
             or not vector

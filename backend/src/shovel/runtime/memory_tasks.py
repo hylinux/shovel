@@ -48,6 +48,9 @@ class MemoryTaskService:
         run_id: str | None,
         kind: str = "memory.extract",
     ) -> str:
+        from shovel.protection.egress import EgressChannel, require_ordinary
+
+        require_ordinary(EgressChannel.MEMORY, user.content)
         key = f"{kind}:{user.id}:native-v1"
         payload = {
             "user_message_id": user.id,

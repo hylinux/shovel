@@ -219,3 +219,12 @@ as their working directory.
 Policy changes invalidate the existing bootstrap and require restart/revalidation.
 No default trust root, self-signed production fallback, automatic trust
 provisioning, token cache, HTTP listener or default enterprise enable is added.
+
+The protected bootstrap can also read the separate administrator-provisioned
+`HKLM\SOFTWARE\Shovel\EnterpriseTrust` organization policy anchor. This is not a
+personal-setting override and does not inherit WAM sign-in approval. Its
+metadata-only policy, registry fields, catalog, durable source fences and
+limitations are documented in
+[H3 organization/Kusto metadata](../Documents/enterprise_security_analysis.md#23-h3-首批组织信任与-kusto-元数据适配器).
+Missing policy leaves the catalog empty. No organization keys/certificates or
+live Kusto/WAM acceptance are provisioned by this bootstrap.

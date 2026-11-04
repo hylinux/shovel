@@ -33,6 +33,7 @@ from shovel.identity.waits import (
     authentication_execution_lease,
 )
 from shovel.protection.domain import ProtectionDeniedError
+from shovel.protection.egress import execution_egress_scope
 from shovel.runtime.errors import NotFound, RuntimeFailure
 from shovel.security.domain import SecurityDenied
 from shovel.workflow.ports import WorkflowContext
@@ -75,6 +76,10 @@ class ExecutionEngine:
         return await self.dispatch(await self.start(scope, identifier))
 
     async def dispatch(self, lease: ExecutionLease) -> Execution:
+        with execution_egress_scope():
+            return await self._dispatch(lease)
+
+    async def _dispatch(self, lease: ExecutionLease) -> Execution:
         scope, identifier = lease.execution.snapshot.context.scope, lease.execution.id
         try:
             execution = await self.repository.dispatch(lease, self.invocations.security)

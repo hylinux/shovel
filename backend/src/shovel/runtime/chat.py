@@ -14,6 +14,15 @@ from sqlalchemy import func, select, update
 
 from shovel.db.base import now_ts
 from shovel.db.model.runtime import ChatMessage, Conversation
+from shovel.protection.domain import ProtectionDeniedError
+from shovel.protection.egress import (
+    EgressChannel,
+    EnterpriseFlow,
+    chat_failure_receipt,
+    egress_scope,
+    enterprise_active,
+    require_ordinary,
+)
 from shovel.runtime.agent import EventSink, ShovelAgent
 from shovel.runtime.agent_instructions import AgentInstructionsView
 from shovel.runtime.diagnostics import trace, trace_context
@@ -166,17 +175,21 @@ class ChatService:
                 raise RuntimeFailure("Agent 正在重启或重启失败,请稍后重试重启。", status=503)
             self._active_runs += 1
             try:
-                with trace_context(conversation_id=identifier, run_id=run_id):
+                with trace_context(conversation_id=identifier, run_id=run_id), egress_scope():
                     async with self.runtime.performance.admit(self.runtime.stopping):
                         return await self._send(identifier, request, run_id=run_id, on_event=on_event)
+            except ProtectionDeniedError:
+                raise RuntimeFailure("Enterprise data egress denied.", status=403) from None
             finally:
                 self._active_runs -= 1
 
     async def stream(self, identifier: str, request: MessageInput, run_id: str) -> AsyncGenerator[BaseEvent]:
         # Backpressure bounds memory while retaining cancellation and durable failure handling.
         queue: asyncio.Queue[BaseEvent | None] = asyncio.Queue(maxsize=32)
+        flow = EnterpriseFlow()
 
         async def emit(event: BaseEvent) -> None:
+            require_ordinary(EgressChannel.DISPLAY, event, flow=flow)
             if event.type != EventType.RUN_STARTED:
                 await queue.put(event)
 
@@ -184,7 +197,8 @@ class ChatService:
             with trace_context(conversation_id=identifier, run_id=run_id):
                 trace("agent.stream.started")
                 try:
-                    saved = await self.send(identifier, request, run_id=run_id, on_event=emit)
+                    with egress_scope(flow):
+                        saved = await self.send(identifier, request, run_id=run_id, on_event=emit)
                     from shovel.runtime.api import message_view
 
                     await queue.put(CustomEvent(name="shovel.message", value=message_view(saved)))
@@ -196,7 +210,13 @@ class ChatService:
                 except Exception as exc:
                     trace("agent.stream.failed", error_type=type(exc).__name__)
                     message = (
-                        exc.message if isinstance(exc, RuntimeFailure) else "Agent 执行失败,请检查服务日志。"
+                        "Enterprise data egress denied."
+                        if flow.protected
+                        else (
+                            exc.message
+                            if isinstance(exc, RuntimeFailure)
+                            else "Agent 执行失败,请检查服务日志。"
+                        )
                     )
                     if not isinstance(exc, RuntimeFailure):
                         self._log.error("agent.stream.failed", error_type=type(exc).__name__)
@@ -207,6 +227,9 @@ class ChatService:
         task = asyncio.create_task(generate())
         try:
             while (event := await queue.get()) is not None:
+                if flow.protected:
+                    yield RunErrorEvent(message="Enterprise data egress denied.", code="data_use_denied")
+                    return
                 yield event
             await task
         finally:
@@ -223,6 +246,15 @@ class ChatService:
         run_id: str | None = None,
         on_event: EventSink | None = None,
     ) -> ChatMessage:
+        require_ordinary(EgressChannel.PERSISTENCE, request)
+        if on_event is not None:
+            consumer = on_event
+
+            async def checked_event(event: BaseEvent) -> None:
+                require_ordinary(EgressChannel.DISPLAY, event)
+                await consumer(event)
+
+            on_event = checked_event
         started = perf_counter()
         trace("chat.started", memory_enabled=request.memory_enabled, input_chars=len(request.content))
         persistence_started = perf_counter()
@@ -279,6 +311,7 @@ class ChatService:
                 run_id=run_id,
                 on_event=on_event,
             )
+            require_ordinary(EgressChannel.PERSISTENCE, result)
             persistence_started = perf_counter()
             async with self.runtime.sessions() as session:
                 saved = await session.get(ChatMessage, answer.id)
@@ -315,22 +348,27 @@ class ChatService:
                 return saved
         except BaseException as exc:
             trace("chat.failed", error_type=type(exc).__name__)
-            if isinstance(exc, asyncio.CancelledError):
+            if enterprise_active():
+                failure_message = "Enterprise data egress denied."
+            elif isinstance(exc, asyncio.CancelledError):
                 failure_message = "模型请求被中断,请重新发送。"
+            elif isinstance(exc, ProtectionDeniedError):
+                failure_message = "Enterprise data egress denied."
             elif isinstance(exc, RuntimeFailure):
                 failure_message = exc.message
             else:
                 failure_message = f"对话处理失败 ({type(exc).__name__})。"
                 self._log.error("chat.failed", conversation_id=identifier, error_type=type(exc).__name__)
             with CancelScope(shield=True):
-                async with self.runtime.sessions() as session:
-                    await session.execute(
-                        update(ChatMessage)
-                        .where(ChatMessage.id == answer.id)
-                        .values(state="failed", content=self.runtime.redact(failure_message))
-                    )
-                    await session.commit()
-                    trace("chat.failure.persisted", message_id=answer.id)
+                with chat_failure_receipt():
+                    async with self.runtime.sessions() as session:
+                        await session.execute(
+                            update(ChatMessage)
+                            .where(ChatMessage.id == answer.id)
+                            .values(state="failed", content=self.runtime.redact(failure_message))
+                        )
+                        await session.commit()
+                        trace("chat.failure.persisted", message_id=answer.id)
             raise
 
     async def close(self) -> None:

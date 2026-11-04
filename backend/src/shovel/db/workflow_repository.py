@@ -66,6 +66,9 @@ class SQLiteWorkflowRepository:
             raise RuntimeFailure("Workflow node is not part of the frozen definition.")
 
     async def save(self, lease: ExecutionLease, checkpoint: WorkflowCheckpoint, gate: ExecutionGate) -> None:
+        from shovel.protection.egress import EgressChannel, require_ordinary
+
+        require_ordinary(EgressChannel.PERSISTENCE, checkpoint)
         ensure_no_credentials(checkpoint)
         checkpoint = WorkflowCheckpoint.model_validate(checkpoint.model_dump(mode="json"))
         async with sqlite_write(self.sessions) as session:
@@ -161,6 +164,9 @@ class SQLiteWorkflowRepository:
             return _input(request)
 
     async def notify(self, lease: ExecutionLease, node: WorkflowNode, payload: dict[str, JsonValue]) -> str:
+        from shovel.protection.egress import EgressChannel, require_ordinary
+
+        require_ordinary(EgressChannel.DISPLAY, payload)
         self._node(lease, node)
         ensure_no_credentials(payload)
         bounded_json(payload)

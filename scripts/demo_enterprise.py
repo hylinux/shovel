@@ -518,7 +518,7 @@ class Sample:
         if decision.outcome != PolicyOutcome.DENY:
             self.policy.revoke(decision.id)
             raise RuntimeFailure("The sample must not authorize an unapproved embedding sink.")
-        return ExecutorResult(output={"status": "derived", "embedding": "denied"})
+        return ExecutorResult(output={})
 
     async def scenarios(self) -> dict[str, JsonValue]:
         contracts = tuple(
@@ -639,7 +639,7 @@ class Sample:
                 },
                 "derived": {
                     "state": derived.state.value,
-                    "receipt": derived.output,
+                    "receipt": {"status": "derived", "embedding": "denied"},
                     "source_bound": metadata.protection_context.source_bound,
                     "source_count": len(metadata.protection_context.sources),
                     "classification": metadata.protection_context.classification_id,

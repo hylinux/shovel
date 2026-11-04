@@ -17,6 +17,14 @@
 generation 检查边界，见第 21 节。MCP 1.x/MAF 兼容约束已修正；不以离线测试替代
 真实 WAM、组织批准或 H1–H4 的生产验收。**
 
+**H3 进度：已实施组织签名策略、可信 Kusto metadata catalog/resolver、标签/rights
+映射、PolicyStateProvider 与持久化 source observer，见第 23 节。范围仅数据库/表
+元数据，不包含行数据/行删除/RLS、即时撤权通知或生产启用；真实组织部署/认证尚未验收。**
+
+**H1 进度：已接入现有 Host 的拒绝式出口 containment，见第 24 节。普通内容兼容；
+企业/派生内容不能回退裸字符串、旧模型/工具/存储链路。未提供可信正向适配器的出口
+继续拒绝，不代表受保护模型生成、Artifact/clipboard 或生产全链路验收已通过。**
+
 需求依据为 `Documents\enterprise_security_foundation.md`，特别是其中的
 ENT-SEC-01 至 ENT-SEC-18、分阶段实施要求和本轮十五项输出。
 本报告配套 [Enterprise Security ADRs](enterprise_security_adrs.md)，不替代现有
@@ -1250,3 +1258,148 @@ policy 共七个测试文件合并运行：**209 passed**，86.38 秒，无 skip
 
 不修改 ES-9 已记录的全仓格式化基线，不夹带无关重排。ES-10 文档/示例交付完成
 不等于生产企业安全验收完成；真实 WAM 与 H1–H4 继续保持未接受、默认 deny。
+
+## 23. H3 首批组织信任与 Kusto 元数据适配器
+
+用户选择组织签名策略，以及**仅数据库/指定表元数据**的首批范围。实现不查询业务行，
+不以 schema 版本证明行版本、行删除、RLS、Entra membership 或即时全局撤权。
+本轮未连接组织服务、未执行登录、未部署签名信任锚，也没有开放生产企业执行。
+
+### 23.1 组织签名与受控安装
+
+`enterprise\organization.py` 的 `OrganizationPolicy` 是受签名的完整契约：
+purpose 必须为 `shovel.organization.metadata.v1`，包含 organization/scope/tenant、
+单调 revision、issued/expires、显式 metadata label/rights、精确 connection/identity/
+TokenRequest prototype、database/table 和 metadata freshness（默认 5 秒，上限 30 秒）。
+不从个人 TOML、AppSetting、Agent 参数或 Provider response 取得组织 ALLOW。
+
+独立的 64-bit HKLM `SOFTWARE\Shovel\EnterpriseTrust` 由管理员另行部署：
+`OrganizationId`、`Revision`、`PolicyPath`、`PolicySha256`、
+`SignerCertificateSha256`。PolicyPath 必须为受管理员控制的绝对路径；权限/所有权
+由受保护 installed bootstrap 验证。信任入口仅允许既有 isolated `-I -S` bootstrap，
+source checkout 没有默认信任。代码不创建注册表项、证书、组织签名或管理员权限。
+
+Envelope 与 native WAM 安装 envelope 使用相同三字段形式：
+Base64 `payload`、`signature`、`certificate`；payload 为精确 UTF-8 JSON，
+RSA PKCS#1 SHA-256 签名。验签检查 envelope/certificate SHA-256 pin、
+至少 2048-bit RSA、Code Signing EKU、可选 KeyUsage 中的 digital signature、
+证书和策略有效期、purpose/scope/revision，拒绝重复 JSON 字段和未知字段。
+策略不得超过签名证书有效期。证书/policy 撤销依靠管理员更新/移除机器 pin 或发布
+更高版本 revoked policy；**未接入 CRL/OCSP 或组织 push 服务**。
+
+SQLite migration **19** 记录已接受的 policy revision/digest 和 source tombstone。
+相同 revision 不得换 digest，旧 revision 不得恢复；SQL guards 保留单调性和墓碑。
+签名配置重放不清除已有 source fence。组织 policy 变更、信任丢失和 source 变化
+复用保护仓库的同一事务 invalidation，metadata 状态、generation 与 vector deletion
+outbox 一起提交，不另建 Execution/Job 或把进程内 EventBus 当 durable delivery。
+
+### 23.2 Catalog、连接与策略映射
+
+`OrganizationCatalog` 只从已验签并已记入 ledger 的 policy 构造固定
+`kusto.metadata` Provider，版本为 1.0.0，唯一 Function 为 `kusto.metadata.read`。
+未知 Provider/实现、manifest mismatch、非签名连接、个人配置扩权均拒绝。
+连接与身份仍是 disabled/unavailable 的 SQLite 配置记录；签名策略只提供运行时投影，
+必须匹配当前记录的 revision/manifest/配置。编辑、disable 和身份 revision 变化
+使旧投影失效；最终交付事务再次查验 owner/profile bindings，覆盖审计提交到交付间的竞态。
+
+组织 label 必须显式声明 classification/rank、未加密/未保护、不适用 DLP，
+以及 `ephemeral_metadata_only` retention。缺失或不支持的声明拒绝，不猜测“无标签安全”。
+首批 rights 仅 READ/DISPLAY；未知 DRM/DLP、模型、持久化、导出、Memory 和索引用途不支持。
+READ 缺失在认证/网络前阻断；Kusto 允许读取元数据不自动授予 DISPLAY 或其他 rights。
+`OrganizationPolicyProvider` 提供 exact context/binding、身份、source snapshot、
+原 Execution deadline、签名 policy version 与 freshness，复用现有默认拒绝内核和审计。
+
+### 23.3 真实协议适配与观察边界
+
+`enterprise\kusto.py` 实现固定 HTTPS `/v1/rest/mgmt` 元数据操作：
+`.show database [quoted-name] schema`，服务器端只保留指定表及数据库 version 行，
+再只投影 DatabaseName/TableName/ColumnName/ColumnType/Version。
+名称使用 quoted literal，不接收任意 KQL、URL、headers 或 parameter refs。
+中国区/全球区 endpoint 与 authority 不混用；TLS 正常验证、无环境代理、无重定向、
+无自动重试或 CLI/device-code fallback。凭据单次消费；响应限 256 KiB/4096 metadata rows，
+拒绝异常/部分/越界/不支持的结果，错误不输出正文、Token、query 或 SDK 描述。
+公开协议依据：[`.show database schema`](https://learn.microsoft.com/en-us/kusto/management/show-schema-database?view=azure-data-explorer)。
+
+observer 在 owned Execution 的读取/复查中观察真实管理响应，不在后台自行登录。
+完整元数据响应的数据库 version 与规范化表 schema 组成 metadata source version。
+版本变化、表缺失、403 或组织 policy/label/信任变化封禁旧 binding；网络失败、401、
+证据过期先拒绝使用，不伪造删除事实。表缺失的应用 tombstone 不证明物理源已经删除。
+旧执行不能重用旧 generation；保留既有 terminal fence，**不自动重新授权**。
+重新接纳需要组织明确授权的新 connection binding，而不是清除旧 fence 或复活旧 metadata。
+
+这提供每次使用前观察和有界 freshness，不是无缝 push、Exactly Once 或实时撤权保证；
+Kusto/Entra 自身缓存及两次观察之间的变化仍是实测/组织 SLA 门槛。
+Host maintenance 每秒只刷新本地组织签名 policy，不调用组织网络或自动触发 WAM。
+生产 `PolicyEvaluator`、Function registration 和 protected display 的原有关闭边界不变。
+真实中国区 WAM、tenant/app/principal、命令权限及签名部署尚未接受，不得切到全球云认证代替。
+
+离线测试覆盖签名/pin/过期/重复字段、rollback/equivocation、固定真实 HTTP 协议
+（MockTransport，无实际网络）、部分响应、版本/删除/撤权/策略/信任变化、重启墓碑、
+缺失 rights、旧执行以及审计/交付间 disable 竞态。真实集群验收仍需单独获准的身份与部署。
+
+## 24. H1 受管运行时出口 containment
+
+用户确认普通聊天与已有个人内容保留现状；企业内容及派生内容逐出口独立授权，
+缺少可信适配器的出口拒绝，不回退普通字符串。此轮接入现有 Host 的实际边界，
+**不新增生产 enable，不扩展 H3 metadata READ/DISPLAY 为 SEND_TO_MODEL 或业务行读取**。
+
+### 24.1 入口、派生与执行隔离
+
+`protection\egress.py` 提供受管请求的 ContextVar scope。Flow 对象由本请求的子 task、
+线程和工具轮共享；创建/释放 ProtectedContent 后保守标记整条数据处理路径。
+即使 consumer 产生普通字符串或新 dict，也不能经 legacy sink 降级输出。
+嵌套普通 scope 不清除标记；并行无关请求不共享标记。标记不是分类权威或 permit，
+不自动识别用户粘贴、裸 SDK 或未纳管 MCP 返回的企业内容；这些仍属于 ingress 门槛。
+
+每个 Execution 在自己的边界校验返回值。接触企业正文后只允许无正文完成状态，
+或既有完整 buffer DISPLAY 成功后的固定 `{"status":"displayed"}` 收据；
+派生 output/checkpoint 不能写回普通 Operation JSON。仅有固定收据的 child 不污染
+父 Workflow 的普通控制状态，保持 completed-child 不重放与认证挂起/恢复语义。
+已受保护的 caller 不能通过启动 child 清除自身 containment。
+这是可信控制器的固定状态投影，不是任意自定义 handler 的通用 declassification。
+
+### 24.2 已接入的真实边界
+
+| 边界 | 企业路径行为 |
+|---|---|
+| AG-UI | event 入队前检查，消费 queue 时再次检查共享 Flow；拒绝正文/工具参数/自定义 event 降级，只发送固定安全错误，不发送 RUN_FINISHED |
+| 非流式聊天 | 在保存回答前检查，失败只保存固定状态消息，不保存企业正文或创建 Memory 工作 |
+| MAF/model | 主 Agent chat middleware 检查每轮；统一 HTTP request hook 覆盖实际 SDK、stream、重调用和子模型；Skill/Agent/extractor/summary 另有入口检查 |
+| 工具/MCP/Skill 脚本 | function middleware 在调用前与结果返回后检查；extensions/脚本在连接或启动前检查，不把保护对象 stringify 后送给模型 |
+| Memory | enqueue、extractor、summary、consolidate 及查询入口拒绝；未写入不具备 source-bound schema 的个人 Memory |
+| Knowledge | scan 入口及 chunk 持久化前拒绝；FTS/query 入口同样不能成为企业派生查询的旁路 |
+| embedding/cache/index | 实际 HTTP embed、批次重试入口、缓存读写、知识 Zvec 与 Memory Zvec upsert 前拒绝 |
+| persistence | Operation enqueue、Execution create/finish、Workflow checkpoint/notification/event 检查；同步/异步 SQLite engine 对个人正文表的结构化 INSERT/UPDATE 再阻断 |
+| Artifact/clipboard | 只有契约、没有现成可信应用适配器；明确保持不支持/拒绝，不新增普通文件或浏览器复制 API 作为替代 |
+
+SQLite backstop 不阻断既有安全审计、source fence、删除 outbox 等可信元数据事务；
+失败聊天只在独立新 session 内写固定安全错误收据。它不是任意 SQL/Python 的沙箱，
+不能防篡改解释器、移除 hooks、直接驱动或主动绕过边界的同进程代码。
+
+### 24.3 授权与剩余门槛
+
+`DataAction`/`DataDestination`/ModelBinding 的精确授权仍由 ProtectionPolicy 与既有
+durable `use_bound` 完成。legacy gate 没有 ALLOW 接口，READ、DISPLAY、local model、
+Approval 或相同 endpoint 均不授予另一出口。未装配保护/保留适配器的企业模型、
+Memory/Knowledge、Artifact、clipboard 等路径，即使调用者声称获准，也不能进入旧链路。
+
+受保护 streaming 没有先发 token 后补查的 fallback。未来正向 adapter 若要求完整
+输出 DLP，必须先完成受控 buffer/派生保护/整体验证，再逐实际释放点授权；
+本轮没有实现保护模型的完整正向生成或通用 Artifact/clipboard 正向交付。
+组织权威、真实来源版本/撤权信号、受保护查看器、外部副作用收据及 retention/
+physical storage 验收仍不能由这些拒绝式接线替代。
+
+`test_enterprise_egress.py` 验证 READ 后各出口拒绝、派生裸字符串、并行隔离、
+child/thread 传播、serialized ref 拒绝、实际 MAF tool round/SDK 零外发、
+实际 AG-UI/非流式 Chat/SQLite 零正文保存，以及真实 legacy adapter 的 I/O 前拒绝。
+`test_enterprise_execution.py` 另验证 DISPLAY 不授予 executor output 持久化，
+并保留已有完整 buffer 授权、认证恢复、completed child 不重复执行的回归。
+
+验证结果：新增出口测试 **22 passed**；核心出口/Execution/standalone sample 组合
+**71 passed**（随后新增的真实 MAF API 拒绝分类用例已包含在 22 项中）。
+运行时/model/tools/Memory/scan/protection/H3 分组 **411 passed**；
+另一个 lifecycle/persistence/vector/Workflow/Engine 分组先有 205 passed 与 2 个 sample
+兼容失败，修正 sample 的普通 output 后，两个失败均在上述核心组合中通过。
+全仓 Ruff lint、修改文件格式、Mypy backend + sample（225 source files）及 whitespace
+检查通过。拒绝经 SDK 包装后仍返回安全 403，而不是泄漏内部连接错误；
+没有真实组织网络、WAM 登录、生产启用或新可信 adapter 部署。

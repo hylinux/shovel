@@ -12,6 +12,7 @@
     <WindowsSdkPackageVersion>10.0.26100.57</WindowsSdkPackageVersion>
   </PropertyGroup>
   <ItemGroup>
+    <PackageReference Include="System.Management" Version="10.0.14" />
     <InternalsVisibleTo Include="Shovel.Wam.Tests" />
   </ItemGroup>
 </Project>

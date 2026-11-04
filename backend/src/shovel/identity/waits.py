@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
+from contextvars import ContextVar
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Protocol
 
@@ -10,6 +11,10 @@ from shovel.runtime.errors import RuntimeFailure
 
 if TYPE_CHECKING:
     from shovel.execution.domain import Execution, ExecutionLease
+
+authentication_execution_lease: ContextVar[ExecutionLease | None] = ContextVar(
+    "authentication_execution_lease", default=None
+)
 
 
 class AuthenticationWaitRequired(Exception):

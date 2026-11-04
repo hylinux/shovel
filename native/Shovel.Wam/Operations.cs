@@ -87,7 +87,8 @@ internal sealed class Operations(Action<Diagnostic> diagnostic, TimeSpan cancell
         // Observe native completion; canceling only the managed await is not proof of native cancellation.
         try
         {
-            await operation.Completion.WaitAsync(cancellationGrace);
+            var value = await operation.Completion.WaitAsync(cancellationGrace);
+            if (value is IDisposable disposable) { disposable.Dispose(); }
         }
         catch (TimeoutException)
         {
@@ -113,7 +114,8 @@ internal sealed class Operations(Action<Diagnostic> diagnostic, TimeSpan cancell
     {
         try
         {
-            await operation.Completion.ConfigureAwait(false);
+            var value = await operation.Completion.ConfigureAwait(false);
+            if (value is IDisposable disposable) { disposable.Dispose(); }
         }
         catch (OperationCanceledException) { }
         catch (Exception)

@@ -11,8 +11,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from shovel.capability.domain import CapabilityScope
-from shovel.db.approval_repository import SQLiteApprovalRepository
-from shovel.db.execution_repository import SQLiteExecutionRepository, _record
+from shovel.db.execution_repository import SQLiteExecutionRepository
 from shovel.db.model.protection import EnterpriseMetadata as MetadataRow
 from shovel.db.model.protection import EnterpriseMetadataSource as SourceRow
 from shovel.db.model.protection import EnterpriseSourceFence as FenceRow
@@ -20,7 +19,7 @@ from shovel.db.model.retrieval import DeletionOutbox
 from shovel.db.protection_audit import SQLitePolicyAudit
 from shovel.db.unit_of_work import sqlite_write
 from shovel.domain.enums import DeletionScope
-from shovel.execution.domain import BudgetExceeded, ExecutionLease
+from shovel.execution.domain import ExecutionLease
 from shovel.protection.domain import (
     DataAction,
     DataDestination,
@@ -46,7 +45,6 @@ from shovel.protection.persistence import (
 from shovel.protection.policy import ProtectionPolicy
 from shovel.protection.service import ProtectionService
 from shovel.runtime.errors import RuntimeFailure
-from shovel.security.domain import SecurityDenied
 from shovel.security.ports import ExecutionGate
 
 
@@ -157,23 +155,7 @@ class SQLiteProtectionRepository:
 
     async def _active(self, session: AsyncSession, lease: ExecutionLease, gate: ExecutionGate) -> None:
         executions = SQLiteExecutionRepository(self._sessions, clock=self._clock)
-        row = await executions._find(session, lease.execution.snapshot.context.scope, lease.execution.id)
-        executions._leased(row, lease)
-        for ancestor in await executions._lineage(session, row):
-            if ancestor.state != "running":
-                raise SecurityDenied("Execution is no longer active.")
-            if ancestor.execution_deadline is None or self._clock() >= ancestor.execution_deadline:
-                raise BudgetExceeded("duration")
-        evaluation = await gate.evaluate(_record(row))
-        if evaluation.approval.required:
-            approval = await SQLiteApprovalRepository.latest(session, row.id)
-            if (
-                approval is None
-                or approval.state != "consumed"
-                or approval.binding_hash != evaluation.binding_hash
-                or approval.expires_at <= self._clock()
-            ):
-                raise SecurityDenied("Current execution approval is not usable.")
+        await executions._active(session, lease, gate)
 
     async def check_execution(self, lease: ExecutionLease, gate: ExecutionGate) -> None:
         async with self._transaction() as session:

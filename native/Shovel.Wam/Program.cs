@@ -22,8 +22,36 @@ internal static class Program
             Console.WriteLine("Shovel Windows WAM standalone component");
             Console.WriteLine("check");
             Console.WriteLine("silent|interactive --target <approved-local-json> --allow-authentication");
+            Console.WriteLine("accept --case Silent|InteractionRequired|Interactive|Cancel|Timeout --target <json> --allow-authentication");
             Console.WriteLine("No token output, business requests, or production Host integration.");
             return 0;
+        }
+        if (args is ["attest"])
+        {
+            try
+            {
+                Installation.Load();
+                Console.WriteLine("{\"scope\":\"wam_installation\",\"status\":\"trusted\",\"production_ready\":false}");
+                return 0;
+            }
+            catch (Exception)
+            {
+                Console.WriteLine("{\"scope\":\"wam_installation\",\"status\":\"unavailable\",\"production_ready\":false}");
+                return 3;
+            }
+        }
+        if (args is ["bridge", var input, var secret])
+        {
+            try { return HostBridge.Run(input, secret); }
+            catch (Exception) { Write(new(Status.Unavailable, Stage.Platform)); return 3; }
+        }
+        AcceptanceCase? acceptance = null;
+        if (args.Length == 6 && args[0] == "accept" && args[1] == "--case"
+            && Enum.TryParse<AcceptanceCase>(args[2], out var selected) && Enum.IsDefined(selected))
+        {
+            acceptance = selected;
+            args = [selected is AcceptanceCase.Interactive or AcceptanceCase.Cancel ? "interactive" : "silent",
+                args[3], args[4], args[5]];
         }
         if (args is ["check"])
         {
@@ -57,7 +85,7 @@ internal static class Program
         }
         try
         {
-            return Run(target, args[0] == "silent" ? Mode.Silent : Mode.Interactive);
+            return Run(target, args[0] == "silent" ? Mode.Silent : Mode.Interactive, acceptance);
         }
         catch (Exception)
         {
@@ -66,11 +94,12 @@ internal static class Program
         }
     }
 
-    private static int Run(Target target, Mode mode)
+    private static int Run(Target target, Mode mode, AcceptanceCase? acceptance)
     {
         var app = new Application { ShutdownMode = ShutdownMode.OnExplicitShutdown };
         using var cancellation = new CancellationTokenSource();
-        var client = new WamClient(new WindowsWam(), WriteDiagnostic, TimeSpan.FromSeconds(2));
+        var platform = new ObservedWam();
+        var client = new WamClient(platform, WriteDiagnostic, TimeSpan.FromSeconds(2));
         var result = new Report(Status.Canceled, Stage.Validation);
         Window? interactionWindow = null;
         ConsoleCancelEventHandler cancel = (_, args) =>
@@ -156,6 +185,12 @@ internal static class Program
         finally
         {
             Console.CancelKeyPress -= cancel;
+        }
+        if (acceptance is not null)
+        {
+            var receipt = new AcceptanceReceipt(acceptance.Value, result, platform.Acquisitions);
+            Console.WriteLine(JsonSerializer.Serialize(receipt, Json));
+            return receipt.ExpectedOutcomeObserved ? 0 : 3;
         }
         Write(result);
         return result.Status == Status.Success ? 0 : 3;

@@ -153,6 +153,18 @@ metadata-only 输出；SDK/锁定 build、synthetic 和未显示窗口的 HWND �
 不构成批准 Native 生产路线或真实认证通过。native async Canceled 不证明 UI/SSO 停止。
 无获准 tenant/app/account/scopes；当前 Runtime unavailable、H1–H4 不变。
 
+**受控安装 Host 接入代码（已获准实施，尚未部署/实测）**
+
+新增 HKLM 管理员 pin/revision、签名完整安装清单、受保护 isolated Python bootstrap、
+native 自身/parent command 验证；私有继承 control/secret handles、nonce/request
+fingerprint/expiry 与一次性 AuthContext。Runtime 已装配 native broker/resolver，
+复用保护层的数据库 claim/祖先 deadline/审批 guard 绑定实际 Engine lease，
+在 SDK dispatch 前及释放 AuthContext 前复查；重复取消不打断子进程/管道清理。
+source checkout 无安装信任，仍 unavailable。Host V1 仅 silent；interactive 不由
+Agent/Host 自动触发。拒绝把 signing/python 路径、个人 TOML 或单次状态当授权。
+opt-in acceptance runner 不把 expected outcome observed 等同 UI/组织 live 验收。
+未提供签名信任锚/测试环境，不执行实际认证，不提供 malware/admin 隔离，不开放企业访问。
+
 ## ENT-ADR-03 — Enterprise Connection Profile
 
 **Context**

@@ -36,6 +36,8 @@ internal sealed class WindowsWam : IWamPlatform
         };
         request.Properties.Add("authority", target.Authority);
         request.Properties.Add("resource", target.Resource);
+        request.Properties.Add("minimum_token_lifetime",
+            (target.TimeoutSeconds * 1000).ToString(System.Globalization.CultureInfo.InvariantCulture));
         request.Properties.Add("redirect_uri", $"ms-appx-web://Microsoft.AAD.BrokerPlugin/{target.ClientId:D}");
         return request;
     }
@@ -68,9 +70,10 @@ internal sealed class WindowsWam : IWamPlatform
             return new(status == Status.Success ? Status.BindingRejected : status, false, null, null);
         }
         var response = result.ResponseData[0];
-        // The standalone component never returns or persists the credential.
-        return new(Status.Success, !string.IsNullOrWhiteSpace(response.Token),
-            response.WebAccount?.Id, response.WebAccount?.WebAccountProvider.Id);
+        var token = response.Token;
+        var present = !string.IsNullOrWhiteSpace(token);
+        return new(Status.Success, present, response.WebAccount?.Id, response.WebAccount?.WebAccountProvider.Id,
+            present ? new Credential(token) : null);
     }
 
     [DllImport("user32.dll", ExactSpelling = true)]

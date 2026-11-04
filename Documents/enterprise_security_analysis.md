@@ -677,8 +677,9 @@ Runtime、Interaction/Notification、HTTP/CLI 和按序迁移，不新增 Engine
   错误按安全 taxonomy 转换，不回显 SDK 描述或异常链；status 只报告状态，不触发登录。
   取消/超时会关闭未交付 context，并清理忽略取消后才返回的 context。
   这不证明实际 SDK/native 调用已经停止；resolver I/O 尚非独立限时的 SDK 接受性保证。
-* 默认 Runtime 注入 `UnavailableWindowsBroker` 和 `UnavailableAuthenticationResolver`，
-  明确拒绝认证；测试中的 broker/resolver 不进入生产。不存在 sign-in、enable、
+* ES-4 阶段 Runtime 注入 `UnavailableWindowsBroker` 和 `UnavailableAuthenticationResolver`；
+  后续受控安装接入见第 17.2 节，source checkout 仍 unavailable。
+  测试中的 broker/resolver 不进入生产。不存在 sign-in、enable、
   credential upload、authentication completion 或真实 Token/业务网络路径。
 * `ProviderRequest` 绑定 operation、connection/manifest、identity/tenant、TokenRequest
   和 resource refs，拒绝不一致及任意 URL/header 覆盖；`AuthenticatedTransport` 仅为
@@ -786,7 +787,15 @@ late-result fence 和安全 JSON 状态；无 MSAL/fallback。验证只覆盖编
 async/binding/error 测试、未显示窗口 HWND 生命周期和平台 API metadata。
 [使用命令及限制](../native/README.md) 明确区分 check、opt-in authentication
 与未完成的 live acceptance。仍无获准测试环境、真实 discovery/acquisition、
-可信安装/IPC 或生产 resolver 接线；H1–H4/deny-default 不变。
+真实受控安装/认证验收；H1–H4/deny-default 不变。
+
+后续已批准并实现受控安装代码：HKLM signer/manifest pin、完整不可写包验证、
+RSA Code Signing 签名、版本/有效期、isolated bootstrap、native caller command 验证。
+Runtime native broker/resolver 绑定真实 Engine claim lease，复查 running 祖先链、审批、
+权限、冻结 connection 和原 deadline；在 SDK dispatch 前及释放 AuthContext 前复查，
+用 private inherited control/secret pipes 交付一次性 AuthContext；source 无信任仍拒绝。
+opt-in acceptance runner 记录真实 dispatch/outcome，不标记 live acceptance complete。
+没有实际测试目标、组织签名/部署授权，不写 HKLM、不签生产证书、不执行 WAM。
 
 CI 前置核查发现 Windows/Ubuntu 均因 CI 的 PyPI override 与提交的 Microsoft proxy
 lock 不一致而在 `--locked` 同步停止。用户选择仅移除 CI/release override，保留 lock/

@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using System.IO;
+using System.Text.Json.Serialization;
 using Windows.Security.Authentication.Web.Core;
 using Windows.Security.Credentials;
 
@@ -37,9 +38,11 @@ internal sealed class Account(string id, string providerId, bool connected, WebA
     public override string ToString() => "<WAM account: redacted>";
 }
 
-internal sealed record Reply(Status Status, bool HasToken, string? AccountId, string? ProviderId)
+internal sealed record Reply(Status Status, bool HasToken, string? AccountId, string? ProviderId,
+    [property: JsonIgnore] Credential? Credential = null) : IDisposable
 {
     public override string ToString() => "<WAM reply: redacted>";
+    public void Dispose() => Credential?.Dispose();
 }
 
 internal interface IWamPlatform
@@ -55,7 +58,8 @@ internal sealed class WamClient(IWamPlatform platform, Action<Diagnostic> diagno
 {
     internal const string ProviderId = "https://login.microsoft.com";
 
-    internal async Task<Report> Authenticate(Target target, Mode mode, nint window, CancellationToken cancellation)
+    internal async Task<Report> Authenticate(Target target, Mode mode, nint window, CancellationToken cancellation,
+        Func<Credential, Task>? consume = null)
     {
         try
         {
@@ -114,6 +118,7 @@ internal sealed class WamClient(IWamPlatform platform, Action<Diagnostic> diagno
         {
             return Failure(reply, Stage.Acquisition);
         }
+        using var secret = reply.Value;
         if (clock.Elapsed >= budget || cancellation.IsCancellationRequested)
         {
             return new(cancellation.IsCancellationRequested ? Status.Canceled : Status.TimedOut, Stage.Acquisition);
@@ -130,6 +135,11 @@ internal sealed class WamClient(IWamPlatform platform, Action<Diagnostic> diagno
             || reply.Value.ProviderId != ProviderId)
         {
             return new(Status.BindingRejected, Stage.Acquisition);
+        }
+        if (consume is not null)
+        {
+            if (reply.Value.Credential is null) { return new(Status.NativeError, Stage.Acquisition); }
+            await consume(reply.Value.Credential);
         }
         return new(Status.Success, Stage.Acquisition);
     }

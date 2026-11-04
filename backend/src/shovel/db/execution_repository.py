@@ -37,7 +37,7 @@ from shovel.execution.domain import (
 )
 from shovel.execution.identity import execution_request_key
 from shovel.runtime.errors import NotFound, RuntimeFailure
-from shovel.security.domain import ApprovalState
+from shovel.security.domain import ApprovalState, SecurityDenied
 from shovel.security.ports import ExecutionGate
 
 
@@ -327,6 +327,31 @@ class SQLiteExecutionRepository:
     def _leased(row: Operation, lease: ExecutionLease) -> None:
         if row.state != ExecutionState.RUNNING.value or row.claim_token != lease.token:
             raise RuntimeFailure("Stale execution lease.", status=409)
+
+    async def check_active(self, lease: ExecutionLease, gate: ExecutionGate) -> None:
+        async with sqlite_write(self.sessions) as session:
+            await self._active(session, lease, gate)
+
+    async def _active(self, session: AsyncSession, lease: ExecutionLease, gate: ExecutionGate) -> None:
+        from shovel.db.approval_repository import SQLiteApprovalRepository
+
+        row = await self._find(session, lease.execution.snapshot.context.scope, lease.execution.id)
+        self._leased(row, lease)
+        for ancestor in await self._lineage(session, row):
+            if ancestor.state != "running":
+                raise SecurityDenied("Execution is no longer active.")
+            if ancestor.execution_deadline is None or self.clock() >= ancestor.execution_deadline:
+                raise BudgetExceeded("duration")
+        evaluation = await gate.evaluate(_record(row))
+        if evaluation.approval.required:
+            approval = await SQLiteApprovalRepository.latest(session, row.id)
+            if (
+                approval is None
+                or approval.state != "consumed"
+                or approval.binding_hash != evaluation.binding_hash
+                or approval.expires_at <= self.clock()
+            ):
+                raise SecurityDenied("Current execution approval is not usable.")
 
     async def start(self, scope: CapabilityScope, identifier: str) -> ExecutionLease:
         async with sqlite_write(self.sessions) as session:

@@ -30,6 +30,7 @@ jobs:
           backend\tests\test_parsers.py
           backend\tests\test_chunker.py
           backend\tests\test_scan_pipeline.py
+          backend\tests\test_native_wam.py
 
   windows-wam:
     runs-on: windows-latest

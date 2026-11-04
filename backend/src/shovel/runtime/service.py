@@ -36,11 +36,10 @@ from shovel.execution.control import ExecutionWakeupService, RecoveryService
 from shovel.execution.engine import ExecutionEngine
 from shovel.execution.executors import AgentExecutor, FunctionExecutor, SkillExecutor, WorkflowExecutor
 from shovel.execution.invocation import InvocationService
+from shovel.identity.native_wam import NativeWamBroker, NativeWamResolver, installed_host
 from shovel.identity.profiles import IdentityService
 from shovel.identity.service import (
     AuthenticationService,
-    UnavailableAuthenticationResolver,
-    UnavailableWindowsBroker,
 )
 from shovel.identity.waits import AuthenticationRequests
 from shovel.interaction.service import InteractionService, NotificationService
@@ -83,6 +82,8 @@ class Runtime:
         from shovel.runtime.retrieval import RetrievalService
 
         self.settings = settings
+        if installed_host() and settings.agent.enable_python_extensions:
+            raise RuntimeError("Trusted WAM Host requires Python extensions to remain disabled.")
         self.sessions = sessions
         self.resources = resources
         self.stopping = asyncio.Event()
@@ -156,6 +157,7 @@ class Runtime:
             wakeups=self.wakeups,
             authentication_waits=authentication_repository,
         )
+        self.native_wam = NativeWamBroker()
         self.platform = PlatformApplication(
             scope,
             self.execution_engine,
@@ -174,8 +176,8 @@ class Runtime:
             ),
             identities=IdentityService(SQLiteIdentityRepository(sessions)),
             authentication=AuthenticationService(
-                UnavailableAuthenticationResolver(),
-                UnavailableWindowsBroker(),
+                NativeWamResolver(self.execution_engine, self.native_wam),
+                self.native_wam,
             ),
             authentication_requests=AuthenticationRequests(authentication_repository),
         )
@@ -247,8 +249,11 @@ class Runtime:
             try:
                 await self.events.stop()
             finally:
-                await self.execution_engine.close()
-                await self.chat.close()
+                try:
+                    await self.native_wam.close()
+                finally:
+                    await self.execution_engine.close()
+                    await self.chat.close()
         finally:
             try:
                 await self.memory.close()

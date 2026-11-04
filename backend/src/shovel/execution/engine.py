@@ -30,6 +30,7 @@ from shovel.identity.waits import (
     AuthenticationExecutionContext,
     AuthenticationExecutionLifecycle,
     AuthenticationWaitRequired,
+    authentication_execution_lease,
 )
 from shovel.protection.domain import ProtectionDeniedError
 from shovel.runtime.errors import NotFound, RuntimeFailure
@@ -124,7 +125,15 @@ class ExecutionEngine:
         )
         completion: asyncio.Future[None] = asyncio.get_running_loop().create_future()
         self._dispatches.add(completion)
-        task = asyncio.create_task(executor.execute(context))
+
+        async def execute_owned() -> ExecutorResult:
+            token = authentication_execution_lease.set(lease)
+            try:
+                return await executor.execute(context)
+            finally:
+                authentication_execution_lease.reset(token)
+
+        task = asyncio.create_task(execute_owned())
         self._active[identifier] = task
         try:
             if execution.deadline_at is None:

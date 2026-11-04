@@ -49,6 +49,7 @@ from shovel.execution.engine import ExecutionEngine
 from shovel.execution.executors import AgentExecutor, FunctionExecutor, SkillExecutor, WorkflowExecutor
 from shovel.execution.invocation import InvocationService
 from shovel.execution.ports import ExecutorContext
+from shovel.identity.waits import authentication_execution_lease
 from shovel.runtime.errors import NotFound, RuntimeFailure
 from shovel.runtime.maintenance import prune_history
 from shovel.runtime.schemas import HistoryPruneInput
@@ -69,6 +70,7 @@ class Kernel:
 
 
 async def echo(context: ExecutorContext) -> ExecutorResult:
+    assert authentication_execution_lease.get() == context.lease
     return ExecutorResult(output={"echo": context.execution.input})
 
 
@@ -138,6 +140,7 @@ async def test_create_dispatch_complete_in_existing_operation_store(kernel: Kern
     lease = await kernel.engine.start(SCOPE, execution.id)
     assert lease.execution.state == ExecutionState.RUNNING
     completed = await kernel.engine.dispatch(lease)
+    assert authentication_execution_lease.get() is None
     assert completed.state == ExecutionState.SUCCEEDED and completed.output == {"echo": {"value": 4}}
     assert completed.usage == BudgetUsage(steps=1, function_calls=1)
     attempts = await kernel.repository.attempts(SCOPE, execution.id)

@@ -1,10 +1,11 @@
 # ES-5 WAM-required：独立 Windows 原型与生产方案提案
 
-**状态：standalone 组件已实现；真实认证未执行/验收，生产路线仍 Proposed。**
+**状态：standalone、opt-in 验收工具及受控安装 Host 接入代码已实现；真实认证/部署未验收。**
 用户已明确批准可编译、可测试、包含真实 silent/interactive WAM 调用及原生取消的
 独立 Windows 组件，但不接生产 Host、不执行真实认证。实现和命令见
 [native 使用指南](../native/README.md)。仍没有获准 tenant/app/account/scopes
-环境；这不修改 [ENT-ADR-02](enterprise_security_adrs.md) 的生产决策。
+环境。随后用户批准按现有威胁模型实施受控安装/签名清单、私有 IPC 与 lease 绑定；
+仍不执行真实认证，不扩大为同用户 malware/管理员隔离保证或生产上线批准。
 
 ## 1. 调查结论与证据边界
 
@@ -92,8 +93,11 @@ V1 只接受 Azure Global、HTTPS resource 和既有 connected organizational ac
 账户；出现此类要求时交给用户/管理员按独立批准流程处理。
 
 standalone 冻结一次读取的 target（scopes 不可变），生成 native correlation，
-provider/account/acquisition 共享原 deadline。生产 identity/connection/manifest
-revisions/lease/generation 绑定尚未接入。保留原生 async operation，取消时调用原生取消入口，
+provider/account/acquisition 共享原 deadline。受控安装 Host 现已将签名请求中的
+identity/connection/provider/manifest revisions 与真实 Execution claim lease 绑定，
+在 SDK 调用前和凭据交付前复查运行状态、祖先 deadline、SecurityGate 与当前审批；
+组织 source generation/trust/policy adapters 及其生产验收仍未完成。
+保留原生 async operation，取消时调用原生取消入口，
 等待并检查其状态；可见 WAM UI 是否结束仍需真实验证。cancel/timeout 后不交付结果。
 SDK/OS 忽略取消而迟到返回时仍拒绝交付，记录安全状态；**这仅证明不交付，
 不等于 native 操作或 UI 已停止**。不能靠杀 OS WAM/Office 进程模拟取消成功。
@@ -112,10 +116,28 @@ stdout/stderr/audit，也不调用业务资源。报告只允许固定测试 ID�
 应用不另建 Token/refresh-token cache，但 **OS WAM 自身可能缓存会话/凭据**；
 真实测试授权必须说明该效果，不能承诺调用 WAM 完全不改变系统认证状态。
 
-## 4. 后续生产组件边界：不在初期原型实施
+## 4. 已实现的受控安装接入与待验收边界
 
-原型通过也不自动接入 Python Runtime。还需修订/批准 ENT-ADR-02 的 trusted
-installation、签名/更新/回退、launcher、caller identity 与私有 IPC 设计：
+接入不能来自任意 checkout 或“签名 python.exe”。实现的
+`Installation` 验证 HKLM 管理员信任锚、RSA 签名/证书 pin/有效期/Code Signing EKU、
+精确 revision、完整不可写包清单、自身映像及调用方的 interpreter + `-I -S`
+受保护 bootstrap 命令。`host_bootstrap.py` 先验证机器 pin/包文件，再取得非认证
+native attestation，设置受信任模块路径并启动现有生产 Host；不允许 workspace Python
+扩展。缺信任锚、过期/变更清单、目录/ACL/签名或 caller 不符合即 unavailable。
+
+Host 装配真实 `NativeWamResolver` / `NativeWamBroker`，不是默认信任一个配置路径。
+resolver 绑定 Engine-owned claim lease，复查当前 claim、祖先运行状态/deadline/审批、
+scoped Execution、冻结 connection/read grants、现有 SecurityGate、
+签名 exact prototype 及原 deadline；300 秒外的请求不扩充预算。连接/Provider catalog、
+组织 policy/source adapters 仍不由此安装或启用。
+
+每次 acquire 使用 explicit inherited handle list、private control 和独立 binary secret
+pipe。nonce、整个 request fingerprint、expiry 绑定结果；公开输出只有受限 metadata/
+enum，Token 只进入一次性 `AuthContext`。取消发送原生 cancel，迟到结果丢弃；过 grace
+可结束自己启动的子进程，不能据此宣称 OS WAM/UI 已停止。实际签名部署、实际 WMI
+caller 观察、真实 WAM、OS 清理和组织批准仍需受批环境验收。
+
+设计约束保留：
 
 - Windows auth-only 子进程，不注册网络监听，不接收企业正文，也不代替 Provider
   发送业务 HTTP。普通 stdout/JSON/result 永远不携带 Token。
@@ -129,8 +151,9 @@ installation、签名/更新/回退、launcher、caller identity 与私有 IPC �
   账号或全局 SSO 状态。父进程退出、子进程异常和 late result 都必须 fail closed。
 
 同用户恶意进程、可改写的 Python checkout、管理员或被篡改的安装不是此原型能隔离的
-攻击者；生产 trusted installation/caller 仍是 H3 门槛。当前批准只覆盖 standalone
-项目，不覆盖进程管理器、安装器、IPC endpoint、生产 resolver/broker 或企业 enable。
+攻击者；生产 trusted installation/caller 仍是 H3 门槛。当前批准覆盖 standalone
+及本轮受控安装接入代码，两者均不提供此隔离。没有自动安装器、信任授予/注册表写入或
+企业 enable；组织签名/ACL/部署必须独立授权。具体 payload/命令见 native 使用指南。
 
 ## 5. 验收矩阵与停止条件
 
@@ -173,3 +196,10 @@ Windows-path-on-Linux 测试，不是本原型引起。93 个本地 Ruff 格式�
 以及 synthetic cancellation/timeout/late-result/cleanup-failure 测试。
 `check` 返回 `status=success, stage=platform`，两个 acceptance flag 均为 false；
 这仅确认平台/API metadata 可用，未执行真实 provider/account/token API。
+
+受控 Host 接入后的离线验证：**27 个原生无认证测试通过**，
+包括签名/pin/tamper/rollback、调用方限制、私有凭据封装、句柄禁止再次继承与验收判定。
+后端 Host、认证、Execution/control、企业执行与数据保护相关回归全部通过；
+全量后端 Mypy（218 个源文件）、Ruff lint 和变更文件格式检查通过。
+私有管道使用测试专用 Python 子进程和假凭据，覆盖请求绑定、单次消费、重复取消及迟到清理。
+以上不包含真实 WAM 登录、获准目标、组织签名安装、WMI 实际受控调用链或 OS UI 清理验收。

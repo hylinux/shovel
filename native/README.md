@@ -228,3 +228,22 @@ limitations are documented in
 [H3 organization/Kusto metadata](../Documents/enterprise_security_analysis.md#23-h3-首批组织信任与-kusto-元数据适配器).
 Missing policy leaves the catalog empty. No organization keys/certificates or
 live Kusto/WAM acceptance are provisioned by this bootstrap.
+
+## Candidate package and CI evidence
+
+CI now publishes a framework-dependent unsigned native component ZIP and a
+sanitized contract-test receipt bound to its SHA-256 and source commit. The
+Windows Python lane exercises real inherited-handle child processes with
+synthetic credentials, including replay, forged public/private bindings,
+duplicate JSON, truncation, cancellation and one-use acquisition concurrency.
+These children are protocol fixtures, not the real WAM executable or an accepted
+installed Host. Native contract tests still perform no account/token calls.
+
+A separate main-branch provenance job attests candidate wheel/ZIP and sanitized
+receipts; PR jobs have no attestation write authority. It does not sign an
+organization installation envelope, provision HKLM, enable connections or
+approve real authentication. The ZIP does not include a trusted interpreter or
+the complete administrator-controlled dependency tree. Four-lane qualification
+and the review-only minimum-permission proposal are documented in
+[the provider guide](../Documents/enterprise_provider_guide.md#10-离线端到端编排候选制品与开放前审查).
+Live WAM, Kusto and storage/key acceptance remain outstanding.

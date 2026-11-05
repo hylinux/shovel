@@ -1,4 +1,6 @@
 import asyncio
+import base64
+import hashlib
 import os
 import struct
 import sys
@@ -199,6 +201,114 @@ async def test_real_private_pipes_reach_only_ephemeral_context(monkeypatch, caps
         context.validate(request, now=time.time())
     captured = capsys.readouterr()
     assert SENTINEL not in captured.out + captured.err
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows inherited-handle contract")
+@pytest.mark.parametrize(
+    "change",
+    [
+        ("nonce=nonce,", "nonce='0'*64,"),
+        ("fingerprint=fingerprint,", "fingerprint='0'*64,"),
+        ("bytes.fromhex(nonce+fingerprint)", "bytes.fromhex('0'*64+fingerprint)"),
+        ("bytes.fromhex(nonce+fingerprint)", "bytes.fromhex(nonce+'0'*64)"),
+        ("expires_at=item['deadline']", "expires_at=item['deadline']+1"),
+        ("production_ready=False", "production_ready=True"),
+        ("struct.pack('>I',len(body))", "struct.pack('>I',65537)"),
+        ("+body)", "+body[:2])"),
+        (
+            "print(json.dumps",
+            "original_dumps=json.dumps\n"
+            "json.dumps=lambda value: '{\"version\":0,'+original_dumps(value)[1:]\n"
+            "print(json.dumps",
+        ),
+        ("os.close(w)", "os.close(w)\nos.write(2,body)"),
+    ],
+)
+async def test_real_private_pipes_reject_forged_receipts_and_credentials(monkeypatch, capsys, change):
+    child_source = CHILD.replace(*change)
+    original = asyncio.create_subprocess_exec
+    children = []
+
+    async def fixture_child(executable, mode, *handles, **kwargs):
+        kwargs["cwd"] = None
+        child = await original(sys.executable, "-c", child_source, *handles, **kwargs)
+        children.append(child)
+        return child
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", fixture_child)
+    with pytest.raises(BrokerUnavailableError):
+        await FixtureBroker()._acquire(token_request(), time.time() + 20, policy())
+    assert children and all(child.returncode is not None for child in children)
+    captured = capsys.readouterr()
+    assert SENTINEL not in captured.out + captured.err
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows inherited-handle replay contract")
+async def test_previous_child_response_cannot_be_replayed_in_a_new_acquisition(monkeypatch, capsys):
+    original = asyncio.create_subprocess_exec
+    original_frame = native_wam._frame
+    controls = []
+    children = []
+
+    def frame(fd, value):
+        if "request" in value:
+            controls.append(value)
+        original_frame(fd, value)
+
+    async def fixture_child(executable, mode, *handles, **kwargs):
+        source = CHILD
+        if children:
+            old = controls[0]
+            old_digest = hashlib.sha256(base64.b64decode(old["request"])).hexdigest()
+            source = source.replace("nonce=item['nonce']", f"nonce={old['nonce']!r}").replace(
+                "hashlib.sha256(base64.b64decode(item['request'])).hexdigest()", repr(old_digest)
+            )
+        kwargs["cwd"] = None
+        child = await original(sys.executable, "-c", source, *handles, **kwargs)
+        children.append(child)
+        return child
+
+    monkeypatch.setattr(native_wam, "_frame", frame)
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", fixture_child)
+    request, deadline = token_request(), time.time() + 20
+    context = await FixtureBroker()._acquire(request, deadline, policy())
+    context.close()
+    with pytest.raises(BrokerUnavailableError):
+        await FixtureBroker()._acquire(
+            request.model_copy(update={"request_id": "next-request"}), deadline, policy()
+        )
+    assert len(controls) == 2 and controls[0]["nonce"] != controls[1]["nonce"]
+    assert len(children) == 2 and all(child.returncode is not None for child in children)
+    captured = capsys.readouterr()
+    assert SENTINEL not in captured.out + captured.err
+
+
+async def test_concurrent_acquisition_consumes_one_lease_and_restart_cannot_reuse_it(monkeypatch):
+    request, broker = token_request(), FixtureBroker()
+    deadline = time.time() + 20
+    dispatches = []
+
+    async def check_active():
+        return None
+
+    async def acquire(actual, bounded, installed):
+        dispatches.append(actual)
+        await asyncio.sleep(0)
+        return native_wam.AuthContext(actual, native_wam.SecretStr(SENTINEL), expires_at=bounded)
+
+    monkeypatch.setattr(broker, "_acquire", acquire)
+    broker.admit(
+        SimpleNamespace(approved_request=request, deadline_at=deadline), policy().digest, check_active
+    )
+    results = await asyncio.gather(broker.acquire(request), broker.acquire(request), return_exceptions=True)
+    assert len(dispatches) == 1
+    assert sum(isinstance(value, AuthConfigurationError) for value in results) == 1
+    for value in results:
+        if isinstance(value, native_wam.AuthContext):
+            value.close()
+    with pytest.raises(AuthConfigurationError):
+        await FixtureBroker().acquire(request)
+    await broker.close()
 
 
 @pytest.mark.skipif(os.name != "nt", reason="Windows native-cancel delivery contract")

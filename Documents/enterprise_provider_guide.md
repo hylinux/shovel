@@ -323,3 +323,59 @@ uv run --no-sync pytest backend\tests\test_enterprise_governance.py backend\test
 WAL/backup 文件及 native Zvec 均使用临时数据。哨兵不再出现在重打包文件，
 和 Zvec close/reopen 后不再命中，仅分别证明文件级处理、索引逻辑删除，
 **不证明 SSD、快照、OS/cloud backup 或其他副本不可恢复**。生产仍保持关闭。
+
+## 10. 离线端到端编排、候选制品与开放前审查
+
+本阶段获准实现离线编排/负向测试、安装候选与 CI 证据及最小授权审查；
+**未获准登录真实账号、部署安装/密钥系统或实际开放生产权限。**
+没有新增 Runtime、数据库、授权端点或自动 enable 路径。
+
+```powershell
+uv run --no-sync python scripts\enterprise_acceptance.py run --lane python_contracts --artifact "python_wheel=C:\candidates\shovel.whl" --output .tools\qualification\python.json
+uv run --no-sync python scripts\enterprise_acceptance.py run --lane windows_ipc --artifact "native_bundle=C:\candidates\wam.zip" --output .tools\qualification\ipc.json
+```
+
+`run` 执行固定的离线测试集合，不执行输入中的命令或加载 Provider。子进程清除
+`SHOVEL_*`、`PYTEST_*`、`PYTHON*` 环境覆盖；真实 WAM/企业/模型调用不属于这些用例。
+包测试仍需 loopback Host。原始测试 stdout/stderr 不转发，临时 JUnit 在归约后清理。
+输出文件必须不存在，不能覆盖旧证据。失败返回非零及固定错误类别，不回显异常或路径。
+
+`collect --lane native_contracts --report <TRX>` 或相应 Python lane 可归约已有结果。
+仅发布固定 control ID、状态、计数、提交、工作区是否干净，以及制品类型/hash/size；
+不发布测试名、异常、正文、凭据、账号或文件路径。超限、非 UTF-8、DTD/entity 和
+损坏 XML 被拒绝；missing/skipped/失败控制不能算通过。这些 JSON 是离线候选事实，
+**不是组织签名、有效安装或真实认证证明**；手写 JSON/green tests 不会开放权限。
+
+安装 wheel 的独立解释器从仓库根执行：
+
+```powershell
+& "C:\wheel-env\Scripts\python.exe" -m scripts.smoke_enterprise_wheel --wheel "C:\candidates\shovel.whl" --output .tools\qualification\wheel.json
+```
+
+探针先逐文件核验实际包与 wheel 的 inventory/bytes（不只比版本），再运行既有真实
+Host/Web/REST/CLI/幂等请求/检索/关闭检查和合成企业 Engine 路径，验证默认生产拒绝。
+必须使用隔离 wheel 环境，不能用 editable checkout 冒充；合成签名者不注册到 Host。
+探针不证明解释器、依赖、ACL、WAM 安装或实际加密已受信。
+
+CI 生成四个 lane：portable Python、Windows 私有 IPC、native contracts、installed wheel。
+Windows 发布 framework-dependent、**未签名的 native component ZIP**；这不是含 Python/
+全部依赖的受信完整安装包。CI 保留候选 wheel/ZIP 和脱敏 JSON，不上传原始 JUnit/TRX。
+主分支非 PR 的独立 provenance job 才获得 OIDC/attestation 写权限，使用
+`actions/attest@v4` 绑定候选与收据字节；其他 job 默认仅 contents read。
+远端 workflow/attestation 尚须实际运行验证，且取决于 GitHub 计划是否支持该功能。
+制品 provenance 不等于组织部署、签名安装、真实 adapter 或 H4 物理验收。
+
+`enterprise\acceptance.py` 的 `RolloutPlan` 只接受一个精确 scope/connection、
+`kusto.metadata.read`、该连接的单条 `enterprise.read`，及显式 READ/WORKFLOW_STATE、
+可选 DISPLAY/USER_SCREEN；拒绝通配符、写入、KQL 正文、模型/Memory/文件等出口。
+绑定源提交、wheel/native hash、安装、组织/H4 policy、Provider manifest 和 connection
+binding digest。四个 lane 必须完整通过、来自干净的同一提交且绑定对应制品。
+
+`review --plan <JSON> --evidence <JSON> ... --output <new JSON>` **默认仍 blocked**：
+仓库没有生产 `LiveAcceptanceAuthority`，个人配置/JSON 不能供应它。独立可信 verifier
+须核验 GitHub provenance 的 repo/workflow/release identity、组织批准，以及真实账号/
+资源/取消、安装 IPC、adapter、重启/并发/撤权、凭据/出口 containment 和存储/恢复。
+其结果须绑定新 nonce、完整请求 digest、完整检查集、当前未撤销状态及至多 30 秒期限。
+即使通过，也仅返回 `eligible_for_operator_review`，`permissions_applied` 永远为空，
+`production_ready=false`；不能把 review 结果作为缓存授权或绕过原预览/确认流程。
+实际组织 verifier、受控安装与最小授权变更仍须单独部署和批准，本轮生产保持关闭。

@@ -127,6 +127,13 @@ async def _bounded_output(reader: asyncio.StreamReader | None) -> bytes:
     return bytes(result)
 
 
+def _unique_fields(pairs: list[tuple[str, object]]) -> dict[str, object]:
+    result = dict(pairs)
+    if len(result) != len(pairs):
+        raise ValueError("Duplicate native response fields.")
+    return result
+
+
 class NativeWamBroker:
     def __init__(self) -> None:
         self._leases: dict[str, tuple[TokenRequest, float, str, Callable[[], Awaitable[None]]]] = {}
@@ -247,7 +254,7 @@ class NativeWamBroker:
             code = await process.wait()
             # stderr is never forwarded; only allow our enum-only diagnostic envelopes.
             for line in diagnostics.splitlines():
-                item = json.loads(line)
+                item = json.loads(line, object_pairs_hook=_unique_fields)
                 if set(item) != {"diagnostic"} or item["diagnostic"] not in {
                     "native_cancel_failed",
                     "native_close_failed",
@@ -256,7 +263,7 @@ class NativeWamBroker:
                     "control_channel_closed_or_invalid",
                 }:
                     raise ValueError("Unexpected native diagnostics.")
-            receipt = json.loads(public)
+            receipt = json.loads(public, object_pairs_hook=_unique_fields)
             current_policy = await asyncio.to_thread(self.policy)
             if (
                 set(receipt)

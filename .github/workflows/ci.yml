@@ -11,11 +11,19 @@ concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
 
+permissions:
+  contents: read
+
 jobs:
   windows-outlook:
     runs-on: windows-latest
+    needs: windows-wam
     steps:
       - uses: actions/checkout@v5
+      - uses: actions/download-artifact@v5
+        with:
+          name: enterprise-native-candidate
+          path: .tools/enterprise-native
       - uses: astral-sh/setup-uv@v6
         with:
           enable-cache: true
@@ -26,11 +34,24 @@ jobs:
       - name: Exercise Outlook contracts and shared pipeline without a mailbox
         run: >-
           uv run --locked pytest --no-cov
+          --junitxml=.tools/windows-contracts.xml
           backend\tests\test_outlook.py
           backend\tests\test_parsers.py
           backend\tests\test_chunker.py
           backend\tests\test_scan_pipeline.py
           backend\tests\test_native_wam.py
+      - name: Collect sanitized private-pipe acceptance evidence
+        run: >-
+          uv run --no-sync python scripts\enterprise_acceptance.py collect
+          --lane windows_ipc --report .tools\windows-contracts.xml
+          --artifact native_bundle=.tools\enterprise-native\shovel-wam-candidate.zip
+          --output .tools\enterprise-evidence\windows-ipc.json
+      - uses: actions/upload-artifact@v5
+        with:
+          name: enterprise-windows-evidence
+          path: .tools/enterprise-evidence/*.json
+          if-no-files-found: error
+          retention-days: 7
 
   windows-wam:
     runs-on: windows-latest
@@ -55,7 +76,9 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           dotnet format Shovel.Wam.Tests\Shovel.Wam.Tests.csproj --no-restore --verify-no-changes
       - name: Build and test without authentication
-        run: dotnet test Shovel.Wam.Tests\Shovel.Wam.Tests.csproj --no-restore -c Release
+        run: >-
+          dotnet test Shovel.Wam.Tests\Shovel.Wam.Tests.csproj --no-restore -c Release
+          --logger "trx;LogFileName=wam.trx" --results-directory ..\.tools\enterprise-native-tests
       - name: Check platform metadata without account or token calls
         run: |
           $json = dotnet run --project Shovel.Wam\Shovel.Wam.csproj --no-build -c Release -- check
@@ -67,6 +90,31 @@ jobs:
             throw "Unexpected WAM platform-check receipt."
           }
           exit 0
+      - name: Publish unsigned native component candidate, not an installed Host
+        run: |
+          dotnet publish Shovel.Wam\Shovel.Wam.csproj --no-restore -c Release --no-self-contained -o ..\.tools\wam-candidate
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          New-Item -ItemType Directory -Force ..\.tools\enterprise-native | Out-Null
+          Compress-Archive -Path ..\.tools\wam-candidate\* -DestinationPath ..\.tools\enterprise-native\shovel-wam-candidate.zip
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+      - name: Prepare locked evidence collector
+        working-directory: .
+        run: uv sync --python 3.14-x86_64 --locked --all-extras
+      - name: Collect sanitized native acceptance evidence
+        working-directory: .
+        run: >-
+          uv run --no-sync python scripts\enterprise_acceptance.py collect
+          --lane native_contracts --report .tools\enterprise-native-tests\wam.trx
+          --artifact native_bundle=.tools\enterprise-native\shovel-wam-candidate.zip
+          --output .tools\enterprise-native\native-contracts.json
+      - uses: actions/upload-artifact@v5
+        with:
+          name: enterprise-native-candidate
+          path: .tools/enterprise-native/*
+          if-no-files-found: error
+          retention-days: 7
 
   quality:
     runs-on: ubuntu-latest
@@ -97,11 +145,11 @@ jobs:
 
       - name: Type check (mypy)
         working-directory: shovel
-        run: uv run mypy backend/src
+        run: uv run mypy backend/src scripts/enterprise_acceptance.py scripts/smoke_enterprise_wheel.py
 
       - name: Test (pytest)
         working-directory: shovel
-        run: uv run pytest
+        run: uv run pytest --junitxml=.tools/enterprise-python.xml
 
       - uses: actions/setup-node@v4
         with:
@@ -128,11 +176,66 @@ jobs:
         working-directory: shovel
         run: |
           uv venv .tools/package-smoke --python 3.14
-          uv pip install --python .tools/package-smoke/bin/python dist/*.whl
-          .tools/package-smoke/bin/python scripts/smoke_wheel.py
+          UV_PROJECT_ENVIRONMENT=.tools/package-smoke \
+            uv sync --locked --no-dev --no-editable --no-install-project
+          uv pip install --python .tools/package-smoke/bin/python \
+            --no-deps dist/*.whl
+          .tools/package-smoke/bin/python -m scripts.smoke_enterprise_wheel \
+            --wheel dist/*.whl --output .tools/enterprise-evidence/installed-wheel.json
+
+      - name: Collect sanitized portable acceptance evidence
+        working-directory: shovel
+        run: >-
+          uv run --no-sync python scripts/enterprise_acceptance.py collect
+          --lane python_contracts --report .tools/enterprise-python.xml
+          --artifact "python_wheel=$(echo dist/*.whl)"
+          --output .tools/enterprise-evidence/python-contracts.json
+
+      - uses: actions/upload-artifact@v5
+        with:
+          name: enterprise-python-evidence
+          path: shovel/.tools/enterprise-evidence/*.json
+          if-no-files-found: error
+          retention-days: 7
 
       - uses: actions/upload-artifact@v5
         with:
           name: dist-preview
           path: shovel/dist/
           retention-days: 7
+
+  enterprise-provenance:
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    needs: [quality, windows-wam, windows-outlook]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+      artifact-metadata: write
+    steps:
+      - uses: actions/download-artifact@v5
+        with:
+          name: dist-preview
+          path: candidate/python
+      - uses: actions/download-artifact@v5
+        with:
+          name: enterprise-native-candidate
+          path: candidate/native
+      - uses: actions/download-artifact@v5
+        with:
+          name: enterprise-python-evidence
+          path: candidate/evidence/python
+      - uses: actions/download-artifact@v5
+        with:
+          name: enterprise-windows-evidence
+          path: candidate/evidence/windows
+      - name: Attest candidate bytes and offline receipts, not live acceptance
+        uses: actions/attest@v4
+        with:
+          subject-path: |
+            candidate/python/*.whl
+            candidate/native/*.zip
+            candidate/native/*.json
+            candidate/evidence/python/*.json
+            candidate/evidence/windows/*.json

@@ -1581,3 +1581,47 @@ sample 显式注入同一合成 storage authority，不把它注册到生产 Hos
 非导出/密钥轮换销毁/旧 binary、审计生命周期、原生 vector 物理清理和真实灾备
 尚未验收；没有声称已实现 SQLCipher、卷加密、cryptographic erase 或 device erase。
 **本轮完成框架与隔离证据，生产企业持久化继续关闭，不等于 H4 物理保证全面通过。**
+
+## 27. 生产验收准备与受控开放前置审查
+
+用户明确选择先实现离线端到端编排、重启/并发/撤权/IPC/泄漏负向测试、
+安装候选/CI 证据及最小授权门禁，生产保持关闭。未执行真实组织认证或业务访问，
+未变更 HKLM、密钥、用户设置、现有 stores 或生产 grants。
+
+`enterprise\acceptance.py` 分离 offline evidence、最小 canary proposal 和独立 live
+verification。离线 JSON 的 production/live/install flags 固定 false；检查为固定
+控制 ID，JUnit/TRX 原始正文/异常/路径不进入输出。缺失、skip、任何失败、非法 XML、
+不同提交、脏源码或错误制品绑定不能晋级。各检查覆盖现有真实 Engine/SQLite 的恢复、
+并发、撤权、H2 不确定发送、H4 备份防回滚、真实出口边界及 Kusto HTTP 适配器合同；
+它们仍使用测试身份/网络响应，不是 live Kusto 或 WAM 验收。
+
+Windows 私有 IPC 新用例启动真实子进程、传递实际继承句柄，拒绝旧 child 回复重放、
+错误 nonce/fingerprint/期限、伪造 production 标记、超限/截断凭据及非枚举诊断；
+拒绝时无 AuthContext 交付、拥有的 child 已退出、凭据哨兵不外泄。
+新增并发 one-use lease 与 fresh Broker 重启拒绝。发现并收紧 native 公共 JSON
+decoder 的 duplicate-key 宽容：现拒绝重复字段，而不是采用最后值。没有新增 native
+test bypass mode，协议 child 是测试专用 Python fixture。
+
+安装 wheel 的探针校验包 inventory/逐文件 hash，再运行既有真实
+Host/Web/REST/在线 CLI/幂等重放/检索/关闭与合成企业 Engine 路径，默认生产仍拒绝。
+这验证实际 installed package，不复用 editable import；不证明全安装/依赖/ACL 受信。
+CI 使用提交的 lock 约束 wheel 环境，并发布 wheel、unsigned native component ZIP 和
+四 lane 脱敏 evidence。provenance 仅在主分支独立 job 生成，其他 job 默认 contents read；
+不上传原始 JUnit/TRX，不执行 live authentication。远端 workflow 和 Sigstore/GitHub
+证明尚未在本轮运行，不能将 workflow 文件当作已经取得的远端证据。
+
+第一阶段 proposal 仅一个精确连接的 `kusto.metadata.read`/`enterprise.read`，显式
+READ/WORKFLOW_STATE 和可选 DISPLAY/USER_SCREEN；其他 action/destination 拒绝。
+完整绑定安装、Provider、connection、组织/H4 policy、提交和两个制品。没有生产 live
+verifier 时审查 blocked；测试注入的 verifier 只检验 nonce/digest/短期限、当前状态和
+完整证据合同，不能提供组织批准。即使独立验证通过也只 eligible for operator review，
+没有 Runtime 开放入口、权限写入或自动 enable，原有 deny-default 和确认流程不变。
+
+本地验证：固定八文件编排 **254 passed**；最终审查/CLI/Windows IPC 两文件
+**55 passed**（含前述重复用例，不相加）；native **27 passed**，实际 TRX 归约通过。
+最终 wheel 在独立、lock 约束的环境中逐文件比对及真实 Host/合成企业探针通过，
+Python/Windows IPC/native/installed-wheel 四 lane 证据均成功生成。工作区尚有未提交修改，
+收据如实标记 `source_tree_clean=false`，不是可晋级的发布证明。
+全仓 Ruff、六个变更 Python 文件的格式检查、Mypy **233 source files**、
+workflow YAML/依赖/最小权限结构检查通过。CI 只改配置，未运行远端 pipeline 或实际
+GitHub attestation；真实 adapter、受信完整安装、组织/KMS 与生产开放仍未接受。

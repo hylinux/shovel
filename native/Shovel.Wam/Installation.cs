@@ -34,26 +34,17 @@ internal sealed class Installation
     public required InstalledBinding[] Bindings { get; init; }
     public required int Revision { get; init; }
     public required long ValidUntil { get; init; }
+    public RuntimeInventory? Runtime { get; init; }
     internal string PolicyDigest { get; private set; } = "";
+    internal int AnchorGeneration { get; private set; }
 
     internal static Installation Load()
     {
-        DemandProtected(@"MACHINE\" + RegistryPath, 4);
-        using var key = RegistryKey.OpenBaseKey(RegistryHive.LocalMachine, RegistryView.Registry64)
-            .OpenSubKey(RegistryPath) ?? throw new InvalidDataException();
-        var path = key.GetValue("PolicyPath") as string ?? throw new InvalidDataException();
-        var digest = key.GetValue("PolicySha256") as string ?? throw new InvalidDataException();
-        var signer = key.GetValue("SignerCertificateSha256") as string ?? throw new InvalidDataException();
-        var revision = key.GetValue("Revision") as int? ?? throw new InvalidDataException();
-        DemandProtected(path, 1);
-        var envelope = File.ReadAllBytes(path);
-        if (envelope.Length > 8 * 1024 * 1024 || Hex(SHA256.HashData(envelope)) != digest)
-        {
-            throw new InvalidDataException();
-        }
-        var result = VerifyEnvelope(envelope, signer, revision);
-        result.PolicyDigest = digest;
+        var state = MachineTrust.Read();
+        var result = state.LoadActive();
+        result.AnchorGeneration = state.Generation;
         result.VerifyFiles();
+        MachineTrust.DemandUnchanged(state);
         if (!string.Equals(result.FilePath(result.Native), Environment.ProcessPath, StringComparison.OrdinalIgnoreCase))
         {
             throw new InvalidDataException();
@@ -102,15 +93,11 @@ internal sealed class Installation
         return installation;
     }
 
-    internal string FilePath(string relative)
+    internal string FilePath(string relative, string? root = null)
     {
-        if (Path.IsPathRooted(relative) || relative.Split('\\').Any(part => part is "" or "." or "..")
-            || relative.Contains('/') || relative.Contains(':'))
-        {
-            throw new InvalidDataException();
-        }
-        var path = Path.GetFullPath(Path.Combine(Root, relative));
-        var current = Path.GetFullPath(Root);
+        ValidateRelative(relative);
+        var path = Path.GetFullPath(Path.Combine(root ?? Root, relative));
+        var current = Path.GetFullPath(root ?? Root);
         if ((File.GetAttributes(current) & FileAttributes.ReparsePoint) != 0)
         {
             throw new InvalidDataException();
@@ -126,15 +113,31 @@ internal sealed class Installation
         return path;
     }
 
-    private void VerifyFiles()
+    internal static void ValidateRelative(string relative)
     {
-        if (!Path.IsPathFullyQualified(Root)) { throw new InvalidDataException(); }
+        if (string.IsNullOrEmpty(relative) || Path.IsPathRooted(relative) || relative.Contains('/')
+            || relative.Contains(':') || relative.Split('\\').Any(part =>
+                part is "" or "." or ".." || part != part.TrimEnd(' ', '.')
+                || part.IndexOfAny(Path.GetInvalidFileNameChars()) >= 0
+                || new[] { "CON", "PRN", "AUX", "NUL", "COM1", "COM2", "COM3", "COM4", "COM5",
+                    "COM6", "COM7", "COM8", "COM9", "LPT1", "LPT2", "LPT3", "LPT4", "LPT5",
+                    "LPT6", "LPT7", "LPT8", "LPT9" }.Contains(part.Split('.')[0], StringComparer.OrdinalIgnoreCase)))
+        {
+            throw new InvalidDataException();
+        }
+    }
+
+    internal void VerifyFiles(string? stagingRoot = null, bool requireProtected = true)
+    {
+        var root = stagingRoot ?? Root;
+        if (!Path.IsPathFullyQualified(root)) { throw new InvalidDataException(); }
+        if (requireProtected) { DemandAncestorsProtected(root); }
         var actual = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         var pending = new Stack<string>();
-        pending.Push(Root);
+        pending.Push(root);
         while (pending.TryPop(out var directory))
         {
-            DemandProtected(directory, 1);
+            if (requireProtected) { DemandProtected(directory, 1); }
             if ((File.GetAttributes(directory) & FileAttributes.ReparsePoint) != 0)
             {
                 throw new InvalidDataException();
@@ -144,7 +147,7 @@ internal sealed class Installation
                 var attributes = File.GetAttributes(entry);
                 if ((attributes & FileAttributes.ReparsePoint) != 0) { throw new InvalidDataException(); }
                 if ((attributes & FileAttributes.Directory) != 0) { pending.Push(entry); }
-                else { actual.Add(Path.GetRelativePath(Root, entry)); }
+                else { actual.Add(Path.GetRelativePath(root, entry)); }
                 if (actual.Count > 100000) { throw new InvalidDataException(); }
             }
         }
@@ -154,8 +157,8 @@ internal sealed class Installation
         }
         foreach (var pair in Files)
         {
-            var path = FilePath(pair.Key);
-            DemandProtected(path, 1);
+            var path = FilePath(pair.Key, root);
+            if (requireProtected) { DemandProtected(path, 1); }
             using var stream = File.OpenRead(path);
             if (Hex(SHA256.HashData(stream)) != pair.Value)
             {
@@ -166,20 +169,29 @@ internal sealed class Installation
         {
             throw new InvalidDataException();
         }
-        foreach (var path in ModulePaths)
+        foreach (var path in ModulePaths.Concat(Runtime?.DllDirectories ?? []))
         {
-            if (!Directory.Exists(FilePath(path)))
+            if (!Directory.Exists(FilePath(path, root)))
             {
                 throw new InvalidDataException();
             }
         }
+
     }
+
+    internal void VerifyRuntime()
+    {
+        if (Runtime is null) { throw new InvalidDataException(); }
+        Runtime.Validate(this);
+    }
+
+    internal void BindDigest(string digest) => PolicyDigest = digest;
 
     internal static bool CallerMatches(string image, string[] arguments, string python, string bootstrap) =>
         string.Equals(image, python, StringComparison.OrdinalIgnoreCase)
-        && arguments.Length == 4 && string.Equals(arguments[0], python, StringComparison.OrdinalIgnoreCase)
-        && arguments[1] == "-I" && arguments[2] == "-S"
-        && string.Equals(arguments[3], bootstrap, StringComparison.OrdinalIgnoreCase);
+        && arguments.Length == 5 && string.Equals(arguments[0], python, StringComparison.OrdinalIgnoreCase)
+        && arguments[1] == "-I" && arguments[2] == "-S" && arguments[3] == "-B"
+        && string.Equals(arguments[4], bootstrap, StringComparison.OrdinalIgnoreCase);
 
     private void VerifyCaller()
     {
@@ -267,6 +279,18 @@ internal sealed class Installation
         ["S-1-5-18", "S-1-5-32-544", "S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464"];
 
     internal static void DemandProtected(string path, uint kind)
+        => DemandSecurity(path, kind, kind == 4 ? 0x500d0026 : 0x500d0156);
+
+    internal static void DemandAncestorsProtected(string path)
+    {
+        for (var directory = Directory.GetParent(path); directory is not null; directory = directory.Parent)
+        {
+            if ((directory.Attributes & FileAttributes.ReparsePoint) != 0) { throw new InvalidDataException(); }
+            DemandSecurity(directory.FullName, 1, 0x500d0040);
+        }
+    }
+
+    private static void DemandSecurity(string path, uint kind, int mask)
     {
         var code = GetNamedSecurityInfoW(path, kind, 5, out var owner, out _, out _, out _, out var descriptor);
         if (code != 0) { throw new InvalidDataException(); }
@@ -274,27 +298,29 @@ internal sealed class Installation
         {
             var bytes = new byte[GetSecurityDescriptorLength(descriptor)];
             Marshal.Copy(descriptor, bytes, 0, bytes.Length);
-            var security = new RawSecurityDescriptor(bytes, 0);
-            if (owner == 0 || security.Owner is null || !Writers.Contains(security.Owner.Value)
-                || security.DiscretionaryAcl is null)
-            {
-                throw new InvalidDataException();
-            }
-            var mask = kind == 4 ? 0x500d0026 : 0x500d0156;
-            foreach (var ace in security.DiscretionaryAcl)
-            {
-                if ((ace.AceFlags & AceFlags.InheritOnly) != 0) { continue; }
-                if (ace is not QualifiedAce entry) { throw new InvalidDataException(); }
-                if (entry.AceQualifier == AceQualifier.AccessAllowed && (entry.AccessMask & mask) != 0
-                    && !Writers.Contains(entry.SecurityIdentifier.Value))
-                {
-                    throw new InvalidDataException();
-                }
-            }
+            if (owner == 0) { throw new InvalidDataException(); }
+            DemandDescriptor(new RawSecurityDescriptor(bytes, 0), mask);
         }
         finally { LocalFree(descriptor); }
     }
 
+    internal static void DemandDescriptor(RawSecurityDescriptor security, int mask)
+    {
+        if (security.Owner is null || !Writers.Contains(security.Owner.Value) || security.DiscretionaryAcl is null)
+        {
+            throw new InvalidDataException();
+        }
+        foreach (var ace in security.DiscretionaryAcl)
+        {
+            if ((ace.AceFlags & AceFlags.InheritOnly) != 0) { continue; }
+            if (ace is not QualifiedAce entry) { throw new InvalidDataException(); }
+            if (entry.AceQualifier == AceQualifier.AccessAllowed && (entry.AccessMask & mask) != 0
+                && !Writers.Contains(entry.SecurityIdentifier.Value))
+            {
+                throw new InvalidDataException();
+            }
+        }
+    }
     [DllImport("advapi32.dll", CharSet = CharSet.Unicode, ExactSpelling = true)]
     private static extern uint GetNamedSecurityInfoW(string path, uint kind, uint flags, out nint owner,
         out nint group, out nint dacl, out nint sacl, out nint descriptor);

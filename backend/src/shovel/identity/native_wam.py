@@ -57,6 +57,8 @@ class InstalledPolicy(BaseModel):
     revision: int
     valid_until: int = Field(alias="validUntil")
     digest: str = Field(alias="_digest")
+    generation: int = Field(default=0, alias="_generation", ge=0)
+    runtime: dict[str, Any] | None = None
 
 
 _installed: tuple[InstalledPolicy, Callable[[], object]] | None = None
@@ -64,7 +66,12 @@ _installed: tuple[InstalledPolicy, Callable[[], object]] | None = None
 
 def configure_installed_host(content: object, reload: Callable[[], object]) -> None:
     global _installed
-    if _installed is not None or not sys.flags.isolated or not sys.flags.no_site:
+    if (
+        _installed is not None
+        or not sys.flags.isolated
+        or not sys.flags.no_site
+        or not sys.flags.dont_write_bytecode
+    ):
         raise RuntimeError("Installed Host bootstrap is required.")
     _installed = InstalledPolicy.model_validate(content), reload
 
@@ -147,7 +154,7 @@ class NativeWamBroker:
             raise BrokerUnavailableError(correlation_id="wam")
         original, reload = _installed
         current = InstalledPolicy.model_validate(reload())
-        if current.digest != original.digest:
+        if current.digest != original.digest or current.generation != original.generation:
             raise BrokerUnavailableError(correlation_id="wam")
         return current
 

@@ -114,7 +114,8 @@ def test_parameter_failure_unknown_failure_and_xml_payloads_cannot_hide():
 def test_trx_and_absent_cases_are_reported_without_raw_names_or_tokens():
     root = Element("TestRun")
     for names in REQUIRED_TESTS["native_contracts"].values():
-        SubElement(root, "UnitTestResult", testName=names[0], outcome="Passed")
+        for name in names:
+            SubElement(root, "UnitTestResult", testName=name, outcome="Passed")
     result = collect_test_evidence(
         tostring(root), lane="native_contracts", source_commit=COMMIT, source_tree_clean=True
     )

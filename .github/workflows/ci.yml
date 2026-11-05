@@ -17,7 +17,7 @@ permissions:
 jobs:
   windows-outlook:
     runs-on: windows-latest
-    needs: windows-wam
+    needs: [windows-wam, quality]
     steps:
       - uses: actions/checkout@v5
       - uses: actions/download-artifact@v5
@@ -35,6 +35,7 @@ jobs:
         run: >-
           uv run --no-sync mypy --platform win32
           backend\src scripts\enterprise_acceptance.py scripts\smoke_enterprise_wheel.py
+          scripts\build_controlled_installation.py
       - name: Exercise Outlook contracts and shared pipeline without a mailbox
         run: >-
           uv run --locked pytest --no-cov
@@ -44,6 +45,7 @@ jobs:
           backend\tests\test_chunker.py
           backend\tests\test_scan_pipeline.py
           backend\tests\test_native_wam.py
+          backend\tests\test_controlled_installation.py
       - name: Collect sanitized private-pipe acceptance evidence
         run: >-
           uv run --no-sync python scripts\enterprise_acceptance.py collect
@@ -54,6 +56,48 @@ jobs:
         with:
           name: enterprise-windows-evidence
           path: .tools/enterprise-evidence/*.json
+          if-no-files-found: error
+          retention-days: 7
+      - uses: actions/download-artifact@v5
+        with:
+          name: dist-preview
+          path: .tools/installation-wheel
+      - name: Assemble complete offline installation candidate without provisioning trust
+        shell: pwsh
+        run: |
+          Expand-Archive .tools\enterprise-native\shovel-wam-candidate.zip .tools\installation-native
+          uv venv .tools\installation-env --python 3.14-x86_64
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $env:UV_PROJECT_ENVIRONMENT = ".tools\installation-env"
+          uv sync --locked --extra outlook --no-dev --no-editable --no-install-project
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          Remove-Item Env:\UV_PROJECT_ENVIRONMENT
+          $wheel = (Get-ChildItem .tools\installation-wheel -Filter *.whl).FullName
+          uv pip install --python .tools\installation-env\Scripts\python.exe --no-deps $wheel
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $pythonHome = & .tools\installation-env\Scripts\python.exe -I -S -B -c "import sys; print(sys.base_prefix)"
+          $expiry = [DateTimeOffset]::UtcNow.AddDays(1).ToUnixTimeSeconds()
+          uv run --no-sync python scripts\build_controlled_installation.py `
+            --python-home $pythonHome --site-packages .tools\installation-env\Lib\site-packages `
+            --native .tools\installation-native --wheel $wheel --lock uv.lock `
+            --output .tools\installation-candidate --install-root "C:\Program Files\Shovel\packages\1" `
+            --revision 1 --valid-until $expiry
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & .tools\installation-native\Shovel.Wam.exe deployment inventory `
+            .tools\installation-candidate\installation-payload.json .tools\installation-candidate\payload
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $root = (Resolve-Path .tools\installation-candidate\payload).Path
+          & "$root\python\python.exe" -I -S -B -c `
+            "import json,os,sys; from pathlib import Path; root=Path(r'$root'); m=json.loads((root.parent/'installation-payload.json').read_text()); sys.path[:]=[str(root/p) for p in m['modulePaths']]; handles=[os.add_dll_directory(str(root/p)) for p in m['runtime']['dllDirectories']]; import shovel,fastapi,zvec,sqlalchemy,win32com.client; from shovel.runtime.hosting import build_cli_host; print('isolated_runtime_imports_passed')"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & .tools\installation-native\Shovel.Wam.exe deployment inventory `
+            .tools\installation-candidate\installation-payload.json .tools\installation-candidate\payload
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          Compress-Archive .tools\installation-candidate\* .tools\shovel-controlled-candidate.zip
+      - uses: actions/upload-artifact@v5
+        with:
+          name: enterprise-controlled-candidate
+          path: .tools/shovel-controlled-candidate.zip
           if-no-files-found: error
           retention-days: 7
 
@@ -94,9 +138,13 @@ jobs:
             throw "Unexpected WAM platform-check receipt."
           }
           exit 0
-      - name: Publish unsigned native component candidate, not an installed Host
+      - name: Restore locked self-contained Windows Desktop runtime
+        run: >-
+          dotnet restore Shovel.Wam\Shovel.Wam.csproj --configfile NuGet.Config
+          --locked-mode --runtime win-x64 -p:SelfContained=true
+      - name: Publish unsigned self-contained component candidate, not an installed Host
         run: |
-          dotnet publish Shovel.Wam\Shovel.Wam.csproj --no-restore -c Release --no-self-contained -o ..\.tools\wam-candidate
+          dotnet publish Shovel.Wam\Shovel.Wam.csproj --no-restore -c Release --runtime win-x64 --self-contained true -o ..\.tools\wam-candidate
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           New-Item -ItemType Directory -Force ..\.tools\enterprise-native | Out-Null
           Compress-Archive -Path ..\.tools\wam-candidate\* -DestinationPath ..\.tools\enterprise-native\shovel-wam-candidate.zip
@@ -149,7 +197,9 @@ jobs:
 
       - name: Type check (mypy)
         working-directory: shovel
-        run: uv run mypy backend/src scripts/enterprise_acceptance.py scripts/smoke_enterprise_wheel.py
+        run: >-
+          uv run mypy backend/src scripts/enterprise_acceptance.py scripts/smoke_enterprise_wheel.py
+          scripts/build_controlled_installation.py
 
       - name: Test (pytest)
         working-directory: shovel
@@ -234,6 +284,10 @@ jobs:
         with:
           name: enterprise-windows-evidence
           path: candidate/evidence/windows
+      - uses: actions/download-artifact@v5
+        with:
+          name: enterprise-controlled-candidate
+          path: candidate/controlled
       - name: Attest candidate bytes and offline receipts, not live acceptance
         uses: actions/attest@v4
         with:
@@ -243,3 +297,4 @@ jobs:
             candidate/native/*.json
             candidate/evidence/python/*.json
             candidate/evidence/windows/*.json
+            candidate/controlled/*.zip

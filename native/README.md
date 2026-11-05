@@ -137,16 +137,23 @@ trusted interpreter/dependency tree. It does not isolate same-user malware,
 administrators or injected in-process code.
 
 Deployment requires an organization-controlled signed installation envelope and
-a 64-bit **HKLM** `SOFTWARE\Shovel\WamTrust` key. No runtime command creates keys,
-installs certificates, signs with an organization key or grants permissions.
+a 64-bit **HKLM** `SOFTWARE\Shovel\WamTrust` key. The Host never provisions trust
+or grants permissions. Separate operator-only deployment commands can sign with
+an existing organization key and initialize the protected machine anchor.
 Administrator provisioning must independently approve:
 
 | Registry value | Meaning |
 |---|---|
-| `PolicyPath` (string) | Absolute path of the signed envelope, outside the immutable package root |
-| `PolicySha256` (string) | Lowercase SHA-256 of the exact envelope bytes |
-| `SignerCertificateSha256` (string) | Lowercase SHA-256 of the DER signing certificate |
-| `Revision` (DWORD) | Exact approved policy revision, at least 1 |
+| `State` (REG_SZ) | Strict schema-2 JSON, replaced as one atomic registry value and flushed |
+
+`State` contains `storeRoot`, `generation`, `highestRevision`, `signers`,
+`revokedSigners`, `revokedEnvelopes`, and nullable `active`
+(`envelopeSha256`, `signerSha256`, `revision`). Digests are lowercase SHA-256.
+It is machine-only, never HKCU/TOML. Missing/legacy/duplicate/unknown state,
+revoked or absent activation, stale generation and invalid ACLs fail closed.
+Legacy four-value anchors are deliberately not silently imported or recreated;
+an existing installation requires a separately approved administrative migration.
+Do not delete an existing anchor to reset its revision/revocation history.
 
 Envelope JSON has exactly `payload`, `signature`, `certificate`, each Base64.
 The payload is UTF-8 JSON; the signature is RSA PKCS#1 SHA-256 over its exact
@@ -155,7 +162,7 @@ with an RSA key of at least 2048 bits. Pinning is the authority, not self-issued
 certificate installation or a certificate supplied by TOML.
 
 Payload fields are `root`, `python`, `native`, `bootstrap`, `modulePaths`, `files`,
-`bindings`, `revision`, `validUntil`. `validUntil` is UTC Unix seconds and cannot
+`bindings`, `revision`, `validUntil`, `runtime`. `validUntil` is UTC Unix seconds and cannot
 extend beyond the signing certificate's validity.
 `python`, `native`, `bootstrap`, module directories and inventory paths are
 Windows-style paths relative to `root`, without traversal, ADS or reparse points.
@@ -166,6 +173,10 @@ stdlib, application and dependencies, published native DLLs/EXE/config files and
 files and directories, including child-deletion rights;
 ordinary-user-owned or writable installations are rejected. Complex writable
 ACLs unsupported by the bootstrap must be rejected, not loosened.
+`runtime` records Python/.NET versions, the committed `uv.lock` SHA-256, every
+installed distribution name/version/metadata path, explicit DLL directories and
+the interpreter/stdlib/site-packages paths. Self-contained .NET Core and Windows
+Desktop files are mandatory; a framework-dependent ZIP is not installable.
 
 Each binding contains a `prototype` (the existing complete `TokenRequest` JSON
 contract) and a `target` (the target contract above). Only request/execution/
@@ -181,7 +192,7 @@ Include only installed files, not mutable build output, logs or user stores.
 The approved interpreter must be invoked with the exact protected bootstrap:
 
 ```powershell
-& "C:\approved-install\python\python.exe" -I -S "C:\approved-install\host_bootstrap.py"
+& "C:\approved-install\python\python.exe" -I -S -B "C:\approved-install\host_bootstrap.py"
 ```
 
 This bootstrap verifies the machine-pinned inventory, requests **non-auth**
@@ -189,6 +200,8 @@ native attestation, sets only approved module paths, suppresses bytecode writes,
 then starts the existing `shovel run prd`. Native independently verifies the
 signature, full installation, its own image, and the parent interpreter **and
 exact isolated bootstrap command**. A signed `python.exe` alone is insufficient.
+`-B` is mandatory before interpreter startup: setting `dont_write_bytecode` only
+inside the bootstrap is too late to prevent import-time inventory mutations.
 Do not use a source checkout, `uv run`, arbitrary `-c`/`-m`, or environment/
 personal-settings overrides to create installation trust.
 
@@ -216,7 +229,7 @@ Repeated cancellation cannot interrupt owned-child/pipe cleanup. Installation
 verification runs off the Host event loop, and children use the protected root
 as their working directory.
 
-Policy changes invalidate the existing bootstrap and require restart/revalidation.
+Policy or machine-generation changes invalidate the existing bootstrap and require restart/revalidation.
 No default trust root, self-signed production fallback, automatic trust
 provisioning, token cache, HTTP listener or default enterprise enable is added.
 
@@ -231,7 +244,7 @@ live Kusto/WAM acceptance are provisioned by this bootstrap.
 
 ## Candidate package and CI evidence
 
-CI now publishes a framework-dependent unsigned native component ZIP and a
+CI now publishes a self-contained unsigned native component ZIP and a
 sanitized contract-test receipt bound to its SHA-256 and source commit. The
 Windows Python lane exercises real inherited-handle child processes with
 synthetic credentials, including replay, forged public/private bindings,
@@ -242,8 +255,147 @@ installed Host. Native contract tests still perform no account/token calls.
 A separate main-branch provenance job attests candidate wheel/ZIP and sanitized
 receipts; PR jobs have no attestation write authority. It does not sign an
 organization installation envelope, provision HKLM, enable connections or
-approve real authentication. The ZIP does not include a trusted interpreter or
-the complete administrator-controlled dependency tree. Four-lane qualification
+approve real authentication. A separate complete offline candidate contains the
+interpreter, locked non-editable dependencies, native runtime and unsigned
+installation payload. CI exercises isolated imports, including Outlook's native
+modules, and attests the complete candidate ZIP. Neither ZIP is a trusted
+organization installation. Four-lane qualification
 and the review-only minimum-permission proposal are documented in
 [the provider guide](../Documents/enterprise_provider_guide.md#10-离线端到端编排候选制品与开放前审查).
 Live WAM, Kusto and storage/key acceptance remain outstanding.
+
+## Complete offline assembly and administrative lifecycle
+
+The builder and deployment commands are implemented, but are **not run against
+the developer's machine trust, certificate store or Program Files by tests**.
+The installed envelope authenticates every file through the organization's
+certificate; this is not an Authenticode signature on each bundled executable.
+First independently verify the release provenance, package digests and approved
+organization certificate fingerprint using your organization's deployment
+process. Do not elevate an arbitrary unsigned download to bootstrap trust.
+
+Prepare an approved complete x64 Python 3.14+ home (not a venv, without `_pth`
+overrides), a separate **wheel-installed**, non-editable runtime environment
+from `uv.lock`, and a self-contained native publish:
+
+```powershell
+# From native\
+dotnet restore Shovel.Wam\Shovel.Wam.csproj --configfile NuGet.Config --locked-mode --runtime win-x64 -p:SelfContained=true
+dotnet publish Shovel.Wam\Shovel.Wam.csproj --no-restore -c Release --runtime win-x64 --self-contained true -o ..\.tools\controlled-native
+```
+
+For the dependency environment, use `uv sync --locked --extra outlook --no-dev
+--no-editable --no-install-project` with a separate
+`UV_PROJECT_ENVIRONMENT`, then install the approved wheel with `uv pip install
+--python <environment-python> --no-deps <wheel>`. Do not use `--all-extras`:
+that includes development tools. Assembly never downloads dependencies or
+certificates, changes ACLs/HKLM, authenticates WAM, or opens production.
+It executes the explicitly supplied approved interpreter only to probe its
+version/bitness. It inventories all copied files, checks application bytes
+against the wheel, dependency closure/versions against the lock and installed
+VCS commit provenance, and rejects editable packages, reparse points, case/path
+aliases, missing stdlib or shared-framework native publishes.
+
+From the repository root, with independently approved local input paths:
+
+```powershell
+uv run python scripts\build_controlled_installation.py `
+  --python-home "C:\approved-input\python" `
+  --site-packages "C:\approved-input\runtime\Lib\site-packages" `
+  --native ".tools\controlled-native" --wheel "C:\approved-input\shovel.whl" `
+  --lock uv.lock --output ".tools\installation-review" `
+  --install-root "C:\Program Files\Shovel\packages\1" `
+  --revision 1 --valid-until <approved-unix-seconds>
+```
+
+The new output contains `payload\` and `installation-payload.json`.
+No input or existing output is overwritten. Interpreter-global site-packages
+are excluded; only the separately approved dependency environment is copied.
+No `.pth` is executed. Pywin32's known module paths/DLL directory are explicitly
+inventoried/configured rather than relying on `site` or pywin32 registration.
+Optional `--bindings` supplies an independently approved binding JSON array;
+the default is empty, **not** a default account, connection or permission.
+Store user configuration, databases, logs and keys outside the immutable tree.
+
+An authorized signing operator can use an existing non-exportable RSA
+code-signing key in `LocalMachine\My` (including a supported CNG/KSP key):
+
+```powershell
+& "C:\verified-tools\Shovel.Wam.exe" deployment inventory `
+  ".tools\installation-review\installation-payload.json" ".tools\installation-review\payload"
+& "C:\verified-tools\Shovel.Wam.exe" deployment sign `
+  ".tools\installation-review\installation-payload.json" `
+  "<approved-certificate-der-sha256>" ".tools\installation-envelope.json"
+```
+
+`inventory` is a read-only candidate check using the same native runtime schema
+and complete-file verifier as activation; it never creates machine trust or
+claims organization approval.
+The command never generates/imports a certificate or exports a private key.
+It signs the exact payload bytes and verifies its signature, pin, code-signing
+EKU, certificate/policy lifetime and minimum RSA size. An organization can
+instead produce the same envelope format in its existing signing service.
+Organization approval must review the payload, dependency inventory and
+provenance; signing a malformed/incomplete input is not deployment acceptance.
+
+**Only after separate machine-provisioning approval**, an elevated
+administrator uses the verified deployment tool:
+
+```powershell
+& "C:\verified-tools\Shovel.Wam.exe" deployment initialize `
+  "C:\Program Files\Shovel" "<approved-certificate-der-sha256>" --approve-machine-trust
+& "C:\verified-tools\Shovel.Wam.exe" deployment activate `
+  ".tools\installation-review\payload" ".tools\installation-envelope.json" 1
+```
+
+Initialize is first-install-only: it rejects an existing key/directory and
+creates a protected store, lock, policies/packages directories and HKLM state.
+Only SYSTEM/Administrators can write; Users receive read/execute only, with
+protected DACLs and administrator ownership. Initialization creates no active
+installation or enterprise grants. Activation checks expected generation,
+organization signer, expiration, complete inventory and exact destination
+`<storeRoot>\packages\<revision>`. It copies into a fresh protected staging
+directory, rehashes the copied bytes, publishes an immutable version/policy, and
+only then commits the single HKLM State value. User-writable ancestors, child
+deletion rights, alternate streams, path aliases and junctions are rejected.
+
+Upgrade assembles/signs a **strictly higher revision** for its corresponding
+new immutable directory, then activates with the current generation. Existing
+directories/files are never overwritten. An interrupted pre-commit deployment
+leaves the old anchor active. Retrying may reconcile an already-published
+directory/envelope only after exact byte/ACL revalidation; corrupt staging is
+never trusted, automatically deleted or repaired. After a successful commit,
+use the new protected interpreter/bootstrap and restart/revalidate the Host.
+Machine-state and credential-release leases serialize administrative writes;
+an overlapping writer fails explicitly and must be retried, not merged.
+
+Revocation and signer rotation require the current expected generation:
+
+```powershell
+& "C:\verified-tools\Shovel.Wam.exe" deployment revoke-envelope "<envelope-sha256>" <generation>
+& "C:\verified-tools\Shovel.Wam.exe" deployment add-signer "<new-approved-certificate-sha256>" <generation>
+& "C:\verified-tools\Shovel.Wam.exe" deployment revoke-signer "<old-certificate-sha256>" <generation>
+```
+
+Each successful transition increments generation. Matching revocation clears
+activation, retains the highest revision and permanent tombstones, and fences
+old Hosts/late credentials. The organization-policy loader also rechecks the
+Host's initial installation generation/digest/expiry on every policy resolution,
+so a token already issued before revocation cannot authorize a later result
+release through an old Host. This does not undo an already-dispatched request.
+Adding a signer does not un-revoke it or activate
+anything. Rotate to a new approved signer before revoking the old one.
+Replayed/older signed manifests and stale concurrent writers are rejected.
+Revision is the organization's monotonic release sequence, not a heuristic
+comparison of arbitrary package version strings. There is no reset,
+auto-downgrade, uninstall erasure claim or permission-enabling command.
+
+Offline tests cover signature/pin tampering, complete interpreter/native/
+dependency inventory, ACL descriptors and real unprotected-file rejection,
+upgrade/replay/stale-writer/retained-state crash windows, revocation and signer
+rotation. Actual organization signing, elevated Program Files/HKLM deployment,
+power-loss recovery and real installed WAM remain operator acceptance gates.
+Local state cannot defend against an administrator/OS restoring an entire old
+hive/disk snapshot; that requires an independently approved TPM/remote monotonic
+authority. Windows system DLLs/kernel and OS servicing remain trusted platform
+dependencies, not files claimed to be bundled or physically erased.

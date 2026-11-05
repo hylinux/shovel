@@ -120,7 +120,7 @@ stdout/stderr/audit，也不调用业务资源。报告只允许固定测试 ID�
 
 接入不能来自任意 checkout 或“签名 python.exe”。实现的
 `Installation` 验证 HKLM 管理员信任锚、RSA 签名/证书 pin/有效期/Code Signing EKU、
-精确 revision、完整不可写包清单、自身映像及调用方的 interpreter + `-I -S`
+精确 revision、完整不可写包清单、自身映像及调用方的 interpreter + `-I -S -B`
 受保护 bootstrap 命令。`host_bootstrap.py` 先验证机器 pin/包文件，再取得非认证
 native attestation，设置受信任模块路径并启动现有生产 Host；不允许 workspace Python
 扩展。缺信任锚、过期/变更清单、目录/ACL/签名或 caller 不符合即 unavailable。

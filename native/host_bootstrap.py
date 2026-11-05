@@ -20,7 +20,7 @@ WRITERS = {
 }
 
 
-def protected(path: str, kind: int = 1) -> None:
+def protected(path: str, kind: int = 1, *, ancestor: bool = False) -> None:
     api = ctypes.WinDLL("advapi32", use_last_error=True)
     kernel = ctypes.WinDLL("kernel32", use_last_error=True)
     api.GetNamedSecurityInfoW.argtypes = [
@@ -52,7 +52,7 @@ def protected(path: str, kind: int = 1) -> None:
         if not owner.value or not dacl.value or sid(owner.value) not in WRITERS:
             raise ValueError("Installation is not administrator controlled.")
         count = struct.unpack("<BBHHH", ctypes.string_at(dacl, 8))[3]
-        mask = 0x500D0026 if kind == 4 else 0x500D0156
+        mask = 0x500D0040 if ancestor else 0x500D0026 if kind == 4 else 0x500D0156
         for index in range(count):
             ace = ctypes.c_void_p()
             if not api.GetAce(dacl, index, ace) or not ace.value:
@@ -76,16 +76,88 @@ def unique(items: list[tuple[str, object]]) -> dict[str, object]:
     return result
 
 
-def load() -> dict:
+def machine_state() -> dict:
     protected("MACHINE\\" + KEY, 4)
     with winreg.OpenKey(
         winreg.HKEY_LOCAL_MACHINE, KEY, access=winreg.KEY_READ | winreg.KEY_WOW64_64KEY
     ) as key:
-        path = Path(winreg.QueryValueEx(key, "PolicyPath")[0])
-        digest = winreg.QueryValueEx(key, "PolicySha256")[0]
-        revision = winreg.QueryValueEx(key, "Revision")[0]
+        raw = winreg.QueryValueEx(key, "State")[0]
+    if not isinstance(raw, str) or len(raw) > 1024 * 1024:
+        raise ValueError("Invalid machine trust state.")
+    state = json.loads(raw, object_pairs_hook=unique)
+    active = state["active"]
+    if (
+        set(state)
+        != {
+            "schema",
+            "storeRoot",
+            "generation",
+            "highestRevision",
+            "signers",
+            "revokedSigners",
+            "revokedEnvelopes",
+            "active",
+        }
+        or state["schema"] != 2
+        or type(state["generation"]) is not int
+        or state["generation"] < 1
+        or active is None
+        or set(active) != {"revision", "envelopeSha256", "signerSha256"}
+        or type(active["revision"]) is not int
+        or active["revision"] < 1
+        or type(state["highestRevision"]) is not int
+        or active["revision"] != state["highestRevision"]
+        or active["signerSha256"] not in state["signers"]
+        or active["signerSha256"] in state["revokedSigners"]
+        or active["envelopeSha256"] in state["revokedEnvelopes"]
+        or len(active["envelopeSha256"]) != 64
+        or any(c not in "0123456789abcdef" for c in active["envelopeSha256"])
+        or any(
+            not isinstance(group, list)
+            or len(group) > 10000
+            or len(set(group)) != len(group)
+            or any(
+                not isinstance(value, str)
+                or len(value) != 64
+                or any(c not in "0123456789abcdef" for c in value)
+                for value in group
+            )
+            for group in (state["signers"], state["revokedSigners"], state["revokedEnvelopes"])
+        )
+        or not Path(state["storeRoot"]).is_absolute()
+        or state["storeRoot"].startswith("\\\\")
+    ):
+        raise ValueError("Machine trust is inactive or revoked.")
+    return state
+
+
+def protected_ancestors(path: Path) -> None:
+    for parent in path.parents:
+        if parent.is_symlink() or parent.is_junction():
+            raise ValueError("Installation ancestor reparse point.")
+        protected(str(parent), ancestor=True)
+
+
+def require_current_installation(content: dict) -> None:
+    state = machine_state()
+    if (
+        state["generation"] != content["_generation"]
+        or state["active"]["envelopeSha256"] != content["_digest"]
+        or content["validUntil"] <= time.time()
+    ):
+        raise ValueError("Installed Host authority changed or expired.")
+
+
+def load() -> dict:
+    state = machine_state()
+    active = state["active"]
+    path = Path(state["storeRoot"]) / "policies" / (active["envelopeSha256"] + ".json")
+    digest = active["envelopeSha256"]
+    revision = active["revision"]
+    protected_ancestors(path)
     protected(str(path))
-    envelope = path.read_bytes()
+    with path.open("rb") as stream:
+        envelope = stream.read(8 * 1024 * 1024 + 1)
     if len(envelope) > 8 * 1024 * 1024 or hashlib.sha256(envelope).hexdigest() != digest:
         raise ValueError("Installation manifest integrity failure.")
     content = json.loads(
@@ -95,8 +167,13 @@ def load() -> dict:
     if content["revision"] != revision or content["validUntil"] <= time.time():
         raise ValueError("Installation policy expired or changed.")
     root = Path(content["root"])
-    if not root.is_absolute():
+    if (
+        not root.is_absolute()
+        or root != Path(state["storeRoot"]) / "packages" / str(revision)
+        or content.get("runtime") is None
+    ):
         raise ValueError("Installation path must be absolute.")
+    protected_ancestors(root)
     expected = content["files"]
     actual = set()
     pending = [root]
@@ -122,6 +199,7 @@ def load() -> dict:
             or "/" in name
             or ":" in name
             or any(part in ("", ".", "..") for part in name.split("\\"))
+            or any(part.endswith((" ", ".")) or os.path.isreserved(part) for part in name.split("\\"))
         ):
             raise ValueError("Invalid installation path.")
         path = root
@@ -133,12 +211,20 @@ def load() -> dict:
         with path.open("rb") as stream:
             if hashlib.file_digest(stream, "sha256").hexdigest() != digest_file:
                 raise ValueError("Installation file integrity failure.")
+    if state != machine_state():
+        raise ValueError("Machine trust changed during verification.")
     content["_digest"] = digest
+    content["_generation"] = state["generation"]
     return content
 
 
 def main() -> None:
-    if not sys.flags.isolated or not sys.flags.no_site or len(sys.argv) != 1:
+    if (
+        not sys.flags.isolated
+        or not sys.flags.no_site
+        or not sys.flags.dont_write_bytecode
+        or len(sys.argv) != 1
+    ):
         raise ValueError("Host requires isolated installed bootstrap.")
     content = load()
     sys.dont_write_bytecode = True
@@ -164,13 +250,18 @@ def main() -> None:
     )
     if outcome.returncode or json.loads(outcome.stdout)["status"] != "trusted":
         raise ValueError("Native installation attestation failed.")
+    current = load()
+    if (current["_digest"], current["_generation"]) != (content["_digest"], content["_generation"]):
+        raise ValueError("Installation changed during attestation.")
     sys.path[:] = [str(root / path) for path in content["modulePaths"]]
+    dll_handles = [os.add_dll_directory(str(root / path)) for path in content["runtime"]["dllDirectories"]]
     from shovel.identity.native_wam import configure_installed_host
 
     configure_installed_host(content, load)
     from shovel.enterprise.organization import OrganizationAnchor, configure_organization_host
 
     def organization_policy():
+        require_current_installation(content)
         trust_key = r"SOFTWARE\Shovel\EnterpriseTrust"
         try:
             key = winreg.OpenKey(
@@ -200,7 +291,11 @@ def main() -> None:
     from shovel.cli import app
 
     sys.argv[:] = ["shovel", "run", "prd"]
-    app()
+    try:
+        app()
+    finally:
+        for handle in dll_handles:
+            handle.close()
 
 
 if __name__ == "__main__":

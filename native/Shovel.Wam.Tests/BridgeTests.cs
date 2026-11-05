@@ -63,9 +63,10 @@ public sealed class BridgeTests
     public void SignedPythonAloneIsNotAnAuthorizedCaller()
     {
         const string python = @"C:\trusted\python.exe", bootstrap = @"C:\trusted\host_bootstrap.py";
-        Assert.IsTrue(Installation.CallerMatches(python, [python, "-I", "-S", bootstrap], python, bootstrap));
+        Assert.IsTrue(Installation.CallerMatches(python, [python, "-I", "-S", "-B", bootstrap], python, bootstrap));
+        Assert.IsFalse(Installation.CallerMatches(python, [python, "-I", "-S", bootstrap], python, bootstrap));
         Assert.IsFalse(Installation.CallerMatches(python, [python, "-c", "arbitrary"], python, bootstrap));
-        Assert.IsFalse(Installation.CallerMatches(python, [python, "-I", "-S", @"C:\untrusted.py"], python, bootstrap));
+        Assert.IsFalse(Installation.CallerMatches(python, [python, "-I", "-S", "-B", @"C:\untrusted.py"], python, bootstrap));
     }
 
     [TestMethod]

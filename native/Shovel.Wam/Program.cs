@@ -17,12 +17,14 @@ internal static class Program
     [STAThread]
     internal static int Main(string[] args)
     {
+        if (args.Length > 0 && args[0] == "deployment") { return Deployment.Run(args[1..]); }
         if (args.Length == 0)
         {
             Console.WriteLine("Shovel Windows WAM standalone component");
             Console.WriteLine("check");
             Console.WriteLine("silent|interactive --target <approved-local-json> --allow-authentication");
             Console.WriteLine("accept --case Silent|InteractionRequired|Interactive|Cancel|Timeout --target <json> --allow-authentication");
+            Console.WriteLine("deployment inventory|sign|initialize|activate|add-signer|revoke-signer|revoke-envelope (see installation guide)");
             Console.WriteLine("No token output, business requests, or production Host integration.");
             return 0;
         }

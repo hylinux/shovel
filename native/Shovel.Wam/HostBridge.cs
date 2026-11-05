@@ -88,8 +88,10 @@ internal static class HostBridge
                 };
                 report = await client.Authenticate(bounded, Mode.Silent, 0, cancellation.Token, async credential =>
                 {
+                    using var installationLease = MachineTrust.AcquireReadLease();
                     var current = Installation.Load();
                     if (current.PolicyDigest != policy.PolicyDigest || current.Revision != policy.Revision
+                        || current.AnchorGeneration != policy.AnchorGeneration
                         || Now() >= expires || cancellation.IsCancellationRequested)
                     {
                         throw new InvalidDataException();

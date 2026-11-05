@@ -53,6 +53,19 @@ REQUIRED_TESTS: dict[Lane, dict[str, tuple[str, ...]]] = {
         "private_handles": ("InheritedHandlesCannotLeakToFurtherChildren",),
         "one_use_credential": ("CredentialUsesBoundBinaryChannelAndCannotSerializeOrReuse",),
         "unsafe_frames": ("InvalidFrameAndUserWritableInstallationAreRejected",),
+        "installation_lifecycle": (
+            "ControlledUpgradeRejectsReplayDowngradeAndStaleConcurrentWriter",
+            "RevocationAndSignerRotationRetainHighWaterAndTombstones",
+        ),
+        "runtime_inventory": (
+            "CompleteRuntimeAndMachineDestinationAreMandatory",
+            "InventoryRejectsChangedMissingAndUnlistedRuntimeFiles",
+            "RuntimeDependencyPathsCannotBeReplacedByPthOrExternalImports",
+        ),
+        "machine_anchor_acl": (
+            "AclChecksRejectNullDaclUserOwnerWriteAndParentDeletion",
+            "MachineStateRejectsLegacyDuplicateAndMalformedAnchors",
+        ),
     },
     "installed_wheel": {
         "packaged_runtime": ("packaged_runtime",),

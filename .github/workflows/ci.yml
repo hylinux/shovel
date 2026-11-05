@@ -31,6 +31,10 @@ jobs:
         run: uv python install 3.14-x86_64
       - name: Sync Windows dependencies
         run: uv sync --python 3.14-x86_64 --locked --all-extras
+      - name: Type check Windows target including native private IPC
+        run: >-
+          uv run --no-sync mypy --platform win32
+          backend\src scripts\enterprise_acceptance.py scripts\smoke_enterprise_wheel.py
       - name: Exercise Outlook contracts and shared pipeline without a mailbox
         run: >-
           uv run --locked pytest --no-cov

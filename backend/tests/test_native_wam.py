@@ -49,6 +49,17 @@ async def test_source_checkout_does_not_authorize_authentication(monkeypatch):
         await broker.acquire(token_request())
 
 
+@pytest.mark.parametrize("platform", ["linux", "darwin"])
+async def test_non_windows_acquisition_fails_before_native_import_or_io(monkeypatch, platform):
+    def unexpected_pipe():
+        pytest.fail("A non-Windows acquisition reached native I/O.")
+
+    monkeypatch.setattr(native_wam, "sys", SimpleNamespace(platform=platform))
+    monkeypatch.setattr(native_wam.os, "pipe", unexpected_pipe)
+    with pytest.raises(BrokerUnavailableError):
+        await FixtureBroker()._acquire(token_request(), time.time() + 20, policy())
+
+
 async def test_resolver_requires_running_scoped_granted_execution():
     request = token_request()
     scope = CapabilityScope(workspace_id=request.identity.workspace_id, user_id=request.identity.user_id)

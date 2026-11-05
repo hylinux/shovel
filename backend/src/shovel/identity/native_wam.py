@@ -194,6 +194,8 @@ class NativeWamBroker:
                 self._profiles.pop(request.request_id, None)
 
     async def _acquire(self, request: TokenRequest, deadline: float, policy: InstalledPolicy) -> AuthContext:
+        if sys.platform != "win32":
+            raise BrokerUnavailableError(correlation_id=request.correlation_id)
         import msvcrt
 
         raw = json.dumps(request.model_dump(mode="json"), sort_keys=True, separators=(",", ":")).encode()

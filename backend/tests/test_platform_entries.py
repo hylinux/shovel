@@ -513,13 +513,13 @@ def test_real_cli_explicit_publish_and_offline_run(tmp_path: Path, monkeypatch: 
 @pytest.mark.parametrize(
     "relative",
     [
-        "platform",
-        "runtime\\platform_api.py",
-        "runtime\\platform_client.py",
-        "cli\\commands\\platform.py",
+        Path("platform"),
+        Path("runtime") / "platform_api.py",
+        Path("runtime") / "platform_client.py",
+        Path("cli") / "commands" / "platform.py",
     ],
 )
-def test_new_entry_points_never_access_orm(relative: str) -> None:
+def test_new_entry_points_never_access_orm(relative: Path) -> None:
     target = Path(__file__).parent.parent / "src" / "shovel" / relative
     for path in target.glob("*.py") if target.is_dir() else [target]:
         tree = ast.parse(path.read_text(encoding="utf-8"))

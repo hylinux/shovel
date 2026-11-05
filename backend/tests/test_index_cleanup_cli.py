@@ -6,6 +6,7 @@ import asyncio
 from pathlib import Path
 
 import pytest
+from rich.text import Text
 from sqlalchemy import select
 from typer.testing import CliRunner
 
@@ -130,7 +131,7 @@ def test_recovery_options_are_exposed() -> None:
     runner = CliRunner()
     result = runner.invoke(app, ["scan", "run", "--help"])
     assert result.exit_code == 0
-    assert "--force" in result.output
+    assert "--force" in Text.from_ansi(result.output).plain
     result = runner.invoke(app, ["scan", "cleanup", "--help"])
     assert result.exit_code == 0
-    assert "--resource-id" in result.output
+    assert "--resource-id" in Text.from_ansi(result.output).plain

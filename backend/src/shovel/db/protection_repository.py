@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import time
 from collections.abc import AsyncIterator, Callable
-from contextlib import asynccontextmanager
+from contextlib import AbstractContextManager, asynccontextmanager, nullcontext
 from uuid import uuid4
 
 from pydantic import ValidationError
@@ -63,6 +63,7 @@ class SQLiteProtectionRepository:
         *,
         source_authority: SourceChangeAuthority | None = None,
         governance: GovernanceService | None = None,
+        release_guard: Callable[[DataUseBinding], AbstractContextManager[None]] | None = None,
         clock: Callable[[], float] = time.time,
     ) -> None:
         self._sessions = sessions
@@ -70,6 +71,7 @@ class SQLiteProtectionRepository:
         self._source_authority = source_authority
         self._clock = clock
         self.governance = governance if governance is not None else installed_governance()
+        self.release_guard = release_guard
 
     @property
     def store_binding(self) -> str:
@@ -321,7 +323,8 @@ class SQLiteProtectionRepository:
                     session, scope, content.metadata.protection_context.sources, allow_new=True
                 )
                 authorize_audit()
-                return self._gate.use_decision(content, binding, decision, consumer, proofs=proofs)
+                with self.release_guard(binding) if self.release_guard is not None else nullcontext():
+                    return self._gate.use_decision(content, binding, decision, consumer, proofs=proofs)
         finally:
             if decision is not None:
                 self._gate.policy.revoke(decision.id)

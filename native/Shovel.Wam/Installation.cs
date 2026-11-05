@@ -55,6 +55,25 @@ internal sealed class Installation
 
     internal static Installation VerifyEnvelope(byte[] bytes, string signer, int revision)
     {
+        var (content, certificateExpiry) = VerifySignedPayload(bytes, signer);
+        var installation = content.Deserialize<Installation>(Options) ?? throw new InvalidDataException();
+        if (installation.Revision < 1 || installation.Revision != revision
+            || installation.ValidUntil <= DateTimeOffset.UtcNow.ToUnixTimeSeconds()
+            || installation.ValidUntil > certificateExpiry
+            || installation.Files.Count is < 1 or > 100000)
+        {
+            throw new InvalidDataException();
+        }
+        foreach (var binding in installation.Bindings)
+        {
+            binding.Target.Validate();
+        }
+        return installation;
+    }
+
+    internal static (JsonElement Content, long CertificateExpiry) VerifySignedPayload(byte[] bytes, string signer)
+    {
+        if (bytes.Length > 1024 * 1024 * 8) { throw new InvalidDataException(); }
         using var document = JsonDocument.Parse(bytes);
         var root = document.RootElement;
         RejectDuplicates(root);
@@ -72,25 +91,16 @@ internal sealed class Installation
             || certificate.NotBefore.ToUniversalTime() > now || certificate.NotAfter.ToUniversalTime() <= now
             || !certificate.Extensions.OfType<X509EnhancedKeyUsageExtension>().Any(extension =>
                 extension.EnhancedKeyUsages.Cast<Oid>().Any(oid => oid.Value == "1.3.6.1.5.5.7.3.3"))
+            || certificate.Extensions.OfType<X509KeyUsageExtension>().Any(extension =>
+                !extension.KeyUsages.HasFlag(X509KeyUsageFlags.DigitalSignature))
             || rsa.KeySize < 2048 || !rsa.VerifyData(payload, signature, HashAlgorithmName.SHA256, RSASignaturePadding.Pkcs1))
         {
             throw new InvalidDataException();
         }
         using var content = JsonDocument.Parse(payload);
         RejectDuplicates(content.RootElement);
-        var installation = content.Deserialize<Installation>(Options) ?? throw new InvalidDataException();
-        if (installation.Revision < 1 || installation.Revision != revision
-            || installation.ValidUntil <= DateTimeOffset.UtcNow.ToUnixTimeSeconds()
-            || installation.ValidUntil > new DateTimeOffset(certificate.NotAfter.ToUniversalTime()).ToUnixTimeSeconds()
-            || installation.Files.Count is < 1 or > 100000)
-        {
-            throw new InvalidDataException();
-        }
-        foreach (var binding in installation.Bindings)
-        {
-            binding.Target.Validate();
-        }
-        return installation;
+        return (content.RootElement.Clone(),
+            new DateTimeOffset(certificate.NotAfter.ToUniversalTime()).ToUnixTimeSeconds());
     }
 
     internal string FilePath(string relative, string? root = null)

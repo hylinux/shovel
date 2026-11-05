@@ -34,6 +34,7 @@ SUITES = (
     "test_organization_security.py",
     "test_native_wam.py",
     "test_enterprise_acceptance.py",
+    "test_enterprise_rollout.py",
 )
 
 

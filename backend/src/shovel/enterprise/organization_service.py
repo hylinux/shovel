@@ -2,7 +2,8 @@ from __future__ import annotations
 
 import asyncio
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from uuid import uuid4
 
@@ -10,7 +11,7 @@ import structlog
 from pydantic import JsonValue
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from shovel.capability.domain import FunctionImplementation, Permission
+from shovel.capability.domain import CapabilityReference, FunctionImplementation, Permission
 from shovel.db.enterprise_repository import SQLiteConnectionRepository
 from shovel.db.identity_repository import SQLiteIdentityRepository
 from shovel.db.organization_repository import SQLiteOrganizationRepository
@@ -27,8 +28,15 @@ from shovel.enterprise.organization import (
     installed_organization_loader,
     verify_policy,
 )
+from shovel.enterprise.rollout import RolloutGate, installed_rollout
 from shovel.enterprise.transport import ProviderRequest
-from shovel.execution.domain import Execution
+from shovel.execution.domain import (
+    CapabilitySnapshot,
+    Execution,
+    ExecutionBudget,
+    ExecutionSnapshot,
+    InvocationContext,
+)
 from shovel.execution.engine import ExecutionEngine
 from shovel.identity.domain import AuthContext, TokenRequest
 from shovel.identity.service import AuthenticationService
@@ -60,6 +68,7 @@ from shovel.protection.policy import (
     SourceAuthorization,
 )
 from shovel.runtime.errors import RuntimeFailure
+from shovel.security.domain import SecurityDenied
 
 
 @dataclass(frozen=True)
@@ -108,10 +117,12 @@ class OrganizationService:
         client: KustoMetadataClient | None = None,
         clock: Callable[[], float] = time.time,
         governance: GovernanceService | None = None,
+        rollout: RolloutGate | None = None,
     ) -> None:
         self.loader = loader if loader is not None else installed_organization_loader()
         self.authentication, self.engine, self.clock = authentication, engine, clock
         self.client = client or KustoMetadataClient(clock=clock)
+        self.rollout = rollout if rollout is not None else installed_rollout()
         self.connections, self.identities = (
             SQLiteConnectionRepository(sessions),
             SQLiteIdentityRepository(sessions),
@@ -120,7 +131,7 @@ class OrganizationService:
             SQLitePolicyAudit(), provider=OrganizationPolicyProvider(self), clock=clock
         )
         self.protection = SQLiteProtectionRepository(
-            sessions, self.policy, clock=clock, governance=governance
+            sessions, self.policy, clock=clock, governance=governance, release_guard=self.release_guard
         )
         self.journal = SQLiteOrganizationRepository(sessions, self.protection)
         self.catalog = OrganizationCatalog(self, runtime_version)
@@ -208,9 +219,136 @@ class OrganizationService:
             raise ProtectionDeniedError("Organization policy is unavailable or revoked.")
         return current
 
+    @staticmethod
+    def connection_digest(current: VerifiedOrganizationPolicy, connection: MetadataConnection) -> str:
+        return content_digest(
+            {
+                "connection": connection.model_dump(mode="json"),
+                "manifest": current.policy.manifest.content_hash,
+            }
+        )
+
+    def _rollout(
+        self,
+        snapshot: ExecutionSnapshot,
+        *,
+        created_at: float,
+        action: DataAction = DataAction.READ,
+        destination: DataDestination = DataDestination.WORKFLOW_STATE,
+        expected: str | None = None,
+    ) -> str | None:
+        permissions = [item for item in snapshot.granted_permissions if item.action.startswith("enterprise.")]
+        requirements = snapshot.capability.content.connection_requirements
+        if not permissions and not requirements:
+            return None
+        current = self._trusted()
+        if (
+            len(permissions) != 1
+            or permissions[0].action != "enterprise.read"
+            or snapshot.context.scope != current.policy.scope
+        ):
+            raise ProtectionDeniedError("Rollout requires one exact scoped enterprise READ permission.")
+        matches = [item for item in current.policy.connections if item.profile.id == permissions[0].resource]
+        if len(matches) != 1 or any(item.connection_ref != permissions[0].resource for item in requirements):
+            raise ProtectionDeniedError("Rollout connection does not match the frozen execution.")
+        connection = matches[0]
+        current.policy.validate_connection(connection)
+        _, governance_digest = self.protection.governance.policy()
+        return self.rollout.require(
+            scope=snapshot.context.scope,
+            organization_id=current.policy.organization_id,
+            connection_id=connection.profile.id,
+            organization_policy_digest=current.digest,
+            governance_policy_digest=governance_digest,
+            provider_manifest_digest=current.policy.manifest.content_hash,
+            connection_binding_digest=self.connection_digest(current, connection),
+            execution_created_at=created_at,
+            action=action,
+            destination=destination,
+            expected=expected,
+        )
+
+    def admit(self, snapshot: ExecutionSnapshot) -> str | None:
+        return self._rollout(snapshot, created_at=self.clock())
+
+    def authorize_connection(
+        self,
+        capability: CapabilitySnapshot,
+        context: InvocationContext,
+        permissions: tuple[Permission, ...],
+    ) -> None:
+        content = capability.content
+        if (
+            not isinstance(content.implementation, FunctionImplementation)
+            or content.implementation.implementation_id != "kusto.metadata.read"
+            or content.side_effect_profile.kind != "none"
+            or len(content.connection_requirements) != 1
+        ):
+            raise SecurityDenied("Rollout permits only the installed metadata-read Function.")
+        try:
+            self.admit(
+                ExecutionSnapshot(
+                    capability=capability,
+                    context=context,
+                    budget=ExecutionBudget(),
+                    capability_call_path=(
+                        CapabilityReference(
+                            capability_id=capability.capability_id, version=capability.number
+                        ),
+                    ),
+                    granted_permissions=permissions,
+                )
+            )
+        except ProtectionDeniedError:
+            raise SecurityDenied("Current enterprise rollout does not authorize this connection.") from None
+
+    def revalidate_execution(self, execution: Execution) -> None:
+        snapshot = execution.snapshot
+        if (
+            snapshot.enterprise_rollout_binding is None
+            and not snapshot.capability.content.connection_requirements
+            and not any(item.action.startswith("enterprise.") for item in snapshot.granted_permissions)
+        ):
+            return
+        try:
+            self._require_rollout(execution)
+        except ProtectionDeniedError:
+            raise SecurityDenied("Frozen enterprise rollout admission is no longer current.") from None
+
+    def _require_rollout(
+        self,
+        execution: Execution,
+        *,
+        action: DataAction = DataAction.READ,
+        destination: DataDestination = DataDestination.WORKFLOW_STATE,
+    ) -> None:
+        expected = execution.snapshot.enterprise_rollout_binding
+        if (
+            expected is None
+            or self._rollout(
+                execution.snapshot,
+                created_at=execution.created_at,
+                action=action,
+                destination=destination,
+                expected=expected,
+            )
+            != expected
+        ):
+            raise ProtectionDeniedError("Execution has no current frozen enterprise rollout admission.")
+
+    @contextmanager
+    def release_guard(self, binding: DataUseBinding) -> Iterator[None]:
+        lease = authentication_execution_lease.get()
+        if lease is None or lease.execution.id != binding.execution_id:
+            raise ProtectionDeniedError("Rollout release requires the current owned Execution.")
+        with self.rollout.release():
+            self._require_rollout(lease.execution, action=binding.action, destination=binding.destination)
+            yield
+
     async def _configuration(
         self, execution: Execution
     ) -> tuple[VerifiedOrganizationPolicy, MetadataConnection]:
+        self._require_rollout(execution)
         current = self._trusted()
         policy = current.policy
         lease = authentication_execution_lease.get()
@@ -330,12 +468,17 @@ class OrganizationService:
         request: TokenRequest,
         credential: AuthContext,
     ) -> KustoObservation:
+        lease = authentication_execution_lease.get()
+        if lease is None or lease.execution.id != request.execution_id:
+            credential.close()
+            raise ProtectionDeniedError("Metadata observation requires its owned Execution.")
         self._evidence = {
             key: value
             for key, value in self._evidence.items()
             if value.connection.profile.id != connection.profile.id
         }
         try:
+            self._require_rollout(lease.execution)
             observation = await self.client.observe(connection, request, credential)
         except KustoSourceDenied as error:
             if error.status == 403:
@@ -343,6 +486,7 @@ class OrganizationService:
             raise
         finally:
             credential.close()
+        self._require_rollout(lease.execution)
         if (
             self._trusted() != current
             or observation.observed_at + current.policy.metadata_max_age_seconds <= self.clock()
@@ -404,6 +548,7 @@ class OrganizationService:
             or binding.identities != (evidence.connection.authentication.identity,)
         ):
             raise ProtectionDeniedError("Organization policy lacks exact live metadata evidence.")
+        self._require_rollout(lease.execution, action=binding.action, destination=binding.destination)
         context.require_known(self.clock())
         identity = evidence.connection.authentication.identity
         label = next(label for label in current.policy.labels if label.id == evidence.connection.label_id)

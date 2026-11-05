@@ -10,6 +10,7 @@ import subprocess
 import sys
 import time
 import winreg
+from contextlib import contextmanager
 from pathlib import Path
 
 KEY = r"SOFTWARE\Shovel\WamTrust"
@@ -146,6 +147,76 @@ def require_current_installation(content: dict) -> None:
         or content["validUntil"] <= time.time()
     ):
         raise ValueError("Installed Host authority changed or expired.")
+
+
+@contextmanager
+def control_read_lease(content: dict):
+    require_current_installation(content)
+    path = Path(machine_state()["storeRoot"]) / "deployment.lock"
+    protected_ancestors(path)
+    protected(str(path))
+    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel.CreateFileW.argtypes = [
+        ctypes.c_wchar_p,
+        ctypes.c_uint32,
+        ctypes.c_uint32,
+        ctypes.c_void_p,
+        ctypes.c_uint32,
+        ctypes.c_uint32,
+        ctypes.c_void_p,
+    ]
+    kernel.CreateFileW.restype = ctypes.c_void_p
+    kernel.CloseHandle.argtypes = [ctypes.c_void_p]
+    kernel.CloseHandle.restype = ctypes.c_int
+    handle = kernel.CreateFileW(str(path), 0x80000000, 1, None, 3, 0x80, None)
+    if handle in (None, ctypes.c_void_p(-1).value):
+        raise OSError("Installed control read lease is unavailable.")
+    try:
+        require_current_installation(content)
+        yield
+    finally:
+        kernel.CloseHandle(handle)
+
+
+def rollout_material(content: dict):
+    from shovel.enterprise.rollout import RolloutMaterial, RolloutState
+
+    require_current_installation(content)
+    trust_key = r"SOFTWARE\Shovel\RolloutTrust"
+    try:
+        key = winreg.OpenKey(
+            winreg.HKEY_LOCAL_MACHINE,
+            trust_key,
+            access=winreg.KEY_READ | winreg.KEY_WOW64_64KEY,
+        )
+    except FileNotFoundError:
+        return None
+    with key:
+        protected("MACHINE\\" + trust_key, 4)
+        raw = winreg.QueryValueEx(key, "State")[0]
+        if not isinstance(raw, str) or len(raw) > 1024 * 1024:
+            raise ValueError("Invalid rollout machine state.")
+        state = RolloutState.model_validate(json.loads(raw, object_pairs_hook=unique))
+        if state.approval_digest is None or state.report_digest is None:
+            return None
+
+        def read(digest):
+            path = Path(machine_state()["storeRoot"]) / "policies" / (digest + ".json")
+            protected_ancestors(path)
+            protected(str(path))
+            if path.is_symlink() or path.is_junction():
+                raise ValueError("Rollout envelope reparse point.")
+            with path.open("rb") as stream:
+                data = stream.read(1024 * 1024 + 1)
+            if len(data) > 1024 * 1024 or hashlib.sha256(data).hexdigest() != digest:
+                raise ValueError("Rollout envelope integrity failure.")
+            return data
+
+        approval, report = read(state.approval_digest), read(state.report_digest)
+        if winreg.QueryValueEx(key, "State")[0] != raw:
+            raise ValueError("Rollout changed during loading.")
+    require_current_installation(content)
+    return RolloutMaterial(state, approval, report, content["_digest"])
 
 
 def load() -> dict:
@@ -288,6 +359,12 @@ def main() -> None:
         return anchor, envelope
 
     configure_organization_host(organization_policy)
+    from shovel.enterprise.rollout import configure_rollout_host
+
+    configure_rollout_host(
+        lambda: rollout_material(content),
+        lambda: control_read_lease(content),
+    )
     from shovel.cli import app
 
     sys.argv[:] = ["shovel", "run", "prd"]

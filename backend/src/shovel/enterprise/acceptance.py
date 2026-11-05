@@ -39,6 +39,12 @@ REQUIRED_TESTS: dict[Lane, dict[str, tuple[str, ...]]] = {
             "test_fixed_kusto_metadata_http_no_redirect_or_business_query",
             "test_signature_pins_expiry_duplicate_fields_and_rights_fail_closed",
         ),
+        "rollout_control": (
+            "test_runtime_gate_blocks_old_admission_before_credentials_and_io",
+            "test_runtime_pause_during_source_request_discards_response_and_closes_credential",
+            "test_runtime_revocation_after_durable_audit_denies_final_release",
+            "test_frozen_rollout_survives_reload_and_result_consumer_holds_control_lease",
+        ),
     },
     "windows_ipc": {
         "private_channel": ("test_real_private_pipes_reach_only_ephemeral_context",),
@@ -65,6 +71,10 @@ REQUIRED_TESTS: dict[Lane, dict[str, tuple[str, ...]]] = {
         "machine_anchor_acl": (
             "AclChecksRejectNullDaclUserOwnerWriteAndParentDeletion",
             "MachineStateRejectsLegacyDuplicateAndMalformedAnchors",
+        ),
+        "rollout_lifecycle": (
+            "RolloutRequiresSeparateApprovalEnableAndMonotonicGeneration",
+            "RolloutRejectsUntrustedExpiredAndWrongInstallationReceipts",
         ),
     },
     "installed_wheel": {

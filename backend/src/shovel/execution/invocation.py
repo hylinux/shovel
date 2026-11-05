@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from collections.abc import Callable
+
 from shovel.capability.domain import CapabilityReference, CapabilityScope
 from shovel.capability.registry import CapabilityRegistry
 from shovel.domain.identity import new_id
@@ -15,6 +17,7 @@ from shovel.execution.ports import ExecutionRepository
 from shovel.execution.validation import validate_data
 from shovel.runtime.errors import RuntimeFailure
 from shovel.runtime.requests import request_fingerprint
+from shovel.security.domain import SecurityDenied
 from shovel.security.services import SecurityGate
 
 
@@ -50,9 +53,16 @@ class InvocationService:
         repository: ExecutionRepository,
         *,
         security: SecurityGate | None = None,
+        admission: Callable[[ExecutionSnapshot], str | None] | None = None,
     ) -> None:
         self.registry, self.repository = registry, repository
         self.security = security or SecurityGate()
+        self.admission = admission
+
+    def _admit(self, snapshot: ExecutionSnapshot) -> ExecutionSnapshot:
+        if self.admission is None:
+            return snapshot
+        return snapshot.model_copy(update={"enterprise_rollout_binding": self.admission(snapshot)})
 
     async def find_request(self, scope: CapabilityScope, key: str) -> Execution | None:
         return await self.repository.find_request(scope, key)
@@ -108,7 +118,7 @@ class InvocationService:
             granted_permissions=granted,
         )
         return await self.repository.create(
-            snapshot,
+            self._admit(snapshot),
             dict(invocation.input),
             fingerprint,
             request_key=invocation.request_key,
@@ -127,6 +137,12 @@ class InvocationService:
         if previous is not None:
             return previous
         current = await self.repository.get(scope, parent.execution.id)
+        if (
+            self.admission is not None
+            and current.snapshot.enterprise_rollout_binding is not None
+            and self.admission(current.snapshot) != current.snapshot.enterprise_rollout_binding
+        ):
+            raise SecurityDenied("Parent enterprise rollout admission is no longer current.")
         reference = invocation.capability
         if any(
             item.capability_id == reference.capability_id for item in current.snapshot.capability_call_path
@@ -171,12 +187,14 @@ class InvocationService:
         if len(path) > budget.max_call_depth:
             raise RuntimeFailure("Execution call depth exceeded.", status=409)
         return await self.repository.create(
-            ExecutionSnapshot(
-                capability=capability,
-                context=context,
-                budget=budget,
-                capability_call_path=path,
-                granted_permissions=granted,
+            self._admit(
+                ExecutionSnapshot(
+                    capability=capability,
+                    context=context,
+                    budget=budget,
+                    capability_call_path=path,
+                    granted_permissions=granted,
+                )
             ),
             dict(invocation.input),
             fingerprint,

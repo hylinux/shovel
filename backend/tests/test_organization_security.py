@@ -55,7 +55,7 @@ from shovel.protection.domain import (
     ProtectionDeniedError,
     SourceBinding,
 )
-from shovel.security.services import AuthorizationService, PolicyEvaluator, SecurityGate
+from shovel.security.services import AuthorizationService, SecurityGate
 from test_capability_registry import SCOPE
 from test_capability_registry import catalog as catalog
 from test_enterprise_execution import FixturePermissions
@@ -428,15 +428,14 @@ async def metadata_flow(kernel, signer):
         governance=synthetic_governance(SCOPE, lambda: now[0])[0],
     )
     await service.refresh_policy()
+    from test_enterprise_rollout import install_rollout
+
+    rollout = install_rollout(service, signer)
     permission = Permission(action="enterprise.read", resource=record.profile.id)
     gate = SecurityGate(AuthorizationService(FixturePermissions(permission)))
 
-    class ReviewedMetadataGate(PolicyEvaluator):
-        def evaluate(self, content, risk, policy):
-            assert content.implementation.implementation_id == "kusto.metadata.read"
-            super().evaluate(content.model_copy(update={"connection_requirements": ()}), risk, policy)
-
-    gate.policies = ReviewedMetadataGate()
+    gate.connection_authorizer = service.authorize_connection
+    gate.execution_authorizer = service.revalidate_execution
     kernel.invocations.security = gate
     contract = FunctionContract(
         implementation_id="kusto.metadata.read",
@@ -490,6 +489,7 @@ async def metadata_flow(kernel, signer):
         authentication=authentication,
         connections=connections,
         errors=errors,
+        rollout=rollout,
     )
 
 
@@ -522,6 +522,9 @@ async def test_kusto_access_does_not_supply_missing_organization_content_rights(
     labels = (flow.document.labels[0].model_copy(update={"rights": rights}),)
     flow.holder[0] = signer(flow.document.model_copy(update={"revision": 2, "labels": labels}))
     await flow.service.refresh_policy()
+    from test_enterprise_rollout import install_rollout
+
+    install_rollout(flow.service, signer)
     execution = await flow.invoke()
     failed = await flow.kernel.engine.run(SCOPE, execution.id)
     assert failed.state == ExecutionState.FAILED and flow.frames == []

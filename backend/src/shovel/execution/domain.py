@@ -183,6 +183,7 @@ class ExecutionSnapshot(Value):
     budget: ExecutionBudget
     capability_call_path: tuple[CapabilityReference, ...]
     granted_permissions: tuple[Permission, ...] = ()
+    enterprise_rollout_binding: Digest | None = Field(default=None, exclude_if=lambda value: value is None)
 
     @model_validator(mode="after")
     def valid_call_path(self) -> ExecutionSnapshot:

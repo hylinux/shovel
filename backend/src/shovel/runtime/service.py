@@ -170,6 +170,9 @@ class Runtime:
         self.enterprise = OrganizationService(
             sessions, authentication, self.execution_engine, runtime_version=version("shovel")
         )
+        self.invocations.admission = self.enterprise.admit
+        security.connection_authorizer = self.enterprise.authorize_connection
+        security.execution_authorizer = self.enterprise.revalidate_execution
         self.platform = PlatformApplication(
             scope,
             self.execution_engine,

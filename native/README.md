@@ -399,3 +399,81 @@ Local state cannot defend against an administrator/OS restoring an entire old
 hive/disk snapshot; that requires an independently approved TPM/remote monotonic
 authority. Windows system DLLs/kernel and OS servicing remain trusted platform
 dependencies, not files claimed to be bundled or physically erased.
+
+## Live acceptance and controlled rollout
+
+The installed bootstrap now assembles `SignedLiveAcceptanceAuthority` and
+`RolloutGate`. Missing trust, missing receipts, expiry or any mismatch denies
+enterprise admission and release. `RolloutReviewer` remains review-only.
+There is no settings switch, Main Agent approval tool, automatic permission
+grant, or fallback to offline evidence.
+
+Two **different**, administrator-enrolled RSA/code-signing certificate pins
+are required: an independent live-measurement issuer and the organization
+approver. The existing pinned envelope format is used for both:
+
+- `shovel.enterprise.live-report.v1`: organization/revision, canonical plan
+  digest, ordered offline-evidence digests, observation/expiry and exactly
+  `acceptance.LIVE_CHECKS` measurements. Each measurement has its fixed check
+  ID, `environment: installed_live`, result and underlying receipt SHA-256.
+- `shovel.enterprise.rollout-approval.v1`: organization/revision,
+  issue/expiry, complete `RolloutPlan`, four clean matching offline receipts,
+  and SHA-256 of the **signed report envelope**, not just its payload.
+
+These are not templates for turning green contract tests into live acceptance.
+The independently trusted issuer must actually perform and retain the real
+installed WAM, source adapter, IPC, H2/H4, credential-containment and provenance
+measurements, including the association between measured installation and CI
+artifacts. `receipt_digest` refers to those retained measurements; Runtime
+verifies their issuer's signed attestation, not arbitrary supplied test output.
+It does not download raw confidential test output or rerun interactive login
+on each authorization. The organization separately approves the exact plan.
+Do not enroll an issuer that merely signs user-supplied booleans. This change
+does not supply real measurements, organization keys or a production H4 backend.
+
+Use the verified native binary. Initialization and mutations require an
+elevated administrator; these examples describe deployment, not commands run
+by the application or during offline validation:
+
+```powershell
+& $native rollout initialize "<organization-id>" "<approval-certificate-sha256>" "<independent-verifier-certificate-sha256>" --approve-rollout-trust
+& $native rollout preview "<signed-approval.json>" "<signed-live-report.json>"
+& $native rollout approve "<signed-approval.json>" "<signed-live-report.json>" <preview-generation> "<preview-approval-sha256>" "<preview-report-sha256>" --confirm
+& $native rollout show
+& $native rollout enable <current-generation> "<current-approval-sha256>" --confirm
+& $native rollout pause <current-generation> "<current-approval-sha256>" --confirm
+& $native rollout enable <new-generation> "<current-approval-sha256>" --confirm
+& $native rollout revoke <current-generation> "<current-approval-sha256>" --confirm
+```
+
+`preview` pins the bytes reviewed; approval checks both hashes and generation.
+Approval is **not** enablement. Native checks signature, purpose, validity and
+installation binding; Runtime additionally verifies the complete fixed live
+controls, plan/evidence hashes and current policy/connection bindings. Thus a
+native administrative transition is never a `production_ready` assertion.
+The separate administrator-owned, read-only-to-users HKLM
+`SOFTWARE\Shovel\RolloutTrust` has one atomic `State` value. Signed envelopes
+are copied into the existing protected installation policy store, not SQLite.
+Every transition increments generation; approvals require increasing revision;
+revoked envelope tombstones survive later approvals. There is no reset or
+un-revoke command. A new approved receipt/revision is needed after revocation.
+Lost responses require `show` and reconciliation, not blind command replay.
+
+The existing deployment lock serializes changes with final result release.
+Runtime holds a Windows read-only share lease through the synchronous protected
+consumer; a concurrent control writer fails explicitly rather than committing
+revocation in the middle of that release. Source requests are not held under
+that lock: pause/revoke cannot retract an already-sent request, but post-I/O
+rechecks discard its result. Admission freezes the exact approval/generation
+in the existing Execution snapshot. Dispatch, authentication/source access,
+READ/DISPLAY and final release recheck it. Pause/re-enable, upgrade, changed
+organization/governance/provider/connection, receipt expiry or restart cannot
+rebind an old Execution to a new approval.
+
+Only the exact metadata-read proposal can narrow the existing connection deny
+gate. Ordinary permission, risk, approval, identity/source and H4 gates remain
+mandatory; READ does not grant DISPLAY or any other outlet. This does not
+register arbitrary Function handlers or invent a production display adapter.
+The new rollout regression controls require regenerated release receipts.
+HKLM state is not a defense against administrator/whole-machine rollback;
+production H4 and its external recovery authority are still separate hard gates.

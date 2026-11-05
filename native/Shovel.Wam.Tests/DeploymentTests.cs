@@ -74,6 +74,8 @@ public sealed class DeploymentTests
             certificate = request.CreateSelfSigned(DateTimeOffset.UtcNow.AddMinutes(-1), DateTimeOffset.UtcNow.AddHours(1));
         }
         internal byte[] Sign(Installation policy)
+            => SignPayload(policy);
+        internal byte[] SignPayload(object policy)
         {
             var payload = JsonSerializer.SerializeToUtf8Bytes(policy, Installation.Options);
             return JsonSerializer.SerializeToUtf8Bytes(new
@@ -84,6 +86,82 @@ public sealed class DeploymentTests
             });
         }
         public void Dispose() { certificate.Dispose(); rsa.Dispose(); }
+    }
+
+    [TestMethod]
+    public void RolloutRequiresSeparateApprovalEnableAndMonotonicGeneration()
+    {
+        var state = new RolloutState
+        {
+            OrganizationId = "organization",
+            ApprovalSigner = new string('a', 64),
+            VerifierSigner = new string('b', 64),
+        };
+        Assert.ThrowsExactly<InvalidDataException>(() => state.Advance(1, "enable"));
+        var approved = state.Advance(1, "approve", new string('c', 64), new string('d', 64), 1);
+        Assert.AreEqual("approved", approved.Status);
+        Assert.ThrowsExactly<InvalidDataException>(() => approved.Advance(1, "enable"));
+        var enabled = approved.Advance(2, "enable", now: 1000);
+        var paused = enabled.Advance(3, "pause");
+        var resumed = paused.Advance(4, "enable", now: 1001);
+        Assert.AreEqual("enabled", resumed.Status);
+        Assert.AreEqual(5, resumed.Generation);
+        Assert.AreNotEqual(enabled.Generation, resumed.Generation);
+        var revoked = resumed.Advance(5, "revoke");
+        Assert.ThrowsExactly<InvalidDataException>(() => revoked.Advance(6, "enable"));
+        Assert.ThrowsExactly<InvalidDataException>(() =>
+            revoked.Advance(6, "approve", new string('c', 64), new string('d', 64), 2));
+        Assert.ThrowsExactly<InvalidDataException>(() =>
+            revoked.Advance(6, "approve", new string('e', 64), new string('f', 64), 1));
+        var next = revoked.Advance(6, "approve", new string('e', 64), new string('f', 64), 2);
+        Assert.IsTrue(next.Revoked.Contains(new string('c', 64)));
+        Assert.AreEqual("approved", next.Status);
+    }
+
+    [TestMethod]
+    public void RolloutRejectsUntrustedExpiredAndWrongInstallationReceipts()
+    {
+        using var approver = new Signer();
+        using var verifier = new Signer();
+        var state = new RolloutState
+        {
+            OrganizationId = "organization",
+            ApprovalSigner = approver.Pin,
+            VerifierSigner = verifier.Pin,
+        };
+        var installation = Initial(approver.Pin).Advance(1, new ActiveInstallation
+        {
+            Revision = 1,
+            SignerSha256 = approver.Pin,
+            EnvelopeSha256 = new string('a', 64),
+        });
+        var now = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
+        var report = verifier.SignPayload(new
+        {
+            purpose = "shovel.enterprise.live-report.v1",
+            organization_id = "organization",
+            revision = 1,
+            observed_at = now - 1,
+            expires_at = now + 60,
+        });
+        byte[] Approval(long expires, string digest) => approver.SignPayload(new
+        {
+            purpose = "shovel.enterprise.rollout-approval.v1",
+            organization_id = "organization",
+            revision = 1,
+            issued_at = now,
+            expires_at = expires,
+            report_digest = Installation.Hex(SHA256.HashData(report)),
+            plan = new { installation_digest = digest },
+        });
+        Assert.AreEqual(1, Rollout.Verify(state, Approval(now + 60, new string('a', 64)), report, installation));
+        Assert.ThrowsExactly<InvalidDataException>(() =>
+            Rollout.Verify(state, Approval(now - 1, new string('a', 64)), report, installation));
+        Assert.ThrowsExactly<InvalidDataException>(() =>
+            Rollout.Verify(state, Approval(now + 60, new string('b', 64)), report, installation));
+        Assert.ThrowsExactly<InvalidDataException>(() =>
+            Rollout.Verify(state with { VerifierSigner = approver.Pin },
+                Approval(now + 60, new string('a', 64)), report, installation));
     }
 
     [TestMethod]

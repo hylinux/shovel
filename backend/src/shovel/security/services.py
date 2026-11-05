@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from collections.abc import Callable
 from typing import Literal
 
 from shovel.capability.domain import (
@@ -146,6 +147,10 @@ class SecurityGate:
         self.risks = RiskEvaluator()
         self.policies = PolicyEvaluator()
         self.approvals = ApprovalResolver()
+        self.connection_authorizer: (
+            Callable[[CapabilitySnapshot, InvocationContext, tuple[Permission, ...]], None] | None
+        ) = None
+        self.execution_authorizer: Callable[[Execution], None] | None = None
 
     async def prepare(
         self,
@@ -162,7 +167,13 @@ class SecurityGate:
             parent_permissions=parent_permissions,
         )
         risk = self.risks.evaluate(capability.content)
-        self.policies.evaluate(capability.content, risk, policy)
+        if capability.content.connection_requirements and self.connection_authorizer is not None:
+            self.connection_authorizer(capability, context, permissions)
+            self.policies.evaluate(
+                capability.content.model_copy(update={"connection_requirements": ()}), risk, policy
+            )
+        else:
+            self.policies.evaluate(capability.content, risk, policy)
         approval = self.approvals.resolve(
             capability.content,
             risk,
@@ -181,6 +192,8 @@ class SecurityGate:
             context,
             frozen_permissions=execution.snapshot.granted_permissions,
         )
+        if self.execution_authorizer is not None:
+            self.execution_authorizer(execution)
         binding = {
             "execution_id": execution.id,
             "snapshot": execution.snapshot.model_dump(mode="json"),

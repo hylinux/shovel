@@ -270,3 +270,36 @@ def test_bootstrap_registry_read_is_machine_only_and_has_no_legacy_fallback(
         with pytest.raises(ValueError, match="inactive or revoked"):
             bootstrap.machine_state()
         state = saved
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Real Windows control-release handle.")
+def test_rollout_release_lease_blocks_control_writer_and_closes_on_consumer_failure(
+    tmp_path, monkeypatch, bootstrap
+):
+    content = {"_generation": 4, "_digest": "a" * 64, "validUntil": time.time() + 300}
+    state = {
+        "generation": 4,
+        "active": {"envelopeSha256": "a" * 64},
+        "storeRoot": str(tmp_path),
+    }
+    monkeypatch.setattr(bootstrap, "machine_state", lambda: state)
+    lock = tmp_path / "deployment.lock"
+    lock.write_bytes(b"")
+    with pytest.raises(RuntimeError, match="consumer failed"), bootstrap.control_read_lease(content):
+        assert lock.read_bytes() == b""
+        with pytest.raises(PermissionError):
+            lock.write_bytes(b"control change")
+        raise RuntimeError("consumer failed")
+    lock.write_bytes(b"control change")
+    assert lock.read_bytes() == b"control change"
+
+
+def test_rollout_bootstrap_does_not_fall_back_after_installation_revocation(monkeypatch, bootstrap):
+    content = {"_generation": 4, "_digest": "a" * 64, "validUntil": time.time() + 300}
+    monkeypatch.setattr(
+        bootstrap,
+        "machine_state",
+        lambda: {"generation": 5, "active": {"envelopeSha256": "a" * 64}},
+    )
+    with pytest.raises(ValueError, match="authority changed"):
+        bootstrap.rollout_material(content)

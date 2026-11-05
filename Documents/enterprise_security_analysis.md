@@ -1625,3 +1625,39 @@ Python/Windows IPC/native/installed-wheel 四 lane 证据均成功生成。工�
 全仓 Ruff、六个变更 Python 文件的格式检查、Mypy **233 source files**、
 workflow YAML/依赖/最小权限结构检查通过。CI 只改配置，未运行远端 pipeline 或实际
 GitHub attestation；真实 adapter、受信完整安装、组织/KMS 与生产开放仍未接受。
+
+## 28. 独立验收验证与 Runtime 开放门禁
+
+新增 `SignedLiveAcceptanceAuthority`，实际验证两份独立受信签名：验收机构发布的
+`live-report.v1` 测量收据与组织的 `rollout-approval.v1` 批准。组织管理员分别固定
+两个不同证书；验收报告必须覆盖所有固定 live controls，绑定 plan、四 lane
+干净证据、安装和制品，拒绝失败/遗漏、错误部署、旧 revision、签名篡改与过期。
+其信任基础是独立验收机构对真实测量的签名见证，不是 Runtime 自行把测试 JSON
+或用户声明升级为生产证明；测量原件由机构保留，Runtime 不拉取敏感原始输出。
+本轮未执行真实组织 WAM/Kusto/H4 验收，也未签发或安装生产批准。
+
+原生管理员命令提供 preview、approve、enable、pause、revoke 与 show。
+批准固定预览的两份 envelope hash 和 generation，启用另行确认；HKLM 原子状态、
+受保护 envelope、revision 高水位和永久撤销 tombstone 位于业务恢复集之外。
+并发/陈旧写者拒绝，丢响应需查询现状；不提供 reset、un-revoke 或聊天批准路径。
+这不宣称抵抗整机/HKLM 回滚，恢复集外 H4 authority 仍是独立必要条件。
+
+bootstrap 装配 verifier 和 `RolloutGate`，既有 `SecurityGate`、Invocation、来源
+观察与最终受保护释放接入当前状态。实际 Runtime 注册回调，而不依赖
+`RolloutReviewer` 的审查结论。确切 approval/generation 冻结在既有 Execution
+snapshot，旧 snapshot 不补授权，暂停后再启用和重启均不能复活旧 admission。
+个人 snapshot 新字段为空时不序列化，保留原有 binding/fingerprint 格式；
+没有增加第二个 Execution、Runtime、数据库或 worker。
+
+最终同步 consumer 持有 Windows 控制读租约，与原生启停/撤销写租约互斥。
+网络等待不占该租约，已经发出的请求不可撤回，但返回后的复查阻止结果释放。
+只有单连接 metadata-read 可条件通过原先的 connection deny；权限交集、Risk、
+Approval、来源、出口和 H4 检查全部保留，不写入或扩大权限。未安装独立验收
+机构、真实 H4 或生产 adapter/display 的环境继续关闭。详细契约和管理员操作见
+`native/README.md` 的 Live acceptance and controlled rollout。
+
+本地受影响回归 **489 passed**；最终到期竞态与授权顺序调整后，
+相关子集 **236 passed**（与主回归重叠，不相加）；原生 **41 passed**。
+Windows 实际文件共享租约测试通过，未修改真实 HKLM 或组织密钥。
+全仓 Ruff、变更 Python 格式检查、两份原生项目格式检查及默认/Win32
+Mypy **235 source files** 均通过；未运行新的远端 CI 或生成最终提交发布证明。

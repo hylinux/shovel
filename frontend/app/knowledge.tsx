@@ -58,11 +58,14 @@ function Chat({ sessionId, status, onActivity }: { sessionId: string; status?: S
     </div>}
     <Feedback error={history.error} retry={history.refresh} />
     {history.loading ? <p role="status">{t("Loading session…")}</p> : history.data?.items.length === 0 ? <Empty title={t("What would you like to find out?")}>{t("Ask a specific question about your indexed documents. Answers include source excerpts when available.")}</Empty> : history.data?.items.map((message) =>
-      <article className={`message ${message.role}`} key={message.id}><h3>{message.role === "user" ? t("You") : t("Shovel")}{message.state === "failed" && <span className="badge bad">{t("Failed")}</span>}</h3>
+      <article className={`message ${message.role}`} key={message.id}><MessageHeading user={message.role === "user"} failed={message.state === "failed"} />
         <p className="preserve">{message.content || (message.state === "failed" ? t("The model could not complete this response.") : "")}</p>
         {message.warnings?.map((warning, index) => <p className="warning" key={index}>{warning}</p>)}<Sources items={message.citations || []} collapsible />
         {message.memory_operation_id && <MemoryTaskStatus id={message.memory_operation_id} />}</article>)}
-    {action.busy && <div role="status" className="pending-answer"><p className="preserve">{pendingQuestion}</p>{action.text ? <p className="preserve">{action.text}</p> : <span>{t("Shovel is preparing an answer…")}</span>}{action.tool && <p className="muted">{t("Tool: ")}{action.tool}</p>}</div>}
+    {action.busy && <div role="status" className="pending-answer">
+      <article className="message user"><MessageHeading user /><p className="preserve">{pendingQuestion}</p></article>
+      <article className="message assistant"><MessageHeading user={false} />{action.text ? <p className="preserve">{action.text}</p> : <p className="muted">{t("Shovel is preparing an answer…")}</p>}{action.tool && <p className="muted">{t("Tool: ")}{action.tool}</p>}</article>
+    </div>}
   </div><form className="composer" onSubmit={submit}>
     {status && (!status.model_configured || !status.memory_configured) && <p className="warning">{t("Configure Chat and Memory in Settings before sending a message.")}</p>}
     <Feedback error={action.error} />
@@ -76,6 +79,17 @@ function Chat({ sessionId, status, onActivity }: { sessionId: string; status?: S
     <div className="composer-footer"><span className="muted" id="message-shortcuts">{t("Ctrl + Enter to send · Enter for a new line")}</span>
       <button className="primary" aria-keyshortcuts="Control+Enter" disabled={sendDisabled}>{action.busy ? t("Waiting for model…") : t("Send Message")}</button></div>
   </form></>;
+}
+
+function MessageHeading({ user, failed = false }: { user: boolean; failed?: boolean }) {
+  const { t } = useI18n();
+  return <h3 className="message-heading">
+    <span className="message-avatar" aria-hidden="true">{user
+      ? <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="8" r="3.5" /><path d="M5 21v-2a7 7 0 0 1 14 0v2" /></svg>
+      : t("S")}</span>
+    <span>{user ? t("You") : t("Shovel")}</span>
+    {failed && <span className="badge bad">{t("Failed")}</span>}
+  </h3>;
 }
 
 function memoryTaskPending(operation: Operation) {

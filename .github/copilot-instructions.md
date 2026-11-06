@@ -19,6 +19,8 @@ uv sync --locked --all-extras --dev
 uv run ruff check .
 uv run ruff format --check .
 uv run mypy backend\src
+# CI also checks packaging/evidence tools; its Windows lane adds --platform win32.
+uv run mypy backend\src scripts\enterprise_acceptance.py scripts\smoke_enterprise_wheel.py scripts\build_controlled_installation.py
 uv run pytest
 # One file or one test; --no-cov disables the default whole-package coverage report.
 uv run pytest backend\tests\test_chunker.py --no-cov
@@ -52,8 +54,10 @@ node --experimental-strip-types --test tests\request-recovery.test.mjs
 npm run build
 ```
 
-The isolated Windows WAM component lives under `native\`; it does not wire into
-the production Host. Run its .NET commands from `native\` to honor `global.json`:
+The Windows WAM component lives under `native\`, with standalone checks and a
+controlled-installed-Host-only bridge. Source checkouts have no installation
+trust and cannot use that bridge. Run its .NET commands from `native\` to honor
+the SDK pinned by `global.json`:
 
 ```powershell
 Set-Location native
@@ -82,9 +86,13 @@ Production asset resolution is `--frontend-dir`, `frontend_path`, packaged
 For a distributable wheel, build the frontend, copy the contents of
 `frontend\out` into `backend\src\shovel\static`, then run `uv build`.
 CI additionally installs the wheel into a separate environment and runs
-`scripts\smoke_wheel.py` with that environment's Python, not `uv run`, to verify
-bundled assets and real installed-package behavior. The full quality gates are
-in `.github\workflows\ci.yml`.
+`python -m scripts.smoke_enterprise_wheel --wheel <wheel-path> --output <receipt-path>`
+with that environment's Python, not `uv run`. This verifies the installed bytes
+against the wheel, invokes `scripts\smoke_wheel.py` for bundled assets/runtime,
+and checks synthetic enterprise contracts and default denial. CI also produces
+native/controlled-installation candidates and provenance; these are not
+organization-approved installations or live acceptance. The full quality gates
+are in `.github\workflows\ci.yml`.
 
 ## Architecture
 
@@ -155,6 +163,15 @@ in `.github\workflows\ci.yml`.
   `app\request-recovery.ts` persists uncertain mutation receipts. Development
   rewrites `/api/*` to FastAPI; production serves the export through
   `runtime\hosting.py`'s `mount_frontend` adapter.
+- Enterprise controls reuse the same Host and Execution engine.
+  `enterprise\organization_service.py` composes installed provider/source policy,
+  connection authorization, authentication, protected persistence and rollout
+  revalidation. `identity\native_wam.py` connects to `native\` only through the
+  trusted installed bootstrap/private IPC. `protection\` owns content lineage,
+  per-use/destination authorization, storage governance and legacy-sink
+  containment; `security\` retains ordinary permission/Risk/Approval checks.
+  `enterprise\rollout.py` verifies independently signed live evidence and
+  separate organization approval, then gates the exact frozen rollout.
 
 ## Repository-specific conventions
 
@@ -313,6 +330,24 @@ in `.github\workflows\ci.yml`.
 - Preserve the loopback-only, single-owner runtime boundary. For current
   behavior consult the root/frontend READMEs and CLI help; architecture design
   and roadmap documents also contain future plans.
+- Enterprise READ, DISPLAY, model submission, Memory, indexing, persistence and
+  export are distinct authorizations. Preserve protected lineage and
+  `protection\egress.py` containment across legacy sinks and child calls; a read
+  grant or human approval never authorizes unrelated downstream use.
+- Enterprise admission remains default-deny without current installed trust,
+  signed source policy, qualified adapters, concrete production `StorageAuthority`,
+  independent live evidence and organization approval. Ordinary SQLite/Zvec,
+  keyring availability or synthetic storage fixtures do not satisfy governance.
+  The controlled scope is exact `kusto.metadata.read`/`enterprise.read`, not
+  business-row access or model egress. Preserve pre/post-I/O revalidation and
+  frozen rollout generations; paused/revoked executions cannot rebind to later
+  approval. Enterprise rollout pause is separate from global Proactive pause.
+  Use protected native administrator controls, not TOML flags or source-checkout
+  bootstrap substitutes, for installation/rollout transitions.
 - Implemented platform boundaries and decisions are documented in
   `Documents\platform_architecture.md` and `Documents\platform_adrs.md`.
   `Documents\platform_validation.md` records integration evidence and limitations.
+  For enterprise work, also read `Documents\enterprise_security_analysis.md`,
+  `Documents\enterprise_provider_guide.md`, `Documents\enterprise_threat_model.md`
+  and `native\README.md`; offline checks and provenance do not establish
+  production/live acceptance.

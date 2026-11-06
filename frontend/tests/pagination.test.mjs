@@ -7,6 +7,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import ts from "typescript";
 import { isPage, pagePath, pagination } from "../app/pagination.ts";
 import { orderSearchResults } from "../app/search-results.ts";
+import { translate } from "../app/i18n.ts";
 
 const require = createRequire(import.meta.url);
 function load(name, overrides) {
@@ -112,48 +113,49 @@ test("polling retains the page, shrinking totals clamp it, and filters or sizes 
   assert.match(harness.render("/resources?q=notes").error, /invalid pagination metadata/);
 });
 
-test("all resource management lists render paged items and accessible count controls", () => {
+for (const locale of ["en", "zh-CN"]) test(`all resource management lists render paged items and accessible count controls (${locale})`, () => {
   const react = { ...require("react"), useState(initial) { return [initial, () => {}]; } };
   const api = {
     date: () => "Recently", segment: encodeURIComponent, active: () => true,
     useQuery: () => ({ data: { items: [] }, loading: false, refresh() {} }),
     useAction: () => ({ busy: false }),
   };
-  const ui = load("ui.tsx", { "./api": api });
+  const localization = { useI18n: () => ({ t: (message, values) => translate(message, locale, values), date: () => "Recently" }) };
+  const ui = load("ui.tsx", { "./api": api, "./locale-context": localization });
   const resourceItems = Array.from({ length: 10 }, (_, index) => ({
     id: `resource-${index}`, name: `Resource ${index}`, state: "active", connector_kind: "local_fs", config: {},
   }));
   const paged = (items) => ({ ...pagination(105, 2, 10), data: { items, total: 105 }, refresh() {}, setPage() {}, setPageSize() {} });
   const { Resources } = load("resources.tsx", {
-    react, "./api": api, "./ui": ui, "./profiles": {},
+    react, "./api": api, "./ui": ui, "./profiles": {}, "./locale-context": localization,
     "./pagination-query": { usePageQuery: () => paged(resourceItems) },
   });
   const resources = renderToStaticMarkup(createElement(Resources, { refresh() {} }));
   assert.equal((resources.match(/class="resource-row"/g) || []).length, 10);
-  assert.match(resources, /11–20 of 105 resources/);
-  assert.match(resources, /aria-label="Resources pagination"/);
+  assert.match(resources, locale === "en" ? /11–20 of 105 resources/ : /11–20 \/ 105 资源/);
+  assert.match(resources, locale === "en" ? /aria-label="Resources pagination"/ : /aria-label="资源分页"/);
 
   const jobs = resourceItems.map((item) => ({ ...item, scan_mode: "incremental", resource_id: item.id, state: "queued" }));
   const operations = resourceItems.map((item) => ({ ...item, kind: "resource.verify", state: "queued", result: {} }));
   const { Tasks } = load("tasks.tsx", {
-    react, "./api": api, "./ui": ui, "./request-recovery": {},
+    react, "./api": api, "./ui": ui, "./request-recovery": {}, "./locale-context": localization,
     "./pagination-query": { usePageQuery: (path) => paged(path === "/jobs" ? jobs : operations) },
   });
   const tasks = renderToStaticMarkup(createElement(Tasks, { resources: resourceItems }));
   assert.equal((tasks.match(/class="job-row"/g) || []).length, 10);
   assert.equal((tasks.match(/class="operation-row"/g) || []).length, 10);
-  assert.match(tasks, /aria-label="Scan jobs pagination"/);
-  assert.match(tasks, /aria-label="Operations pagination"/);
+  assert.match(tasks, locale === "en" ? /aria-label="Scan jobs pagination"/ : /aria-label="扫描作业分页"/);
+  assert.match(tasks, locale === "en" ? /aria-label="Operations pagination"/ : /aria-label="操作分页"/);
 
   const items = resourceItems.map((item, index) => ({ ...item, chunk_id: item.id, score: index, title: item.name }));
   let slot = 0;
   const states = [[], "auto", "", "30", "score_desc", { mode: "keyword", items: [...items, ...items, ...items] }, 2, 10];
   const { SearchDocuments } = load("search.tsx", {
     react: { ...react, useState(initial) { return [states[slot++] ?? initial, () => {}]; } },
-    "./api": api, "./ui": ui, "./pagination": { pagination }, "./search-results": { orderSearchResults },
+    "./api": api, "./ui": ui, "./pagination": { pagination }, "./search-results": { orderSearchResults }, "./locale-context": localization,
   });
   const search = renderToStaticMarkup(createElement(SearchDocuments, { resources: [] }));
   assert.equal((search.match(/class="source-number"/g) || []).length, 10);
   assert.match(search, /\[11\]/);
-  assert.match(search, /11–20 of 30 search results/);
+  assert.match(search, locale === "en" ? /11–20 of 30 search results/ : /11–20 \/ 30 搜索结果/);
 });

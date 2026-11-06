@@ -2,6 +2,15 @@
 
 A local-first, light workbench for local resources, background tasks, and knowledge chat. All runtime data comes from the backend; the interface contains no sample resources or generated answers.
 
+Choose **English** or **简体中文** using **Language / 语言** at the bottom of the
+sidebar. English is the default; your choice is saved in this browser and restored
+after reload. Switching languages preserves the current Session and unsaved
+editor drafts. Navigation, forms, confirmations, status labels and accessibility
+text are localized. Document excerpts, model replies, user-authored content,
+identifiers, configuration JSON and unrecognized backend diagnostics stay
+unchanged. If browser storage is unavailable, the selector reports that the
+preference cannot be saved.
+
 ## Development
 
 From `frontend\`:

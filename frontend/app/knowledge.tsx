@@ -1,18 +1,22 @@
 "use client";
 
+import { useI18n } from "./locale-context";
+
 import { useEffect, useRef, useState, type FormEvent } from "react";
 import { segment, useAction, useAgentAction, useQuery, type MessagePage, type Operation, type Status } from "./api";
 import { Empty, Feedback, Sources } from "./ui";
 import { chatTrace } from "./agent-client";
 
 export function Knowledge({ status, sessionId, onSessionChanged }: { status?: Status; sessionId: string; onSessionChanged: () => void }) {
-  return <section className="session-content" aria-label="Chat session">{sessionId
+  const { t } = useI18n();
+  return <section className="session-content" aria-label={t("Chat session")}>{sessionId
     ? <Chat key={sessionId} sessionId={sessionId} status={status} onActivity={onSessionChanged} />
-    : <Empty title="A session grounded in your documents">Choose New Session or open a session from the sidebar.</Empty>}
+    : <Empty title={t("A session grounded in your documents")}>{t("Choose New Session or open a session from the sidebar.")}</Empty>}
   </section>;
 }
 
 function Chat({ sessionId, status, onActivity }: { sessionId: string; status?: Status; onActivity: () => void }) {
+  const { t } = useI18n();
   const [before, setBefore] = useState<number>();
   const history = useQuery<MessagePage>(`/conversations/${segment(sessionId)}/messages?limit=100${before ? `&before=${before}` : ""}`);
   const [content, setContent] = useState("");
@@ -47,30 +51,30 @@ function Chat({ sessionId, status, onActivity }: { sessionId: string; status?: S
     history.refresh();
     chatTrace("chat.history.refresh.requested", { run_id: runId, conversation_id: sessionId });
   }
-  return <><div ref={messagesRef} className="messages" aria-label="Session messages" aria-busy={history.loading || action.busy}>
+  return <><div ref={messagesRef} className="messages" aria-label={t("Session messages")} aria-busy={history.loading || action.busy}>
     {(history.data?.next_before || before) && <div className="button-row">
-      {history.data?.next_before && <button disabled={action.busy} onClick={() => setBefore(history.data?.next_before ?? undefined)}>Older messages</button>}
-      {before && <button disabled={action.busy} onClick={() => setBefore(undefined)}>Latest messages</button>}
+      {history.data?.next_before && <button disabled={action.busy} onClick={() => setBefore(history.data?.next_before ?? undefined)}>{t("Older messages")}</button>}
+      {before && <button disabled={action.busy} onClick={() => setBefore(undefined)}>{t("Latest messages")}</button>}
     </div>}
     <Feedback error={history.error} retry={history.refresh} />
-    {history.loading ? <p role="status">Loading session…</p> : history.data?.items.length === 0 ? <Empty title="What would you like to find out?">Ask a specific question about your indexed documents. Answers include source excerpts when available.</Empty> : history.data?.items.map((message) =>
-      <article className={`message ${message.role}`} key={message.id}><h3>{message.role === "user" ? "You" : "Shovel"}{message.state === "failed" && <span className="badge bad">Failed</span>}</h3>
-        <p className="preserve">{message.content || (message.state === "failed" ? "The model could not complete this response." : "")}</p>
+    {history.loading ? <p role="status">{t("Loading session…")}</p> : history.data?.items.length === 0 ? <Empty title={t("What would you like to find out?")}>{t("Ask a specific question about your indexed documents. Answers include source excerpts when available.")}</Empty> : history.data?.items.map((message) =>
+      <article className={`message ${message.role}`} key={message.id}><h3>{message.role === "user" ? t("You") : t("Shovel")}{message.state === "failed" && <span className="badge bad">{t("Failed")}</span>}</h3>
+        <p className="preserve">{message.content || (message.state === "failed" ? t("The model could not complete this response.") : "")}</p>
         {message.warnings?.map((warning, index) => <p className="warning" key={index}>{warning}</p>)}<Sources items={message.citations || []} collapsible />
         {message.memory_operation_id && <MemoryTaskStatus id={message.memory_operation_id} />}</article>)}
-    {action.busy && <div role="status" className="pending-answer"><p className="preserve">{pendingQuestion}</p>{action.text ? <p className="preserve">{action.text}</p> : <span>Shovel is preparing an answer…</span>}{action.tool && <p className="muted">Tool: {action.tool}</p>}</div>}
+    {action.busy && <div role="status" className="pending-answer"><p className="preserve">{pendingQuestion}</p>{action.text ? <p className="preserve">{action.text}</p> : <span>{t("Shovel is preparing an answer…")}</span>}{action.tool && <p className="muted">{t("Tool: ")}{action.tool}</p>}</div>}
   </div><form className="composer" onSubmit={submit}>
-    {status && (!status.model_configured || !status.memory_configured) && <p className="warning">Configure Chat and Memory in Settings before sending a message.</p>}
+    {status && (!status.model_configured || !status.memory_configured) && <p className="warning">{t("Configure Chat and Memory in Settings before sending a message.")}</p>}
     <Feedback error={action.error} />
-    <label htmlFor="question">Message</label>
+    <label htmlFor="question">{t("Message")}</label>
     <textarea ref={questionRef} id="question" value={content} onChange={(event) => setContent(event.target.value)} onKeyDown={(event) => {
       if (event.key === "Enter" && event.ctrlKey && !event.nativeEvent.isComposing) {
         event.preventDefault();
         if (!event.repeat && !sendDisabled) event.currentTarget.form?.requestSubmit();
       }
-    }} placeholder="Ask about your documents…" rows={4} maxLength={16000} required disabled={action.busy} aria-describedby="message-shortcuts" />
-    <div className="composer-footer"><span className="muted" id="message-shortcuts">Ctrl + Enter to send · Enter for a new line</span>
-      <button className="primary" aria-keyshortcuts="Control+Enter" disabled={sendDisabled}>{action.busy ? "Waiting for model…" : "Send Message"}</button></div>
+    }} placeholder={t("Ask about your documents…")} rows={4} maxLength={16000} required disabled={action.busy} aria-describedby="message-shortcuts" />
+    <div className="composer-footer"><span className="muted" id="message-shortcuts">{t("Ctrl + Enter to send · Enter for a new line")}</span>
+      <button className="primary" aria-keyshortcuts="Control+Enter" disabled={sendDisabled}>{action.busy ? t("Waiting for model…") : t("Send Message")}</button></div>
   </form></>;
 }
 
@@ -79,6 +83,7 @@ function memoryTaskPending(operation: Operation) {
 }
 
 function MemoryTaskStatus({ id }: { id: string }) {
+  const { t } = useI18n();
   const task = useQuery<Operation>(`/operations/${segment(id)}`, 2000, memoryTaskPending);
   const action = useAction();
   const operation = task.data;
@@ -86,11 +91,11 @@ function MemoryTaskStatus({ id }: { id: string }) {
     if (await action.run<Operation>(`/operations/${segment(id)}/retry`, {})) task.refresh();
   }
   return <div className="memory-task">
-    <p className={operation?.state === "failed" ? "warning" : "muted"} role="status">Long-term Memory: {operation
-      ? memoryTaskPending(operation) ? "updating in background" : operation.state === "succeeded" ? operation.result.memories === 0 ? "no durable facts found" : "saved in SQLite" : operation.state
-      : "checking…"}</p>
-    {operation?.error && <p className="muted">{operation.error}</p>}
-    {operation?.state === "failed" && <button disabled={action.busy} onClick={retry}>{action.busy ? "Retrying…" : "Retry Memory update"}</button>}
+    <p className={operation?.state === "failed" ? "warning" : "muted"} role="status">{t("Long-term Memory: ")}{operation
+      ? memoryTaskPending(operation) ? t("updating in background") : operation.state === "succeeded" ? operation.result.memories === 0 ? t("no durable facts found") : t("saved in SQLite") : operation.state
+      : t("checking…")}</p>
+    {operation?.error && <p className="muted">{t(operation.error)}</p>}
+    {operation?.state === "failed" && <button disabled={action.busy} onClick={retry}>{action.busy ? t("Retrying…") : t("Retry Memory update")}</button>}
     <Feedback error={task.error || action.error} retry={task.error ? task.refresh : undefined} />
   </div>;
 }

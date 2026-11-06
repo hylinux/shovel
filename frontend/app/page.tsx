@@ -1,8 +1,10 @@
 "use client";
 
+import { LanguageSelector, useI18n } from "./locale-context";
+
 import { useEffect, useReducer, useRef, useState, type FormEvent, type KeyboardEvent, type PointerEvent } from "react";
 import Link from "next/link";
-import { api, date, errorText, segment, useAction, useQuery, useSessionHistory, type Items, type MessagePage, type Resource, type Session, type Status } from "./api";
+import { api, errorText, segment, useAction, useQuery, useSessionHistory, type Items, type MessagePage, type Resource, type Session, type Status } from "./api";
 import { resolveInitialSession, sessionCacheKey } from "./session-startup";
 import { Resources } from "./resources";
 import { Tasks } from "./tasks";
@@ -46,6 +48,7 @@ const descriptions: Record<View, string> = {
 };
 
 export default function Home() {
+  const { t } = useI18n();
   const [view, setView] = useState<View>("Chat");
   const [visited, setVisited] = useState<Set<string>>(new Set());
   const [sessionsOpen, setSessionsOpen] = useState(true);
@@ -130,33 +133,35 @@ export default function Home() {
   }
   return (
     <div className="workbench">
-      <a className="skip-link" href="#main">Skip to content</a>
+      <title>{t("Shovel — local knowledge workbench")}</title>
+      <a className="skip-link" href="#main">{t("Skip to content")}</a>
       <aside id="sidebar" className="sidebar">
-        <Link href="/" className="brand" aria-label="Shovel home"><span className="brand-mark" aria-hidden="true">S</span>Shovel</Link>
-        <p className="sidebar-caption">Personal Agent Platform</p>
-        <nav className="main-navigation" aria-label="Main navigation">
+        <Link href="/" className="brand" aria-label={t("Shovel home")}><span className="brand-mark" aria-hidden="true">{t("S")}</span>{t("Shovel")}</Link>
+        <p className="sidebar-caption">{t("Personal Agent Platform")}</p>
+        <nav className="main-navigation" aria-label={t("Main navigation")}>
           {navigationGroups.map((group) => <SidebarGroup key={group.id} group={group} view={view} onNavigate={navigate} />)}
           <div className="chat-navigation" data-expanded={showSessions}>
-            <button className="navigation-button" aria-current={view === "Chat" ? "page" : undefined} aria-expanded={showSessions} aria-controls="session-navigation" onClick={() => navigate("Chat")}><span aria-hidden="true" className="nav-symbol">◇</span><span className="navigation-label">Chat</span><span className="nav-chevron" aria-hidden="true">{showSessions ? "⌄" : "›"}</span></button>
-            <section id="session-navigation" className="session-navigation" aria-label="Chat sessions" hidden={!showSessions}>
+            <button className="navigation-button" aria-current={view === "Chat" ? "page" : undefined} aria-expanded={showSessions} aria-controls="session-navigation" onClick={() => navigate("Chat")}><span aria-hidden="true" className="nav-symbol">◇</span><span className="navigation-label">{t("Chat")}</span><span className="nav-chevron" aria-hidden="true">{showSessions ? "⌄" : "›"}</span></button>
+            <section id="session-navigation" className="session-navigation" aria-label={t("Chat sessions")} hidden={!showSessions}>
               <SessionNavigation selected={selectedSession} active={view === "Chat"} initializing={creatingSession} revision={sessionRevision} onSelect={selectSession} onDeleted={deleteSelectedSession} />
             </section>
           </div>
         </nav>
         <div className="sidebar-bottom">
-          <nav className="settings-navigation" aria-label="Settings navigation"><button aria-current={view === "Settings" ? "page" : undefined} onClick={() => navigate("Settings")}><span className="nav-symbol" aria-hidden="true">⚙</span>Settings</button></nav>
-          <div className="sidebar-footer"><span className={`connection-dot ${status.data && !status.error ? "connected" : ""}`} />{status.data && !status.error ? "Local runtime connected" : status.loading ? "Connecting to runtime…" : "Runtime unavailable"}<p>Your files. Your model choices.</p></div>
+          <nav className="settings-navigation" aria-label={t("Settings navigation")}><button aria-current={view === "Settings" ? "page" : undefined} onClick={() => navigate("Settings")}><span className="nav-symbol" aria-hidden="true">⚙</span>{t("Settings")}</button></nav>
+          <LanguageSelector />
+          <div className="sidebar-footer"><span className={`connection-dot ${status.data && !status.error ? "connected" : ""}`} />{status.data && !status.error ? t("Local runtime connected") : status.loading ? t("Connecting to runtime…") : t("Runtime unavailable")}<p>{t("Your files. Your model choices.")}</p></div>
         </div>
         <SidebarResizeHandle />
       </aside>
       <main id="main" className="main" tabIndex={-1}>
-        <header className="page-heading"><div><h1>{view}</h1><p>{descriptions[view]}</p></div><span className="local-label">Local-first runtime</span></header>
+        <header className="page-heading"><div><h1>{t(view)}</h1><p>{t(descriptions[view])}</p></div><span className="local-label">{t("Local-first runtime")}</span></header>
         <Feedback error={status.error} retry={status.refresh} />
         {resourcesNeeded && <Feedback error={resources.error} retry={resources.refresh} />}
         {view === "Resources" && <Resources status={status.data} refresh={resources.refresh} />}
         {view === "Background tasks" && <Tasks resources={resources.data?.items || []} />}
         {view === "Search Documents" && <SearchDocuments resources={resources.data?.items || []} status={status.data} />}
-        {view === "Chat" && <><Feedback error={sessionError} retry={retryInitialSession} />{creatingSession && !selectedSession ? <p role="status">Opening session…</p> : <Knowledge status={status.data} sessionId={selectedSession} onSessionChanged={refreshSessions} />}</>}
+        {view === "Chat" && <><Feedback error={sessionError} retry={retryInitialSession} />{creatingSession && !selectedSession ? <p role="status">{t("Opening session…")}</p> : <Knowledge status={status.data} sessionId={selectedSession} onSessionChanged={refreshSessions} />}</>}
         {view === "Settings" && <Settings status={status.data} />}
         {platformViews.filter((item) => visited.has(item)).map((item) => <div key={item} className="platform-view" hidden={view !== item}>
           {item === "Proactive Services" && <ProactiveServices active={view === item} />}
@@ -165,13 +170,14 @@ export default function Home() {
           {item === "Skills" && <CapabilityLibrary kind="skill" active={view === item} />}
           {item === "Workflows" && <CapabilityLibrary kind="workflow" active={view === item} />}
         </div>)}
-        <footer className="page-footer">Shovel · Local documents, connected knowledge</footer>
+        <footer className="page-footer">{t("Shovel · Local documents, connected knowledge")}</footer>
       </main>
     </div>
   );
 }
 
 function SidebarResizeHandle() {
+  const { t } = useI18n();
   const handle = useRef<HTMLDivElement>(null);
   const drag = useRef<{ pointerId: number; x: number; width: number } | null>(null);
   const [resizing, setResizing] = useState(false);
@@ -224,22 +230,24 @@ function SidebarResizeHandle() {
     if (event.key === "Enter") reset();
     else resize(event.key === "Home" ? 200 : event.key === "End" ? maximumWidth() : width + (event.key === "ArrowRight" ? 10 : -10));
   }
-  return <div ref={handle} className="sidebar-resizer" role="separator" tabIndex={0} aria-label="Resize sidebar" aria-controls="sidebar" aria-orientation="vertical" aria-valuemin={200} aria-valuemax={dimensions.maximum} aria-valuenow={dimensions.width} data-resizing={resizing}
-    title="Drag to resize. Arrow keys adjust; double-click or Enter resets."
+  return <div ref={handle} className="sidebar-resizer" role="separator" tabIndex={0} aria-label={t("Resize sidebar")} aria-controls="sidebar" aria-orientation="vertical" aria-valuemin={200} aria-valuemax={dimensions.maximum} aria-valuenow={dimensions.width} data-resizing={resizing}
+    title={t("Drag to resize. Arrow keys adjust; double-click or Enter resets.")}
     onPointerDown={start} onPointerMove={move} onPointerUp={finish} onPointerCancel={finish} onLostPointerCapture={finish} onDoubleClick={reset} onKeyDown={keyDown} />;
 }
 
 function SidebarGroup({ group, view, onNavigate }: { group: typeof navigationGroups[number]; view: View; onNavigate: (view: View) => void }) {
+  const { t } = useI18n();
   const [open, setOpen] = useState(false);
   return <div className="navigation-group" data-active={group.items.some((item) => item.view === view)}>
-    <button className="navigation-button navigation-group-toggle" aria-expanded={open} aria-controls={group.id} onClick={() => setOpen((current) => !current)}><span className="nav-symbol" aria-hidden="true">{group.symbol}</span><span className="navigation-label">{group.label}</span><span className="nav-chevron" aria-hidden="true">{open ? "⌄" : "›"}</span></button>
-    <div id={group.id} className="navigation-children" role="group" aria-label={`${group.label} pages`} hidden={!open}>
-      {group.items.map((item) => <button className="navigation-button" key={item.view} aria-current={view === item.view ? "page" : undefined} onClick={() => onNavigate(item.view)}><span className="nav-symbol" aria-hidden="true">{item.symbol}</span><span className="navigation-label">{item.view}</span></button>)}
+    <button className="navigation-button navigation-group-toggle" aria-expanded={open} aria-controls={group.id} onClick={() => setOpen((current) => !current)}><span className="nav-symbol" aria-hidden="true">{group.symbol}</span><span className="navigation-label">{t(group.label)}</span><span className="nav-chevron" aria-hidden="true">{open ? "⌄" : "›"}</span></button>
+    <div id={group.id} className="navigation-children" role="group" aria-label={t("{p0} pages", { p0: t(group.label) })} hidden={!open}>
+      {group.items.map((item) => <button className="navigation-button" key={item.view} aria-current={view === item.view ? "page" : undefined} onClick={() => onNavigate(item.view)}><span className="nav-symbol" aria-hidden="true">{item.symbol}</span><span className="navigation-label">{t(item.view)}</span></button>)}
     </div>
   </div>;
 }
 
 function SessionNavigation({ selected, active, initializing, revision, onSelect, onDeleted }: { selected: string; active: boolean; initializing: boolean; revision: number; onSelect: (identifier: string) => void; onDeleted: () => void }) {
+  const { t, date } = useI18n();
   const history = useSessionHistory(revision);
   const action = useAction();
   async function create() {
@@ -247,25 +255,26 @@ function SessionNavigation({ selected, active, initializing, revision, onSelect,
     if (session) { history.refresh(); onSelect(session.id); }
   }
   return <>
-    <button className="new-session" disabled={action.busy || initializing} onClick={create}><span aria-hidden="true">+</span>{action.busy ? "Creating…" : initializing ? "Opening…" : "New Session"}</button>
+    <button className="new-session" disabled={action.busy || initializing} onClick={create}><span aria-hidden="true">+</span>{action.busy ? t("Creating…") : initializing ? t("Opening…") : t("New Session")}</button>
     <Feedback error={action.error} />
-    <div className="session-history" role="region" aria-label="Session history" tabIndex={0} aria-busy={history.loading}>
+    <div className="session-history" role="region" aria-label={t("Session history")} tabIndex={0} aria-busy={history.loading}>
       <Feedback error={history.error} retry={history.refresh} />
-      {history.loading && <p className="muted" role="status">Loading sessions…</p>}
-      {!history.loading && !history.error && history.data.length === 0 && <p className="muted">No sessions yet.</p>}
+      {history.loading && <p className="muted" role="status">{t("Loading sessions…")}</p>}
+      {!history.loading && !history.error && history.data.length === 0 && <p className="muted">{t("No sessions yet.")}</p>}
       <ul className="session-items">{history.data.map((session) => <li key={session.id}>
-        <button className="session-button" aria-current={active && selected === session.id ? "true" : undefined} onClick={() => onSelect(session.id)} title={session.title || "Untitled session"}>
+        <button className="session-button" aria-current={active && selected === session.id ? "true" : undefined} onClick={() => onSelect(session.id)} title={session.title || t("Untitled session")}>
           <span className="session-marker" aria-hidden="true" />
-          <span className="session-copy"><span className="session-title">{session.title || "Untitled session"}</span><span className="session-time" title={date(session.updated_at)}>{date(session.updated_at)}</span></span>
+          <span className="session-copy"><span className="session-title">{session.title || t("Untitled session")}</span><span className="session-time" title={date(session.updated_at)}>{date(session.updated_at)}</span></span>
         </button>
         {selected === session.id && <SessionMaintenance identifier={session.id} refresh={history.refresh} deleted={onDeleted} />}
       </li>)}</ul>
-      {history.hasMore && <button className="load-sessions" disabled={history.loading} onClick={history.loadMore}>Load more sessions</button>}
+      {history.hasMore && <button className="load-sessions" disabled={history.loading} onClick={history.loadMore}>{t("Load more sessions")}</button>}
     </div>
   </>;
 }
 
 function SessionMaintenance({ identifier, refresh, deleted }: { identifier: string; refresh: () => void; deleted: () => void }) {
+  const { t } = useI18n();
   const action = useAction();
   const [title, setTitle] = useState("");
   const [confirm, setConfirm] = useState(false);
@@ -276,11 +285,11 @@ function SessionMaintenance({ identifier, refresh, deleted }: { identifier: stri
   async function remove() {
     if (await action.run(`/conversations/${segment(identifier)}`, undefined, "DELETE")) deleted();
   }
-  return <details className="session-actions"><summary>Manage session</summary>
-    <form onSubmit={rename}><label>New title<input required maxLength={200} value={title} onChange={(event) => setTitle(event.target.value)} disabled={action.busy} /></label><button disabled={action.busy}>Rename</button></form>
-    <button disabled={action.busy} onClick={() => setConfirm(true)}>Delete session…</button>
-    {confirm && <div role="alert" className="confirmation"><p>Delete this session, its messages and short-term Memory? Long-term Memory is kept.</p>
-      <button disabled={action.busy} onClick={remove}>Confirm deletion</button><button onClick={() => setConfirm(false)}>Keep session</button></div>}
+  return <details className="session-actions"><summary>{t("Manage session")}</summary>
+    <form onSubmit={rename}><label>{t("New title")}<input required maxLength={200} value={title} onChange={(event) => setTitle(event.target.value)} disabled={action.busy} /></label><button disabled={action.busy}>{t("Rename")}</button></form>
+    <button disabled={action.busy} onClick={() => setConfirm(true)}>{t("Delete session…")}</button>
+    {confirm && <div role="alert" className="confirmation"><p>{t("Delete this session, its messages and short-term Memory? Long-term Memory is kept.")}</p>
+      <button disabled={action.busy} onClick={remove}>{t("Confirm deletion")}</button><button onClick={() => setConfirm(false)}>{t("Keep session")}</button></div>}
     <Feedback error={action.error} notice={action.notice} />
   </details>;
 }

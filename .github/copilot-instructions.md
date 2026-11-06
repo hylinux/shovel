@@ -184,6 +184,16 @@ are in `.github\workflows\ci.yml`.
   server actions or production Next.js routes.
 - Use **Session**, not Conversation, in frontend UI text and types. Preserve
   `/conversations` REST paths and `conversation_id` wire fields for compatibility.
+- Frontend UI uses `useI18n()` from `app\locale-context.tsx` with English keys
+  and Chinese translations in `app\i18n.ts`. Use its `date()` helper for localized
+  timestamps. Localize presentation only: preserve wire values, form identities,
+  configuration JSON, document excerpts and user/model content. Language selection
+  lives in Settings; switching languages must retain the current Session and
+  mounted editor drafts.
+- Keep Tailwind directives in `app\tailwind.css` and handwritten layout rules in
+  `app\globals.css`, imported in that order by `app\layout.tsx`. Layout rules must
+  remain free of Tailwind directives so incremental updates bypass the loader's
+  cached compiler. `frontend\tests\styles.test.mjs` covers this freshness boundary.
 - REST routes use `/api/v1`; collections return `{"items": [...]}`. Durable
   resource/scan/cleanup and Memory create/update/rebuild mutations return HTTP 202
   plus an Operation, not the completed resource. Preserve `Idempotency-Key` across lost responses and
@@ -275,6 +285,11 @@ are in `.github\workflows\ci.yml`.
   waiting for a child model. Remote providers are excluded; query embeddings
   remain independently parallel. Background extraction waits for foreground
   idle, but already-running inference is not preempted.
+- Legacy scans are scheduled by `runtime\hosting.py`'s `RuntimeWorker` using
+  `performance.max_concurrent_scans` (default 5, range 1-64). Different resources
+  can scan concurrently, but scans of the same resource remain serialized.
+  Non-scan Operations are barriers: drain active scans before dispatching them.
+  Preserve both resource exclusion and barriers when changing worker scheduling.
 - Connector configuration is persisted; capabilities and implementations live
   in `services\connector_registry.py`. Connectors implement the Protocol and
   exchange plain data, without database sessions or ORM objects.

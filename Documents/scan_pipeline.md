@@ -19,6 +19,13 @@ Operation 参数, 立刻返回 202。后台服务复用该 Job ID 执行, 保存
 重放同一 Job 时会清除该 Job 上次尝试留下的观察标记, 重新建立本轮发现集合;
 否则两次尝试之间被删除的文件会因旧标记仍等于 Job ID 而漏掉墓碑对账。
 
+`RuntimeWorker` 在同一 Host 中按 `[performance].max_concurrent_scans`
+调度扫描, 默认 5、范围 1-64。不同资源可以并发; 同一资源的所有 Profile/Job
+仍串行。非扫描 Operation 是屏障, 先等待正在执行的扫描结束再运行。
+这限制的是并行 Job 数, 不是单个 Job 内的文档并发或 embedding batch size。
+设置为 1 可恢复串行扫描; 环境变量为
+`SHOVEL_PERFORMANCE__MAX_CONCURRENT_SCANS`, 修改后重启 Host。
+
 Web 和 `shovel scan run/cleanup` 使用同一执行链。只读的 list/show 直接
 查 SQLite。运行 Host 时 CLI 走本机 REST, 离线时使用短生命周期 Host。
 `--no-embed` 仍写入可关键词检索的块, 不打开 Zvec; 后续普通向量扫描补齐
@@ -155,12 +162,20 @@ token 化是绑定模型的。用 token 做预算, 换一次 embedding 模型就
 ## 4. 向量化
 
 `Embedder` 协议只有 `embed()` / `model_version` / `dimension` / `aclose`。
-实现有两个: `HttpEmbedder` (OpenAI 兼容端点) 与 `NullEmbedder`。
+实现保留 `HttpEmbedder` 与 `NullEmbedder` 两个适配器名字。
+`HttpEmbedder` 底层使用 Microsoft Agent Framework (MAF) 的
+`OpenAIEmbeddingClient` (Azure/OpenAI/兼容服务) 和
+`OllamaEmbeddingClient` (原生 `/api/embed`)。
+SDK 自动重试关闭; 批量、输入截断、受限重试及响应校验由 Shovel 负责。
+Azure 的 `api_key` 留空时使用自动续期的 Azure CLI 认证, 非空时使用 API Key。
+知识与 Memory 共用这套适配实现, 但配置、维度和索引仍独立。
+配置示例见 [Azure OpenAI 配置](azure_openai_configuration.md)
+和 [README 的 embedding 说明](../README.md#framework-embedding-providers)。
 
 ### `--no-embed` 不是调试开关
 
-embedding 是整条链路上**唯一**需要外部服务的一步。没有它, "我先把本地笔记
-索引起来看看"就变成一件必须先注册账号、先填 API Key 的事。
+embedding 是可选的模型服务调用。没有配置向量模型时, 仍可以先索引本地笔记,
+不需要先注册远端模型账号或填写 API Key。
 
 关掉之后 chunk 照常写进 SQLite, 停在 `vector_state=pending`, 文档停在
 `pipe_state=chunked`; 不提前确认 `indexed_hash`。等 embedding 配好了再运行
@@ -170,11 +185,17 @@ embedding 是整条链路上**唯一**需要外部服务的一步。没有它, "
 
 OpenAI 的 embedding 接口**不保证**返回顺序与请求顺序一致。不排序的话不会报错,
 只会让 A 的文本配上 B 的向量 —— 一个纯静默、只能靠"检索结果莫名其妙"发现的错误。
+当前 MAF 客户端链路负责按 `index` 返回对应向量;
+`test_embedder.py::test_openai_response_is_reordered_by_index` 保留这一回归检查。
 
-### 期望维度在装配时校验
+### 配置维度与实际输出分别校验
 
-`build_embedder(..., expected_dimension=settings.zvec.dim)`。两边不一致的后果
-同样是延迟暴露的: 向量写进去了, 但检索永远不对。宁可在开始扫描前就炸。
+知识向量使用 `build_embedder(..., expected_dimension=settings.zvec.dim)`。
+显式设置的 `dimensions` 必须先与目标索引维度一致; 每批响应还会检查向量数量、
+每个向量的实际维度及有限数值, 不把首次成功当作后续响应都有效的证明。
+`dimensions` 只传给支持该参数的 OpenAI 兼容 embedding 服务,
+当前 Ollama 客户端会拒绝它。未设置时保留模型默认输出和既有身份指纹;
+设置或改变维度仍须重新生成对应向量, 不能直接复用旧索引内容。
 
 ---
 
@@ -385,17 +406,19 @@ Zvec collection 和异步 MAF 提取/摘要客户端，不与知识向量库共�
 
 ---
 
-## 10. 本轮没做的事
+## 10. 当前边界与验证
 
 - **OCR。** 扫描件 PDF 目前明确报告无可用正文，不会生成成功索引。
-- **真实 embedding 端点从未接触过。** 没有 API Key, 目前只有 `MockTransport`
-  层面的验证。协议层是对的, 但真实端点的错误码、限流行为都没试过。
-- **并发。** 目前一篇一篇处理。IO 等待是主要成本, 加并发有收益, 但会让
-  "单篇失败不中断整轮"和事件日志的顺序都变复杂, 留到有实测数据之后再说。
+- **端点验证。** 默认回归测试使用 `MockTransport` 等离线夹具,
+  不需要模型凭据。`test_knowledge_baseline.py` 的真实模型基线需要显式设置
+  `SHOVEL_RUN_LIVE_TESTS=1` 和 `SHOVEL_LIVE_CONFIG`; 它会调用配置的外部服务,
+  可能产生费用。离线通过不等于特定真实部署已完成验证。
+- **单个 Job 内的文档并发。** 当前仍逐篇处理文档; 这与 Host 已支持的
+  跨资源 Job 并发是两个层级, 不能把 Job 容量当成文档级并行度。
 - **重跑 pending。** `--no-embed` 留下的 `vector_state=pending` 目前只能靠
   普通扫描重读、重切并补齐, 还没有“不读源文件、只补向量”的专用入口。
-- **并行扫描写入。** Host 队列当前串行消费所有扫描、资源变更和清理,
-  并用 OS 锁阻止第二个 Runtime 写入相同数据库/向量目录。尚未实现多工作者
-  扫描租约; 直接调用底层 Service 的外部程序也必须遵守单写者约束。
+- **跨进程扫描写入。** 同一 Host 可跨资源并发扫描, 原生 Zvec I/O 仍受互斥保护;
+  OS 锁阻止第二个 Runtime 写入相同数据库/向量目录。尚未实现多进程扫描租约;
+  直接调用底层 Service 的外部程序也必须遵守同一 Runtime 所有者约束。
 - **向量维度迁移。** 模型版本变化会触发重处理, 但不同维度仍要求先准备匹配的
   collection; `--force` 不会销毁或改造已有 collection。

@@ -5098,11 +5098,16 @@ SQLite 与 Zvec 没有一个跨库原子事务，因此不能可靠地先写事�
 这就是“权威事实及时一致、派生索引最终一致”的含义。</p>
 <h2 id="15-索引版本-重建与切换">15. 索引版本、重建与切换 </h2>
 <h3 id="151-model_version">15.1 model_version </h3>
-<p>共享 HTTP Embedder 的版本标识包含：</p>
+<p>知识与 Memory 共用的 MAF embedding 适配器 <code>HttpEmbedder</code> 使用以下版本标识；<br>
+两者的配置与索引仍独立：</p>
 <pre data-role="codeBlock" data-info="text" class="language-text text"><code>provider:model@SHA256(
   endpoint、api_version、revision、预期 dimension、max_input_chars
 )[:16]
-</code></pre><p>不同 endpoint、维度或配置修订不能假定处于同一个向量空间。<br>
+</code></pre><p>若显式配置 <code>dimensions</code>，该字段也加入上述指纹；省略时不加入，保留既有身份。<br>
+<code>[memory.embedder].dimensions</code> 传给支持缩短输出的服务，必须等于 <code>memory.dim</code>；<br>
+当前 Ollama 客户端不支持该参数并会拒绝配置。改变输出维度后须重新生成向量，<br>
+不能仅因新旧模型都能输出同一维度就复用旧向量。</p>
+<p>不同 endpoint、维度或配置修订不能假定处于同一个向量空间。<br>
 如果服务端同名模型悄悄换权重、客户端配置却不变，系统无法自动知道；<br>
 应更新 embedding <code>revision</code> 并按新身份重建。</p>
 <h3 id="152-zvec-中保存什么">15.2 Zvec 中保存什么 </h3>

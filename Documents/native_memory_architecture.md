@@ -790,13 +790,19 @@ SQLite 与 Zvec 没有一个跨库原子事务，因此不能可靠地先写事�
 
 ### 15.1 model_version
 
-共享 HTTP Embedder 的版本标识包含：
+知识与 Memory 共用的 MAF embedding 适配器 `HttpEmbedder` 使用以下版本标识；
+两者的配置与索引仍独立：
 
 ```text
 provider:model@SHA256(
   endpoint、api_version、revision、预期 dimension、max_input_chars
 )[:16]
 ```
+
+若显式配置 `dimensions`，该字段也加入上述指纹；省略时不加入，保留既有身份。
+`[memory.embedder].dimensions` 传给支持缩短输出的服务，必须等于 `memory.dim`；
+当前 Ollama 客户端不支持该参数并会拒绝配置。改变输出维度后须重新生成向量，
+不能仅因新旧模型都能输出同一维度就复用旧向量。
 
 不同 endpoint、维度或配置修订不能假定处于同一个向量空间。
 如果服务端同名模型悄悄换权重、客户端配置却不变，系统无法自动知道；

@@ -10,9 +10,13 @@
 
 ## Host 与 REST 入口
 
-`runtime/hosting.py` 将应用资源交给 Generic Host 管理, `RuntimeWorker`
-串行消费 SQLite 中的 `Operation`。Web 与 CLI 的新增、验证、更新、暂停、
-恢复、吊销、删除都经过同一队列, 不在 HTTP 请求中直接扫描文件。
+`runtime\hosting.py` 将应用资源交给 Generic Host 管理, `RuntimeWorker`
+消费 SQLite 中的持久 `Operation`。扫描可以跨资源并发, 容量由
+`performance.max_concurrent_scans` 控制, 默认 5、范围 1-64;
+同一资源的所有 Profile/Job 仍串行。非扫描操作是队列屏障,
+等待已启动的扫描结束后再执行, 避免资源变更或清理与扫描互相覆盖。
+Web 与 CLI 的新增、验证、更新、暂停、恢复、吊销、删除都经过同一队列,
+不在 HTTP 请求中直接扫描文件。
 创建支持可选的首次扫描; 父操作与扫描操作分别保留结果, 扫描 Job ID
 在提交事务中生成, 重启不会再建一份作业。
 

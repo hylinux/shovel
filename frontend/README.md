@@ -56,16 +56,31 @@ This writes a static application to `frontend\out`. Serve those files from the b
 ## Workflows
 
 The sidebar has four groups in order: **Resource Management** (Resources,
-Background tasks, Search Documents), **Services** (Proactive Services, Approval
-Center, Activity), **Development** (Skills, Workflows), and **Chat** (New Session
+Background tasks, Search Documents), **Development** (Skills, Workflows),
+**Services** (Proactive Services, Approval Center, Activity), and **Chat** (New Session
 and session history). The first three groups are collapsed initially and expand
-independently; Chat stays expanded by default. Settings remains at the bottom.
+independently; Chat stays expanded by default. Runtime connection status appears
+beside **Personal Agent Platform** below the Shovel logo; Settings remains at the
+bottom, and language selection lives only in **Settings → Language**.
+
+The desktop sidebar defaults to **325px**, bounded by a 200px minimum and a maximum
+of the smaller of 420px and 40% of the viewport width. Drag its right edge to resize,
+or focus the separator and use Left/Right for 10px steps and Home/End for the limits.
+Double-click or Enter restores the default. At viewport widths of 760px or less,
+navigation moves above the main content and spans the page width.
 
 - **Resources:** add a named local folder, classic Outlook folders or a public website with an optional description. Creation requests verification but never starts a scan. Verify, pause/resume, revoke, or explicitly confirm deletion. Configure incremental, full-sweep, or targeted scans; embeddings default to the runtime's configured capability. Keyword indexing works without vectors.
 - **Background tasks:** inspect scan stages, counters and document events, request cancellation, inspect/retry operations, and queue index cleanup. Resources, jobs, operations and visible events refresh about every two seconds without clearing forms. Requests are serialized per poller and cancelled on unmount. Periodic queries pause while the browser tab is hidden and refresh on return; in-flight reads may finish, and explicit actions/Agent streams are not interrupted. Resources poll only in Resources, Background tasks (for cleanup scope), and Search Documents, never in Chat or Settings.
 - **Search Documents:** an independent menu below Background tasks. Select resources, retrieval mode, Top N (1–30), and relevance/title sort direction. Sorting applies only to the returned Top N passages. Empty resource selection means all accessible resources. Search works without a chat model or Memory.
 - **Chat:** the session tree is expanded by default and stays visible while visiting other pages. New Session and existing sessions are indented children of Chat, without a separate Sessions heading. Enter Chat to open it; click Chat again to collapse or expand its children without interrupting the active chat. New Session creates and selects a persisted session; history is ordered by latest interaction in a bounded scroll area, with Load more sessions for older pages. Rename/delete controls live under the selected Session in the sidebar. The Session page contains message history, numbered source excerpts, and a multiline composer: Enter inserts a newline; Ctrl + Enter or Send Message submits. The official AG-UI `HttpAgent` SDK streams the MAF Agent's text and tool activity; message and Session history are refreshed after success or failure.
-- **Settings:** the bottom sidebar menu opens four keyboard-accessible tabs: Runtime configuration, Manage long-term Memory, MCP Server Management, and Agent instructions. Switching tabs preserves mounted editors and drafts. Runtime configuration includes provider readiness and performance/warmup; provider changes require editing settings.toml and restarting the backend. Saved facts load from SQLite only on request. Memory shows its Zvec index status and pending operations, supports confirmed soft deletion, and can queue a rebuild in Background tasks. Conversation history, session summaries and long-term facts remain separate; session deletion removes its summary/session-scoped Memory, not cross-session facts.
+- **Settings:** the bottom sidebar menu opens five keyboard-accessible tabs: Runtime configuration, Manage long-term Memory, MCP Server Management, Agent instructions, and Language. Switching tabs preserves mounted editors and drafts. Runtime configuration includes provider readiness and performance/warmup; provider changes require editing settings.toml and restarting the backend. Saved facts load from SQLite only on request. Memory shows its Zvec index status and pending operations, supports confirmed soft deletion, and can queue a rebuild in Background tasks. Session history, session summaries and long-term facts remain separate; session deletion removes its summary/session-scoped Memory, not cross-session facts.
+
+On desktop, Chat uses a compact, single-line heading and a viewport-height panel:
+messages scroll independently above the composer, without the former 660px
+message-height cap or a decorative page footer. Message cards and their text use
+the available scroll width with responsive padding; Shovel has a teal brand avatar,
+while user messages have a person icon and a shaded background. Pending and streamed
+replies use the same role styling, and source excerpts remain expandable.
 
 Every Session uses the full **Agent** with Memory, document retrieval, tools and
 workspace extensions. The composer has no mode selector and sends no
@@ -105,8 +120,9 @@ request delay, retry attempts, download/time limits and optional query URLs.
 robots.txt and noindex/nofollow are respected; private networks and unsafe
 redirects are blocked. Scan limits and failures are visible in Background tasks
 events. Full sweeps do not infer deletion from missing pages, and the indexing
-Document limit does not cap crawl requests. See the root README's website
-crawling section for policy, retry rules and supported content.
+Document limit does not cap crawl requests. See the
+[supported source boundaries](../README.md#supported-sources) and
+[scan pipeline guide](../Documents/scan_pipeline.md) for discovery and recovery.
 
 ## Microsoft Learn MCP example
 

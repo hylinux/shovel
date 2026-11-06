@@ -89,8 +89,10 @@ exiting stops both. The ports are configurable through `dev_frontend_port`,
 
 The workbench exposes Chat and its session tree, Search Documents, Resources,
 Background tasks, Skills, Workflows, Proactive Services, Approval Center,
-Activity, and Settings. Settings contains native Memory, MCP management, and
-Agent instructions. See the [frontend guide](frontend/README.md) for UI details.
+Activity, and Settings. Settings contains runtime configuration, native Memory,
+MCP management, Agent instructions, and Language. Choose English or Simplified
+Chinese in **Settings → Language**; English is the default and the preference is
+saved in the browser. See the [frontend guide](frontend/README.md) for UI details.
 
 ### Python-only local production serving
 
@@ -612,6 +614,7 @@ Pytest discovers `backend\tests`, adds `backend\src`, enables automatic asyncio
 handling, and includes coverage by default. Focused examples:
 
 ```powershell
+uv run pytest backend\tests\test_chunker.py::test_same_input_yields_identical_ids --no-cov
 uv run pytest backend\tests\test_native_memory.py backend\tests\test_memory_tasks.py --no-cov
 uv run pytest backend\tests\test_platform_demos.py --no-cov
 uv run pytest backend\tests\test_enterprise_rollout.py --no-cov
@@ -627,6 +630,8 @@ From `frontend\`, after restoring the committed package lock:
 npm run lint
 npm run typecheck
 npm test
+# One test file, using the same Node runner as npm test:
+node --experimental-strip-types --test tests\i18n.test.mjs
 npm run build
 ```
 
@@ -663,9 +668,12 @@ Copy-Item frontend\out\* backend\src\shovel\static -Recurse -Force
 uv build
 ```
 
-CI installs the wheel into a separate environment and runs
-`scripts\smoke_wheel.py` using **that environment's Python**, not `uv run`, to
-exercise installed assets and real package behavior.
+CI installs the wheel into a separate environment and uses **that environment's
+Python**, not `uv run`, to execute `python -m scripts.smoke_enterprise_wheel
+--wheel <wheel-path> --output <receipt-path>`. The wrapper verifies installed
+package bytes against the wheel, invokes `scripts\smoke_wheel.py` for bundled
+assets/runtime behavior, and checks synthetic enterprise contracts and default
+denial. Its receipt is offline packaging evidence, not live deployment approval.
 
 [CI](.github/workflows/ci.yml) covers Python lint/types/tests, frontend
 lint/types/tests/export, wheel smoke, Windows native tests, Outlook/shared

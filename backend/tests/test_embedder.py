@@ -10,19 +10,28 @@ MockTransport 是恰当的边界 —— 它仍然让 httpx 自己去做序列化
 
 from __future__ import annotations
 
+import json
+from types import SimpleNamespace
 from typing import Any
 
 import httpx
 import pytest
-from pydantic import SecretStr
+from agent_framework.ollama import OllamaEmbeddingClient
+from agent_framework.openai import OpenAIEmbeddingClient
+from azure.core.credentials import AccessToken
+from azure.core.pipeline.policies import _authentication
+from azure.identity import CredentialUnavailableError
+from pydantic import SecretStr, ValidationError
 
 from shovel.config.embedding_config import EmbeddingSettings
+from shovel.config.settings import AppSettings
 from shovel.exceptions.pipeline import (
     EmbeddingDimensionMismatchError,
     EmbeddingError,
     EmbeddingNotConfiguredError,
 )
 from shovel.pipeline.embedder import HttpEmbedder, NullEmbedder, build_embedder
+from test_model_authentication import credential as credential
 
 _DIM = 4
 
@@ -128,6 +137,7 @@ async def test_azure_puts_the_model_in_the_url() -> None:
         seen["path"] = request.url.path
         seen["query"] = request.url.query.decode()
         seen["key"] = request.headers.get("api-key")
+        assert "dimensions" not in json.loads(request.content)
 
         return httpx.Response(200, json={"data": [{"index": 0, "embedding": _vector(0)}]})
 
@@ -257,3 +267,266 @@ async def test_empty_input_makes_no_request() -> None:
         raise AssertionError("不该为空输入发请求。")
 
     assert await _embedder(handler).embed([]) == []
+
+
+async def test_azure_cli_embeddings_cache_refresh_and_close_credentials(credential, monkeypatch):
+    value, _ = credential
+    clock = [1_000_000]
+    monkeypatch.setattr(_authentication, "time", SimpleNamespace(time=lambda: clock[0]))
+    value.get_token.side_effect = [
+        AccessToken("embedding-token-one", clock[0] + 3600),
+        AccessToken("embedding-token-two", clock[0] + 7200),
+    ]
+    headers = []
+
+    def handler(request):
+        headers.append(request.headers["authorization"])
+        assert "api-key" not in request.headers
+        assert request.url.path == "/openai/deployments/embedding-deployment/embeddings"
+        assert request.url.params["api-version"] == "2025-04-01-preview"
+        return httpx.Response(200, json={"data": [{"index": 0, "embedding": _vector(1)}]})
+
+    settings = _settings(
+        provider="azure_openai",
+        model="embedding-deployment",
+        base_url="https://example.openai.azure.com",
+        api_version="2025-04-01-preview",
+        api_key=SecretStr(""),
+    )
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        embedder = HttpEmbedder(settings, expected_dimension=_DIM, client=client)
+        try:
+            value.get_token.assert_not_awaited()
+            assert await embedder.embed(["first"]) == [_vector(1)]
+            assert isinstance(embedder._framework, OpenAIEmbeddingClient)
+            clock[0] += 30
+            await embedder.embed(["cached"])
+            assert value.get_token.await_count == 1
+            clock[0] += 3470
+            await embedder.embed(["refreshed"])
+            assert value.get_token.await_count == 2
+            assert headers == [
+                "Bearer embedding-token-one",
+                "Bearer embedding-token-one",
+                "Bearer embedding-token-two",
+            ]
+        finally:
+            await embedder.aclose()
+        assert not client.is_closed
+    value.close.assert_awaited_once()
+
+
+async def test_azure_cli_embedding_failure_does_not_retry_or_expose_credential_details(credential):
+    value, _ = credential
+    value.get_token.side_effect = CredentialUnavailableError("private token details")
+    settings = _settings(
+        provider="azure_openai",
+        api_version="2025-04-01-preview",
+        api_key=SecretStr(""),
+    )
+
+    def handler(request):
+        pytest.fail("Authentication failure must precede HTTP.")
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        embedder = HttpEmbedder(settings, expected_dimension=_DIM, client=client)
+        try:
+            with pytest.raises(EmbeddingError) as failure:
+                await embedder.embed(["test"])
+            assert "az login" in failure.value.details
+            assert "private token details" not in failure.value.details
+            value.get_token.assert_awaited_once()
+        finally:
+            await embedder.aclose()
+    value.close.assert_awaited_once()
+
+
+@pytest.mark.parametrize(
+    "provider,base,expected_host",
+    [
+        ("openai", "", "api.openai.com"),
+        ("qwen", "", "dashscope.aliyuncs.com"),
+        ("qianwen", "", "dashscope.aliyuncs.com"),
+        ("deepseek", "https://hosting.example.invalid/v1", "hosting.example.invalid"),
+        ("custom", "https://hosting.example.invalid/v1", "hosting.example.invalid"),
+    ],
+)
+async def test_compatible_providers_use_maf_with_explicit_embedding_models(provider, base, expected_host):
+    def handler(request):
+        assert request.url.host == expected_host
+        assert request.url.path.endswith("/embeddings")
+        assert request.headers["authorization"] == "Bearer sk-test"
+        assert json.loads(request.content)["model"] == "hosted-embedding"
+        assert json.loads(request.content)["encoding_format"] == "float"
+        return httpx.Response(200, json={"data": [{"index": 0, "embedding": _vector(1)}]})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        embedder = HttpEmbedder(
+            _settings(provider=provider, base_url=base, model="hosted-embedding"),
+            expected_dimension=_DIM,
+            client=client,
+        )
+        try:
+            assert await embedder.embed(["test"]) == [_vector(1)]
+            assert isinstance(embedder._framework, OpenAIEmbeddingClient)
+        finally:
+            await embedder.aclose()
+
+
+async def test_deepseek_requires_an_explicit_embedding_endpoint():
+    embedder = HttpEmbedder(_settings(provider="deepseek", base_url=""), expected_dimension=_DIM)
+    try:
+        with pytest.raises(EmbeddingError, match="embedding"):
+            await embedder.embed(["test"])
+    finally:
+        await embedder.aclose()
+
+
+@pytest.mark.parametrize("provider", ["openai", "ollama"])
+async def test_owned_clients_close_and_borrowed_clients_remain_open(monkeypatch, provider):
+    def handler(request):
+        if provider == "ollama":
+            return httpx.Response(200, json={"embeddings": [_vector(1)]})
+        assert "authorization" not in request.headers
+        return httpx.Response(200, json={"data": [{"index": 0, "embedding": _vector(1)}]})
+
+    config = _settings(provider=provider, api_key=SecretStr(""), base_url="http://model.invalid")
+    for owned in (True, False):
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            embedder = HttpEmbedder(config, expected_dimension=_DIM, client=None if owned else client)
+            if owned:
+                embedder._client = client
+            assert await embedder.embed(["test"]) == [_vector(1)]
+            native = embedder._ollama
+            if provider == "ollama":
+                assert isinstance(embedder._framework, OllamaEmbeddingClient)
+            await embedder.aclose()
+            assert client.is_closed == owned
+            if native is not None:
+                assert native._client.is_closed
+
+
+@pytest.mark.parametrize("status,calls", [(400, 1), (401, 1), (429, 3), (503, 3)])
+async def test_ollama_maf_preserves_bounded_retry_policy(monkeypatch, status, calls):
+    monkeypatch.setattr("shovel.pipeline.embedder._backoff", lambda _: 0)
+    requests = []
+
+    def handler(request):
+        requests.append(request)
+        return httpx.Response(status, json={"error": "fixture error"})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        embedder = HttpEmbedder(
+            _settings(provider="ollama", max_retries=2), expected_dimension=_DIM, client=client
+        )
+        try:
+            with pytest.raises(EmbeddingError):
+                await embedder.embed(["test"])
+            assert len(requests) == calls
+        finally:
+            await embedder.aclose()
+
+
+async def test_dimension_failure_does_not_poison_validation_state():
+    size = [5]
+
+    def handler(request):
+        return httpx.Response(200, json={"data": [{"index": 0, "embedding": [0.1] * size[0]}]})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        embedder = HttpEmbedder(_settings(), expected_dimension=_DIM, client=client)
+        try:
+            for _ in range(2):
+                with pytest.raises(EmbeddingDimensionMismatchError):
+                    await embedder.embed(["test"])
+                assert embedder._dimension == 0
+            size[0] = _DIM
+            assert await embedder.embed(["test"]) == [[0.1] * _DIM]
+        finally:
+            await embedder.aclose()
+
+
+@pytest.mark.parametrize("bad_vector", [[0.1] * 5, [float("nan")] * _DIM])
+async def test_invalid_later_vectors_cannot_enter_the_index(bad_vector):
+    def handler(request):
+        return httpx.Response(
+            200,
+            json={
+                "data": [
+                    {"index": 0, "embedding": _vector(0)},
+                    {"index": 1, "embedding": bad_vector},
+                ]
+            },
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        embedder = HttpEmbedder(_settings(), expected_dimension=_DIM, client=client)
+        try:
+            with pytest.raises((EmbeddingError, EmbeddingDimensionMismatchError)):
+                await embedder.embed(["first", "second"])
+            assert embedder._dimension == 0
+        finally:
+            await embedder.aclose()
+
+
+@pytest.mark.parametrize("provider,cli", [("openai", False), ("azure_openai", False), ("azure_openai", True)])
+async def test_configured_dimensions_reach_knowledge_and_memory_model_requests(provider, cli, credential):
+    value, _ = credential
+    value.get_token.return_value = AccessToken("synthetic-embedding-token", 4_000_000_000)
+    config = {
+        "provider": provider,
+        "model": "text-embedding-3-large",
+        "base_url": "https://embedding.example.invalid",
+        "api_version": "2025-04-01-preview" if provider == "azure_openai" else "",
+        "api_key": "" if cli else "sk-test",
+        "dimensions": 1024,
+    }
+    settings = AppSettings.model_validate(
+        {"embedding": config, "zvec": {"dim": 1024}, "memory": {"embedder": config, "dim": 1024}}
+    )
+    requests = []
+
+    def response(request):
+        payload = json.loads(request.content)
+        requests.append(payload)
+        assert payload["dimensions"] == 1024
+        if cli:
+            assert request.headers["authorization"] == "Bearer synthetic-embedding-token"
+        return httpx.Response(
+            200,
+            json={
+                "data": [
+                    {"index": index, "embedding": [0.1] * 1024} for index in range(len(payload["input"]))
+                ]
+            },
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(response)) as client:
+        for embedding, dim in (
+            (settings.embedding, settings.zvec.dim),
+            (settings.memory.embedder, settings.memory.dim),
+        ):
+            embedder = HttpEmbedder(embedding, expected_dimension=dim, client=client)
+            try:
+                assert await embedder.embed(["first", "second"]) == [[0.1] * 1024] * 2
+            finally:
+                await embedder.aclose()
+    assert len(requests) == 2
+
+
+@pytest.mark.parametrize("dimensions", [0, -1, 1.5])
+def test_invalid_configured_dimensions_are_rejected(dimensions):
+    with pytest.raises(ValidationError):
+        _settings(dimensions=dimensions)
+
+
+def test_ollama_rejects_unsupported_dimensions_instead_of_ignoring_them():
+    with pytest.raises(ValidationError, match="dimensions"):
+        _settings(provider="ollama", dimensions=1024)
+
+
+def test_configured_dimensions_must_match_index_before_any_request():
+    with pytest.raises(EmbeddingError) as failure:
+        HttpEmbedder(_settings(dimensions=1024), expected_dimension=3072)
+    assert "1024" in failure.value.details
+    assert "3072" in failure.value.details

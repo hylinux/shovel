@@ -41,8 +41,36 @@ def test_embedding_identity_tracks_deployment_not_credentials() -> None:
         changed = HttpEmbedder(config.model_copy(update=update), expected_dimension=4, client=object())
         assert changed.model_version != original
     assert HttpEmbedder(config, expected_dimension=8, client=object()).model_version != original
+    assert (
+        HttpEmbedder(config.model_copy(update={"dimensions": 4}), expected_dimension=4).model_version
+        != original
+    )
+    assert (
+        HttpEmbedder(config.model_copy(update={"dimensions": None}), expected_dimension=4).model_version
+        == original
+    )
     rotated = config.model_copy(update={"api_key": SecretStr("rotated"), "timeout_seconds": 30})
     assert HttpEmbedder(rotated, expected_dimension=4, client=object()).model_version == original
+
+
+def test_embedding_dimensions_load_independently_from_file_and_environment(tmp_path, monkeypatch):
+    config = tmp_path / "settings.toml"
+    config.write_text(
+        "[embedding]\ndimensions = 1024\n[memory.embedder]\ndimensions = 512\n", encoding="utf-8"
+    )
+    saved = AppSettings.load(config)
+    assert (saved.embedding.dimensions, saved.memory.embedder.dimensions) == (1024, 512)
+    monkeypatch.setenv("SHOVEL_EMBEDDING__DIMENSIONS", "256")
+    monkeypatch.setenv("SHOVEL_MEMORY__EMBEDDER__DIMENSIONS", "128")
+    combined = load_settings(config)
+    assert (combined.embedding.dimensions, combined.memory.embedder.dimensions) == (256, 128)
+    assert (
+        AppSettings.load(config).embedding.dimensions,
+        AppSettings.load(config).memory.embedder.dimensions,
+    ) == (
+        1024,
+        512,
+    )
 
 
 @pytest.mark.parametrize(

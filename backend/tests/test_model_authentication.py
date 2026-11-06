@@ -23,7 +23,7 @@ def credential(monkeypatch):
     value.get_token = AsyncMock()
     value.close = AsyncMock()
     factory = Mock(return_value=value)
-    monkeypatch.setattr("shovel.runtime.agent.AzureCliCredential", factory)
+    monkeypatch.setattr("shovel.runtime.azure_auth.AzureCliCredential", factory)
     return value, factory
 
 

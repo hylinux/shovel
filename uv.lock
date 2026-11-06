@@ -63,6 +63,19 @@ wheels = [
 ]
 
 [[package]]
+name = "agent-framework-ollama"
+version = "1.0.0b261022"
+source = { registry = "https://packagefeedproxy.microsoft.io/pypi/simple/" }
+dependencies = [
+    { name = "agent-framework-core" },
+    { name = "ollama" },
+]
+sdist = { url = "https://ms-feed-25.pkgs.visualstudio.com/6f084628-a36d-42cb-934d-057357e379dc/_packaging/49d7402f-07bb-4b18-a9ce-086e6e98a554/pypi/download/agent-framework-ollama/1b261022/agent_framework_ollama-1.0.0b261022.tar.gz", hash = "sha256:2ad220104d08b497af832a5e7583d85ed5512dd57c6911c19fc61f42a3f36465", size = 12526, upload-time = "2026-10-22T17:01:30Z" }
+wheels = [
+    { url = "https://ms-feed-25.pkgs.visualstudio.com/6f084628-a36d-42cb-934d-057357e379dc/_packaging/49d7402f-07bb-4b18-a9ce-086e6e98a554/pypi/download/agent-framework-ollama/1b261022/agent_framework_ollama-1.0.0b261022-py3-none-any.whl", hash = "sha256:b7271bf6ab11643c97ac1d7c4587d1c686c0dd3bf346aecd067a6b61a7409ea2", size = 14201, upload-time = "2026-10-29T17:53:11Z" },
+]
+
+[[package]]
 name = "agent-framework-openai"
 version = "1.17.0"
 source = { registry = "https://packagefeedproxy.microsoft.io/pypi/simple/" }
@@ -1646,6 +1659,19 @@ wheels = [
 ]
 
 [[package]]
+name = "ollama"
+version = "0.5.3"
+source = { registry = "https://packagefeedproxy.microsoft.io/pypi/simple/" }
+dependencies = [
+    { name = "httpx" },
+    { name = "pydantic" },
+]
+sdist = { url = "https://ms-feed-25.pkgs.visualstudio.com/6f084628-a36d-42cb-934d-057357e379dc/_packaging/49d7402f-07bb-4b18-a9ce-086e6e98a554/pypi/download/ollama/0.5.3/ollama-0.5.3.tar.gz", hash = "sha256:40b6dff729df3b24e56d4042fd9d37e231cee8e528677e0d085413a1d6692394", size = 43331, upload-time = "2026-09-15T00:59:27Z" }
+wheels = [
+    { url = "https://ms-feed-25.pkgs.visualstudio.com/6f084628-a36d-42cb-934d-057357e379dc/_packaging/49d7402f-07bb-4b18-a9ce-086e6e98a554/pypi/download/ollama/0.5.3/ollama-0.5.3-py3-none-any.whl", hash = "sha256:a8303b413d99a9043dbf77ebf11ced672396b59bec27e6d5db67c88f01b279d2", size = 13490, upload-time = "2026-07-24T15:57:56Z" },
+]
+
+[[package]]
 name = "openai"
 version = "3.38.0"
 source = { registry = "https://packagefeedproxy.microsoft.io/pypi/simple/" }
@@ -2753,6 +2779,7 @@ source = { editable = "." }
 dependencies = [
     { name = "agent-framework-ag-ui" },
     { name = "agent-framework-core" },
+    { name = "agent-framework-ollama" },
     { name = "agent-framework-openai" },
     { name = "aiosqlite" },
     { name = "alembic" },
@@ -2797,6 +2824,7 @@ outlook = [
 requires-dist = [
     { name = "agent-framework-ag-ui", specifier = ">=1.6.0" },
     { name = "agent-framework-core", specifier = ">=1.22.0,<1.23" },
+    { name = "agent-framework-ollama", specifier = ">=1.0.0b0,<2" },
     { name = "agent-framework-openai", specifier = ">=1.17.0" },
     { name = "aiosqlite", specifier = ">=0.22.1" },
     { name = "alembic", specifier = ">=1.18.5" },

@@ -223,10 +223,43 @@ The generic `AZURE_OPENAI_ENDPOINT`, `AZURE_OPENAI_MODEL`, and
 or their `SHOVEL_MODEL__...` equivalents.
 
 Separately configured `[memory.llm]` can use the same Azure OpenAI settings with
-an empty key, or remain local. Knowledge and Memory embedding authentication
-is unchanged; existing `bge-m3` models, index dimensions, and paths need not
-change. Remote model calls transmit the selected context to Azure and may incur
-charges. Restart the entire Host after changing configuration.
+an empty key, or remain local. Azure knowledge and Memory embedding now also
+use CLI authentication when their `api_key` is empty; non-empty keys retain
+API-key authentication. Existing `bge-m3` models, index dimensions, and paths
+need not change just to upgrade the client implementation. Remote model calls
+transmit the selected context to Azure and may incur charges. Restart the
+entire Host after changing configuration.
+
+### Framework embedding providers
+
+Knowledge and Memory share Microsoft Agent Framework's `OpenAIEmbeddingClient`
+and official `OllamaEmbeddingClient`. Shovel retains batching, bounded transient
+retries, vector validation, and model-version fingerprints; SDK retries are
+disabled so attempts are not multiplied.
+
+| `embedding.provider` | Endpoint and model requirements |
+| --- | --- |
+| `azure_openai` | Resource root `base_url`, deployment `model`, and `api_version`. Empty `api_key` uses Azure CLI and automatic token renewal. |
+| `openai` | Defaults to `https://api.openai.com/v1`; configure an embedding model and API key. |
+| `qwen` / `qianwen` | Defaults to DashScope's China `compatible-mode/v1` endpoint; use an embedding model, not a Qwen chat model. Override `base_url` for other regions. |
+| `ollama` | Defaults to loopback port 11434 and keeps native batched `/api/embed`; install an embedding model such as `bge-m3`. |
+| `deepseek` / other compatible providers | Requires explicit `base_url` for a host that actually exposes `/embeddings`, plus a genuine embedding model. A chat-only API or model is not supported merely by selecting its provider name. |
+
+The official Ollama connector currently uses a prerelease pinned in `uv.lock`;
+do not update it independently of the supported MAF core. This implementation
+does not invent an embedding model for a provider whose service only offers
+chat, nor fall back to a different provider when an embedding request fails.
+`SHOVEL_EMBEDDING__API_KEY` and `SHOVEL_MEMORY__EMBEDDER__API_KEY` override TOML
+independently; leave them unset for Azure CLI mode. Changing actual embedding
+models still requires the corresponding index migration.
+
+For models/APIs supporting shortened embeddings, set `dimensions = 1024` in
+`[embedding]` and/or `[memory.embedder]`, with the matching `zvec.dim` or
+`memory.dim`. Shovel passes this optional parameter through MAF; omitting it
+preserves model-default output and existing fingerprints. Configured dimensions
+must match the index. The current Ollama connector rejects this option.
+Changing dimensions or models requires regenerating the corresponding vectors,
+even if the old and new models both output 1024 dimensions.
 
 ## Knowledge and RAG
 

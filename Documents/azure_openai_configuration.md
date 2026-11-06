@@ -1,8 +1,9 @@
 # Shovel 默认配置参考（for Azure OpenAI）
 
-本文针对当前 Shovel 实现：主聊天和 Memory LLM 使用 Azure OpenAI、
-Azure CLI 自动令牌认证；知识库和 Memory embedding 使用 Azure OpenAI、
-API Key 认证。以下配置不是 Ollama 配置，也不会自动修改现有用户的设置或索引。
+本文针对当前 Shovel 实现：主聊天、Memory LLM、知识库 embedding 和 Memory
+embedding 均可使用 Azure OpenAI、Azure CLI 自动令牌认证，也可分别选择 API Key。
+Embedding 已通过 Microsoft Agent Framework 客户端生成向量。
+以下配置不是 Ollama 配置，也不会自动修改现有用户的设置或索引。
 
 ## 1. 修正原配置中的重复键
 
@@ -31,10 +32,33 @@ security_key = ""
 | `text-embedding-3-small` | 1536 | 向量更小，适合偏重存储和吞吐的方案。 |
 | `text-embedding-ada-002` | 1536 | 主要用于兼容既有系统；新配置不优先选择。 |
 
-这里使用模型默认维度。虽然 embedding-3 API 支持 `dimensions` 参数，
-**当前 Shovel 的 `HttpEmbedder` 不发送这个参数**。不能仅将 `zvec.dim` 或
-`memory.dim` 写成 1024，就认为 Azure 会返回缩短到 1024 维的向量。
-使用 large 时，两者都应设为 **3072**；改用 small 时，两者都应设为 **1536**。
+完整示例使用模型默认维度，省略 `dimensions`：large 对应 **3072**，
+small 对应 **1536**。现在可在 `[embedding]` 和 `[memory.embedder]` 分别配置
+`dimensions`，Shovel 会通过 MAF 将其传给 OpenAI 兼容 embedding API。
+该值必须为正整数、与对应索引 `dim` 一致，且模型/API 必须支持它。
+不能只改索引 `dim` 就期待模型自动改变输出；当前 Ollama 连接器不支持此参数。
+
+若希望 `text-embedding-3-large` 输出 **1024 维**，在完整配置中调整以下字段
+（合并到已有配置，不要重复添加同名 TOML 段）：
+
+```toml
+[zvec]
+dim = 1024
+
+[embedding]
+dimensions = 1024
+
+[memory]
+dim = 1024
+
+[memory.embedder]
+dimensions = 1024
+```
+
+环境变量也可分别覆盖：`SHOVEL_EMBEDDING__DIMENSIONS=1024`、
+`SHOVEL_MEMORY__EMBEDDER__DIMENSIONS=1024`。更改显式输出维度会更新向量指纹；
+即使旧 `bge-m3` 也是 1024 维，换模型仍需重新生成知识和 Memory 向量，
+不能混用旧向量。选择匹配的新索引目录，并按迁移章节重建。
 
 Azure 配置中的 `model` 必须填写 **embedding 部署名称**，不是任意模型产品名称。
 以下示例假设该部署确实名为 `text-embedding-3-large`；部署名称不同时必须修改。
@@ -46,15 +70,14 @@ Azure 配置中的 `model` 必须填写 **embedding 部署名称**，不是任�
 | --- | --- | --- |
 | 主聊天 `[model]` | 空 Key 使用异步 `AzureCliCredential`，令牌缓存并按需续期；非空 Key 使用 API Key。 | `security_key` |
 | Memory LLM `[memory.llm]` | 与主聊天使用相同的客户端工厂和认证规则。 | `security_key` |
-| 知识 embedding `[embedding]` | 当前只发送 `api-key` 请求头，没有接入 CLI 自动令牌提供器。 | `api_key` |
-| Memory embedding `[memory.embedder]` | 与知识 embedding 使用相同的 HTTP 适配器。 | `api_key` |
+| 知识 embedding `[embedding]` | 空 Key 使用 CLI 自动令牌；非空 Key 使用 API Key。 | `api_key` |
+| Memory embedding `[memory.embedder]` | 与知识 embedding 使用相同的 MAF 适配器和认证规则。 | `api_key` |
 
-Azure 服务本身支持 embedding 的 Entra ID 认证，但这不等于当前 Shovel embedding
-适配器已经实现了它。**不要把聊天的空 Key 配置直接当作 embedding 的无密钥认证。**
-下面的 embedding `api_key = ""` 只是让密钥不落在 TOML 中；启动前必须通过
-`SHOVEL_EMBEDDING__API_KEY` 和 `SHOVEL_MEMORY__EMBEDDER__API_KEY` 提供实际 API Key。
-如果资源禁用了 API Key 认证，目前不能仅靠这份配置完成 Azure embedding，
-需要另行实现 embedding 的令牌认证。
+下面的 embedding `api_key = ""` 会选择 CLI 认证，默认不需要 API Key。
+客户端按需获取和缓存令牌，在请求时检查并自动续期；不会自行弹出登录。
+如需 API Key，通过 `SHOVEL_EMBEDDING__API_KEY` 和
+`SHOVEL_MEMORY__EMBEDDER__API_KEY` 提供非空值即可覆盖这个选择。
+认证失败会明确报错，不会降级到另一种认证或切换模型。
 
 CLI 模式要求 Host 以 Azure CLI 登录用户运行，且能在 PATH 找到 `az`。
 该身份需要目标资源的 **Cognitive Services OpenAI User** 或等效推理权限。
@@ -195,11 +218,13 @@ uv sync --python 3.14-x86_64 --locked --all-extras --dev
 az login --tenant YOUR-TENANT-ID
 ```
 
-主聊天和 Memory LLM 使用 CLI 时，不应设置覆盖空 Key 的
-`SHOVEL_MODEL__SECURITY_KEY`、`SHOVEL_MEMORY__LLM__SECURITY_KEY`。
+所有模型使用 CLI 时，不应设置覆盖空 Key 的
+`SHOVEL_MODEL__SECURITY_KEY`、`SHOVEL_MEMORY__LLM__SECURITY_KEY`、
+`SHOVEL_EMBEDDING__API_KEY`、`SHOVEL_MEMORY__EMBEDDER__API_KEY`。
 同时取消 `AZURE_OPENAI_AD_TOKEN`，否则 CLI 模式会明确拒绝静态令牌配置。
 
-在启动 Host 的同一个 PowerShell 窗口中，交互输入 embedding 资源的 API Key：
+**仅在希望 embedding 改用 API Key 时**，在启动 Host 的同一个 PowerShell
+窗口中交互输入 embedding 资源的 Key；默认 CLI 配置不需要执行这段命令：
 
 ```powershell
 $key = Read-Host "Azure OpenAI embedding API Key" -AsSecureString
@@ -239,7 +264,7 @@ uv run shovel run dev
 
 1. 停止 Host，备份原配置、SQLite、工作区及两个向量目录。不要删除旧数据库或 Memory 事实。
 2. 若要保留原数据，保留原 SQLite 和工作区路径，为知识和 Memory 分别选择新的空 3072 维索引目录。不要让另一套 Host 同时写同一数据库。
-3. 配置两个 Azure embedding 段及对应维度，提供 API Key，完整启动 Host。
+3. 配置两个 Azure embedding 段及对应维度，确认 CLI 登录和推理权限（或提供 API Key），完整启动 Host。
 4. 为所有相关资源/profile 重新生成知识向量。可对实际资源运行 `uv run shovel scan run RESOURCE --force`；不要加 `--no-embed`，也不要用限制文档数量的测试扫描代替完整重建。
 5. 在 Settings 的 Memory 管理功能中执行向量索引重建，等待相关后台操作完成。切换目录本身不会自动把已有事实变成新模型向量。
 6. 用已知文档和 Memory 事实验证检索、维度、操作状态及失败信息，再结束迁移。部分完成或有错误的任务不能当作成功迁移。
@@ -257,7 +282,7 @@ MCP 文档搜索成功不等于知识 embedding 或 Memory embedding 已配置�
 | --- | --- |
 | TOML 重复键错误 | 删除同一段内重复的 `security_key` 和 `api_version`。 |
 | CLI 认证失败 | `az` 的 PATH、登录用户、租户、登录有效期及推理权限。 |
-| Embedding HTTP 401/403 | API Key 是否提供、是否属于对应资源、资源是否禁用 Key、网络访问规则。 |
+| Embedding HTTP 401/403 | CLI 身份/权限或 API Key 是否匹配资源，以及资源网络访问规则。 |
 | DeploymentNotFound / HTTP 404 | 填写的是部署名称而非模型产品名称，地址是否对应部署所在资源。 |
 | 不支持 API version | 使用资源/部署仍支持的版本，不要把版本字段留空。 |
 | 预期 1024、返回 3072 等维度错误 | 配置维度、模型默认输出维度和 collection 的实际维度是否一致。 |
@@ -265,7 +290,8 @@ MCP 文档搜索成功不等于知识 embedding 或 Memory embedding 已配置�
 
 聊天、Memory 提取/摘要、知识文档及 Memory embedding 的输入均可能发送到 Azure。
 本地 SQLite/Zvec 存储不代表推理仍在本地；确认这些数据允许发往所配置的资源。
-此文档不进行登录、取 Key、模型调用或数据库迁移。
+客户端迁移本身保留原有 embedding 身份和向量指纹；只更新软件、不更换模型时，
+不需要重建索引。本文未进行真实 Azure 调用、登录、取 Key 或数据库迁移。
 
 ## 官方参考
 

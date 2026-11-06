@@ -12,15 +12,14 @@ dependencies = [
     "agent-framework-ag-ui>=1.6.0",
     # MAF 1.23+ requires MCP 2.x; retain the supported MCP 1.x integration.
     "agent-framework-core>=1.22.0,<1.23",
+    "agent-framework-ollama>=1.0.0b0,<2",
     "agent-framework-openai>=1.17.0",
     "aiosqlite>=0.22.1",
     "alembic>=1.18.5",
     "azure-identity>=1.25,<2",
     "cryptography>=46",
     "greenlet>=3.5.5",
-    # 知识库 embedding 的 HTTP 客户端。直接用 httpx 而不是 openai SDK:
-    # 要同时支持 openai / azure / ollama 三种端点形状, 而 ollama 的批量
-    # 只有原生 /api/embed 才有 —— SDK 反而挡在中间。见 pipeline/embedder.py
+    # Shared HTTP transport for MAF model/embedding clients and connectors.
     "httpx>=0.28.1",
     "jsonschema>=4.26,<5",
     "referencing>=0.37,<1",

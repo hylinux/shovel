@@ -7,8 +7,10 @@ import pytest
 from ag_ui.core import TextMessageContentEvent
 from agent_framework import Agent, Message
 from agent_framework.exceptions import ChatClientException
+from openai import APIConnectionError
 from sqlalchemy import select
 
+from shovel.config.embedding_config import EmbeddingSettings
 from shovel.config.model_settings import ModelProviderType
 from shovel.db.model.runtime import ChatMessage, Conversation
 from shovel.memory.agent_framework import AgentFrameworkMemoryExtractor
@@ -27,6 +29,7 @@ from shovel.runtime.schemas import MessageInput
 from test_agent_extensions import completion, tool_call
 from test_hosted_runtime import api as api
 from test_hosted_runtime import runtime as runtime
+from test_model_authentication import credential as credential
 from test_protection_policy import BODY, kernel, reviewed_context, state_for, use_binding, wrapped
 
 
@@ -218,6 +221,35 @@ async def test_actual_legacy_sinks_deny_before_io_or_enqueue(runtime):
                 await call()
         with pytest.raises(ProtectionDeniedError):
             cache.put("synthetic", [0.1])
+
+
+@pytest.mark.parametrize("provider", ["openai", "azure_openai", "ollama"])
+async def test_maf_embedding_boundary_denies_before_transport_or_cli_token(provider, credential):
+    value, _ = credential
+    sent = []
+
+    def response(request):
+        sent.append(request)
+        pytest.fail("Protected embedding must not reach transport.")
+
+    settings = EmbeddingSettings(
+        provider=provider,
+        model="synthetic-embedding",
+        base_url="https://embedding.example.invalid",
+        api_version="2025-04-01-preview" if provider == "azure_openai" else "",
+    )
+    async with httpx.AsyncClient(transport=httpx.MockTransport(response)) as http:
+        embedder = HttpEmbedder(settings, expected_dimension=4, client=http)
+        framework = embedder._framework_client()
+        try:
+            with egress_scope():
+                wrapped(reviewed_context())
+                with pytest.raises((ProtectionDeniedError, APIConnectionError)):
+                    await framework.get_embeddings(["derived content"])
+        finally:
+            await embedder.aclose()
+    assert not sent
+    value.get_token.assert_not_awaited()
 
 
 async def test_sqlite_backstop_rejects_plaintext_chat_write_after_enterprise_ingress(runtime):

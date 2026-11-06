@@ -24,7 +24,8 @@ from pydantic import BaseModel, Field, SecretStr, model_validator
 class EmbeddingSettings(BaseModel):
     """知识库向量化配置。
 
-    知识与记忆使用相同 provider 命名 (openai / azure_openai / ollama)。
+    知识与记忆使用相同 provider 命名和 MAF 客户端, 包括 Azure、OpenAI、
+    Ollama 和提供 embedding API 的 OpenAI 兼容服务。
     """
 
     #: 留空表示"未配置"。此时带 embed 的扫描会明确报错而不是静默跳过 ——
@@ -38,13 +39,18 @@ class EmbeddingSettings(BaseModel):
     #: Azure 则填 resource endpoint。
     base_url: str = ""
 
-    #: 留空表示端点不需要鉴权(本地 ollama / vLLM 就是这种情况)。
+    #: Azure 留空使用 AzureCliCredential 自动令牌认证; 非空使用 API Key。
+    #: 其他兼容端点留空表示匿名访问(本地 ollama / vLLM 等)。
     #: 用空 SecretStr 而不是 None: None 无法写进 TOML, 这个键会在
     #: 生成的配置文件里整个消失, 用户根本不知道该往哪儿填密钥。
     api_key: SecretStr = SecretStr("")
 
     #: 仅 Azure 需要。
     api_version: str = ""
+
+    #: 可选的模型输出维度; 未设置时保留模型默认值。必须与对应索引 dim 一致。
+    #: 仅发送给 OpenAI 兼容 embedding API, 模型本身也必须支持此参数。
+    dimensions: int | None = Field(default=None, ge=1)
 
     #: 一次请求塞多少条文本。
     #:
@@ -74,6 +80,8 @@ class EmbeddingSettings(BaseModel):
 
     @model_validator(mode="after")
     def _check_azure(self) -> EmbeddingSettings:
+        if self.provider == "ollama" and self.dimensions is not None:
+            raise ValueError("当前 Ollama MAF embedding 客户端不支持 dimensions; 请省略此配置。")
         if self.provider == "azure_openai" and self.provider and not self.api_version:
             raise ValueError(
                 "provider=azure_openai 时必须设置 embedding.api_version, 否则请求会被 Azure 直接拒绝。"

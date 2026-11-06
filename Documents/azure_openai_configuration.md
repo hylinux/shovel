@@ -132,6 +132,7 @@ background_idle_seconds = 5
 embedding_cache_entries = 128
 embedding_cache_seconds = 300
 max_local_model_requests = 1
+max_concurrent_scans = 5
 context_profile = "default"
 
 [database]

@@ -76,15 +76,52 @@ class RuntimeWorker(BackgroundService):  # type: ignore[misc]  # Framework does 
         runtime = self._runtime
         runtime.worker_state = "running"
         trace("worker.started")
+        scans: dict[asyncio.Task[bool], str] = {}
         try:
-            while not stopping.is_set():
-                runtime.wake.clear()
-                if await runtime.operations.run_once():
-                    continue
-                try:
-                    await asyncio.wait_for(runtime.wake.wait(), timeout=1)
-                except TimeoutError:
-                    continue
+            try:
+                while not stopping.is_set():
+                    runtime.wake.clear()
+                    for task in list(scans):
+                        if task.done():
+                            scans.pop(task)
+                            task.result()
+                    candidate = await runtime.operations.next_queued(
+                        excluded_scan_resources=set(scans.values())
+                    )
+                    if (
+                        candidate is not None
+                        and candidate.kind == "scan"
+                        and candidate.capability_version_id is None
+                        and candidate.resource_id is not None
+                    ):
+                        if len(scans) < runtime.settings.performance.max_concurrent_scans:
+                            task = asyncio.create_task(
+                                runtime.operations.run_once(identifier=candidate.id),
+                                name=f"scan:{candidate.id}",
+                            )
+                            scans[task] = candidate.resource_id
+                            task.add_done_callback(lambda _: runtime.wake.set())
+                            continue
+                    elif (
+                        candidate is not None
+                        and not scans
+                        and await runtime.operations.run_once(identifier=candidate.id)
+                    ):
+                        continue
+                    # Non-scan operations are barriers: drain scans before changing resources.
+                    try:
+                        await asyncio.wait_for(runtime.wake.wait(), timeout=1)
+                    except TimeoutError:
+                        continue
+            finally:
+                stopping.set()
+                runtime.stopping.set()
+                for task in scans:
+                    task.cancel()
+                results = await asyncio.gather(*scans, return_exceptions=True)
+                for result in results:
+                    if isinstance(result, Exception):
+                        raise result
         except asyncio.CancelledError:
             raise
         except Exception as exc:

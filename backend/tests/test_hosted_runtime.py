@@ -828,10 +828,10 @@ async def test_worker_failure_is_visible_and_requests_host_shutdown(
 ) -> None:
     from shovel.runtime.hosting import RuntimeWorker
 
-    async def fail() -> bool:
+    async def fail(**_kwargs: Any) -> bool:
         raise RuntimeError("injected-worker-crash")
 
-    monkeypatch.setattr(runtime.operations, "run_once", fail)
+    monkeypatch.setattr(runtime.operations, "next_queued", fail)
     worker = RuntimeWorker(lambda: runtime)
     worker._runtime = runtime
     stopping = asyncio.Event()

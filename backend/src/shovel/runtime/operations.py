@@ -6,7 +6,7 @@ from time import perf_counter
 from typing import TYPE_CHECKING, Any
 
 import structlog
-from sqlalchemy import select, text, update
+from sqlalchemy import or_, select, text, update
 
 from shovel.db.base import new_id, now_ts
 from shovel.db.model.config import Resource
@@ -418,26 +418,38 @@ class OperationService:
             cleanup_queued=pending_cleanup is not None and queued_cleanup is None,
         )
 
-    async def run_once(self) -> bool:
-        async with self.runtime.sessions() as session:
-            candidate = (
-                await session.execute(
-                    select(Operation.id, Operation.capability_version_id)
-                    .where(
-                        Operation.state == "queued",
-                        ~Operation.kind.like("memory.%"),
-                        Operation.parent_execution_id.is_(None),
-                    )
-                    .order_by(Operation.queued_at, text("operation.rowid"))
-                    .limit(1)
+    async def next_queued(
+        self, *, identifier: str | None = None, excluded_scan_resources: set[str] | None = None
+    ) -> Operation | None:
+        statement = select(Operation).where(
+            Operation.state == "queued",
+            ~Operation.kind.like("memory.%"),
+            Operation.parent_execution_id.is_(None),
+        )
+        if identifier is not None:
+            statement = statement.where(Operation.id == identifier)
+        if excluded_scan_resources:
+            statement = statement.where(
+                or_(
+                    Operation.kind != "scan",
+                    Operation.capability_version_id.is_not(None),
+                    Operation.resource_id.is_(None),
+                    Operation.resource_id.not_in(excluded_scan_resources),
                 )
-            ).one_or_none()
-            if candidate is None:
-                return False
-            identifier, version_id = candidate
-            if version_id is not None:
-                await session.rollback()
-                return await self.runtime.execution_engine.run_once(identifier)
+            )
+        async with self.runtime.sessions() as session:
+            return await session.scalar(
+                statement.order_by(Operation.queued_at, text("operation.rowid")).limit(1)
+            )
+
+    async def run_once(self, *, identifier: str | None = None) -> bool:
+        candidate = await self.next_queued(identifier=identifier)
+        if candidate is None:
+            return False
+        identifier = candidate.id
+        if candidate.capability_version_id is not None:
+            return await self.runtime.execution_engine.run_once(identifier)
+        async with self.runtime.sessions() as session:
             claimed = await session.execute(
                 update(Operation)
                 .where(

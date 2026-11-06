@@ -261,6 +261,22 @@ must match the index. The current Ollama connector rejects this option.
 Changing dimensions or models requires regenerating the corresponding vectors,
 even if the old and new models both output 1024 dimensions.
 
+### Concurrent background scans
+
+`[performance].max_concurrent_scans` controls simultaneous Scan Jobs in one
+Host (default **5**, range **1-64**). Set it to `1` for serial scanning, or use
+`SHOVEL_PERFORMANCE__MAX_CONCURRENT_SCANS` as an environment override, then
+restart the Host. Different resources can scan concurrently; all profiles and
+jobs for the same resource remain serial. A queued non-scan operation is a
+barrier: active scans finish before resource changes, cleanup or platform work
+execute. Memory retains its separate worker.
+
+This limits jobs, not documents or embedding batch size. Zvec native writes
+remain serialized, and Azure quotas can still limit embedding throughput.
+Queued receipts and Job IDs remain durable; stopping the Host cancels and
+drains in-flight scan tasks, requeuing interrupted scans for restart rather
+than treating shutdown as user cancellation.
+
 ## Knowledge and RAG
 
 ### First keyword-only loop

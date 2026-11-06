@@ -6,16 +6,19 @@ import json
 import httpx
 import pytest
 from pydantic import SecretStr, ValidationError
+from sqlalchemy import event as sa_event
 from sqlalchemy import select
 
 from shovel.config.performance_config import PerformanceSettings
 from shovel.config.settings import AppSettings, load_settings
+from shovel.db.model.content import Document, ProfileDocument
 from shovel.db.model.execution import Job
 from shovel.domain.enums import JobState
 from shovel.pipeline.embedder import HttpEmbedder
 from shovel.pipeline.scan_service import ScanService
-from shovel.runtime.hosting import RuntimeWorker
+from shovel.runtime.hosting import ExecutionMaintenanceWorker, RuntimeWorker
 from shovel.runtime.schemas import ScanInput, SearchInput
+from shovel.services.connector_local_fs import LocalFsConnector
 from shovel.vector.store import init_vector_store
 from test_hosted_runtime import add_notes
 from test_hosted_runtime import runtime as runtime
@@ -118,6 +121,149 @@ async def test_same_resource_waits_without_blocking_other_resources(runtime, tmp
         assert all(receipt.state == "succeeded" for receipt in await completed(runtime, operations))
         assert peak[0] == 2
     finally:
+        await stop_worker(runtime, worker)
+
+
+@pytest.mark.parametrize("pause_after", [1, 101])
+async def test_slow_discovery_allows_other_scans_maintenance_and_heartbeats(
+    runtime, tmp_path, monkeypatch, pause_after
+):
+    roots = [tmp_path / f"notes-{index}" for index in range(2)]
+    resources = [await add_notes(runtime, root, name=root.name) for root in roots]
+    for root in roots:
+        for index in range(pause_after - 1):
+            (root / f"extra-{index}.txt").write_text("Scan contention regression.", encoding="utf-8")
+    operations = [await runtime.operations.scan(resource, ScanInput(embed=False)) for resource in resources]
+    blocked = {root: asyncio.Event() for root in roots}
+    release, maintained = asyncio.Event(), asyncio.Event()
+    discover = LocalFsConnector.discover
+    refresh = runtime.interactions.refresh
+
+    async def slow_discover(connector, scope):
+        count = 0
+        async for item in discover(connector, scope):
+            yield item
+            count += 1
+            if count == pause_after:
+                blocked[connector.root].set()
+                await release.wait()
+
+    async def observed_refresh():
+        result = await refresh()
+        maintained.set()
+        return result
+
+    def short_busy_timeout(connection, _record, _proxy):
+        cursor = connection.cursor()
+        cursor.execute("PRAGMA busy_timeout=2000")
+        cursor.close()
+
+    engine = runtime.sessions.kw["bind"]
+    sa_event.listen(engine.sync_engine, "checkout", short_busy_timeout)
+    monkeypatch.setattr(LocalFsConnector, "discover", slow_discover)
+    monkeypatch.setattr(runtime.interactions, "refresh", observed_refresh)
+    monkeypatch.setattr("shovel.pipeline.scan_service._HEARTBEAT_SECONDS", 0.05)
+    worker = start_worker(runtime)
+    maintenance = None
+    try:
+        await asyncio.wait_for(blocked[roots[0]].wait(), 10)
+        # Exercise the actual BEGIN IMMEDIATE path before starting its hosted loop.
+        await runtime.interactions.refresh()
+        maintained.clear()
+        maintenance = asyncio.create_task(
+            ExecutionMaintenanceWorker(lambda: runtime).execute_async(runtime.stopping)
+        )
+        await asyncio.wait_for(
+            asyncio.gather(*(signal.wait() for signal in blocked.values()), maintained.wait()), 10
+        )
+        async with runtime.sessions() as session:
+            before = {job.id: job.heartbeat_at for job in await session.scalars(select(Job))}
+
+        async def heartbeats_advanced():
+            while True:
+                async with runtime.sessions() as session:
+                    jobs = list(
+                        await session.scalars(
+                            select(Job).where(Job.id.in_([operation.job_id for operation in operations]))
+                        )
+                    )
+                if all(job.heartbeat_at > before[job.id] for job in jobs):
+                    return
+                await asyncio.sleep(0.01)
+
+        await asyncio.wait_for(heartbeats_advanced(), 10)
+        assert not maintenance.done() and not runtime.stopping.is_set()
+        release.set()
+        receipts = await completed(runtime, operations)
+        assert all(receipt.state == "succeeded" for receipt in receipts), [row.error for row in receipts]
+        async with runtime.sessions() as session:
+            jobs = list(await session.scalars(select(Job)))
+        assert all(job.discovered == pause_after and job.is_discovery_complete for job in jobs)
+    finally:
+        release.set()
+        await stop_worker(runtime, worker)
+        if maintenance is not None:
+            await asyncio.wait_for(maintenance, 10)
+        sa_event.remove(engine.sync_engine, "checkout", short_busy_timeout)
+
+
+@pytest.mark.parametrize("interrupt", ["cancel", "shutdown"])
+async def test_interrupted_discovery_preserves_batch_boundaries_and_recovery(
+    runtime, tmp_path, monkeypatch, interrupt
+):
+    root = tmp_path / "notes"
+    resource = await add_notes(runtime, root)
+    for index in range(100):
+        (root / f"extra-{index}.txt").write_text("Buffered discovery recovery.", encoding="utf-8")
+    operation = await runtime.operations.scan(resource, ScanInput(embed=False))
+    blocked, release = asyncio.Event(), asyncio.Event()
+    discover = LocalFsConnector.discover
+
+    async def slow_discover(connector, scope):
+        count = 0
+        async for item in discover(connector, scope):
+            yield item
+            count += 1
+            if count == 101:
+                blocked.set()
+                await release.wait()
+
+    monkeypatch.setattr(LocalFsConnector, "discover", slow_discover)
+    worker = start_worker(runtime)
+    try:
+        await asyncio.wait_for(blocked.wait(), 10)
+        async with runtime.sessions() as session:
+            documents = list(await session.scalars(select(Document)))
+            memberships = list(await session.scalars(select(ProfileDocument)))
+        assert len(documents) == len(memberships) == 100
+        assert all(row.last_seen_run == operation.job_id for row in [*documents, *memberships])
+        if interrupt == "cancel":
+            await runtime.operations.cancel_job(operation.job_id)
+            release.set()
+            assert (await completed(runtime, [operation]))[0].state == "cancelled"
+        else:
+            await stop_worker(runtime, worker)
+            receipt = await runtime.operations.get(operation.id)
+            assert receipt.state == "queued" and receipt.job_id == operation.job_id
+
+        async with runtime.sessions() as session:
+            job = await session.get(Job, operation.job_id)
+        assert not job.is_discovery_complete
+
+        if interrupt == "shutdown":
+            runtime.stopping.clear()
+            release.set()
+            worker = start_worker(runtime)
+            receipt = (await completed(runtime, [operation]))[0]
+            assert receipt.state == "succeeded" and receipt.attempts == 2
+            async with runtime.sessions() as session:
+                job = await session.get(Job, operation.job_id)
+                memberships = list(await session.scalars(select(ProfileDocument)))
+            assert job.is_discovery_complete and job.discovered == 101
+            assert len(memberships) == 101
+            assert all(row.last_seen_run == operation.job_id for row in memberships)
+    finally:
+        release.set()
         await stop_worker(runtime, worker)
 
 

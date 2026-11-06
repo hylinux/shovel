@@ -63,6 +63,7 @@ from shovel.db.model.config import Resource, ScanProfile
 from shovel.db.model.content import Chunk, Document, ProfileDocument
 from shovel.db.model.execution import Job, JobEvent
 from shovel.db.model.retrieval import DeletionOutbox
+from shovel.db.unit_of_work import sqlite_write
 from shovel.domain.enums import (
     DeletionScope,
     DocClass,
@@ -545,25 +546,70 @@ class ScanService:
         的文档立碑。
         """
 
-        seen: list[DiscoveredItem] = []
-
         async with self._sessions() as session:
             profile = await session.get(ScanProfile, profile_id)
             if profile is None:
                 raise PipelineError("扫描 Profile 已不存在。")
-            items = (
-                self._discovery_items(job_id, connector, scope, session)
-                if resource.connector_kind == "web_search"
-                else connector.discover(scope)
-            )
-            async for item in items:
-                if outcome.discovered % 100 == 0 or resource.connector_kind == "web_search":
-                    await session.commit()
-                    await self._save_progress(job_id, outcome)
-                    if await self._cancel_requested(job_id):
-                        raise asyncio.CancelledError
-                outcome.discovered += 1
 
+        seen: list[DiscoveredItem] = []
+        batch: list[DiscoveredItem] = []
+        items = (
+            self._discovery_items(job_id, connector, scope)
+            if resource.connector_kind == "web_search"
+            else connector.discover(scope)
+        )
+        async for item in items:
+            if not batch and await self._cancel_requested(job_id):
+                raise asyncio.CancelledError
+            batch.append(item)
+            outcome.discovered += 1
+            if len(batch) == 100 or resource.connector_kind == "web_search":
+                seen.extend(
+                    await self._record_discovery_batch(
+                        job_id=job_id,
+                        profile=profile,
+                        resource=resource,
+                        items=batch,
+                        outcome=outcome,
+                        force=force,
+                    )
+                )
+                batch.clear()
+                await self._save_progress(job_id, outcome)
+
+        if batch:
+            seen.extend(
+                await self._record_discovery_batch(
+                    job_id=job_id,
+                    profile=profile,
+                    resource=resource,
+                    items=batch,
+                    outcome=outcome,
+                    force=force,
+                )
+            )
+
+        if self._embedding_enabled:
+            await self._cleanup.drain(resource_id=resource.id)
+
+        return seen
+
+    async def _record_discovery_batch(
+        self,
+        *,
+        job_id: str,
+        profile: ScanProfile,
+        resource: Resource,
+        items: Sequence[DiscoveredItem],
+        outcome: ScanOutcome,
+        force: bool,
+    ) -> list[DiscoveredItem]:
+        # Never hold SQLite's writer reservation while awaiting connector discovery.
+        if await self._cancel_requested(job_id):
+            raise asyncio.CancelledError
+        seen: list[DiscoveredItem] = []
+        async with sqlite_write(self._sessions) as session:
+            for item in items:
                 other_pipelines = await session.scalars(
                     select(ScanProfile.pipeline)
                     .join(
@@ -573,7 +619,7 @@ class ScanService:
                     .where(
                         ProfileDocument.resource_id == resource.id,
                         ProfileDocument.doc_uri == item.uri,
-                        ProfileDocument.profile_id != profile_id,
+                        ProfileDocument.profile_id != profile.id,
                     )
                 )
                 if any(pipeline != profile.pipeline for pipeline in other_pipelines):
@@ -588,11 +634,11 @@ class ScanService:
                     resource,
                     item,
                 )
-                membership = await session.get(ProfileDocument, (profile_id, item.uri, resource.id))
+                membership = await session.get(ProfileDocument, (profile.id, item.uri, resource.id))
                 if membership is None:
                     session.add(
                         ProfileDocument(
-                            profile_id=profile_id,
+                            profile_id=profile.id,
                             doc_uri=item.uri,
                             resource_id=resource.id,
                             last_seen_run=job_id,
@@ -636,9 +682,6 @@ class ScanService:
                 seen.append(item)
 
             await session.commit()
-
-        if self._embedding_enabled:
-            await self._cleanup.drain(resource_id=resource.id)
 
         return seen
 
@@ -962,11 +1005,10 @@ class ScanService:
         )
 
     async def _discovery_items(
-        self, job_id: str, connector: Connector, scope: DiscoveryScope, session: AsyncSession
+        self, job_id: str, connector: Connector, scope: DiscoveryScope
     ) -> AsyncIterator[DiscoveredItem]:
         iterator = connector.discover(scope)
         while True:
-            await session.commit()
             pending = asyncio.ensure_future(anext(iterator))
             try:
                 while not pending.done():

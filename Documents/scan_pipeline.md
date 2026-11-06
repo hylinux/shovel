@@ -26,6 +26,13 @@ Operation 参数, 立刻返回 202。后台服务复用该 Job ID 执行, 保存
 设置为 1 可恢复串行扫描; 环境变量为
 `SHOVEL_PERFORMANCE__MAX_CONCURRENT_SCANS`, 修改后重启 Host。
 
+发现阶段在 SQLite 写事务之外枚举源端条目, 每批最多 100 条再通过
+`sqlite_write` 的 `BEGIN IMMEDIATE` 短事务保存文档与 Profile 观察标记;
+Web Search 仍逐条提交。等待目录、邮件或网页枚举时不持有写锁,
+避免阻塞其他扫描、Job 心跳和 Execution 维护。进度另行保存,
+完整发现及最后一批提交成功后才允许删除对账; 失败或中断不越过此门闸。
+跨资源并发不意味着 SQLite 多写者并行, 数据库仍一次只允许一个写事务。
+
 Web 和 `shovel scan run/cleanup` 使用同一执行链。只读的 list/show 直接
 查 SQLite。运行 Host 时 CLI 走本机 REST, 离线时使用短生命周期 Host。
 `--no-embed` 仍写入可关键词检索的块, 不打开 Zvec; 后续普通向量扫描补齐

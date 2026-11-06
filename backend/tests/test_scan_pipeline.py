@@ -36,10 +36,12 @@ from shovel.domain.enums import (
     VectorState,
 )
 from shovel.exceptions.pipeline import ResourceNotScannableError, VectorSinkError
+from shovel.exceptions.resource import ConnectorDiscoveryError
 from shovel.pipeline.cleanup import IndexCleanupService
 from shovel.pipeline.embedder import NullEmbedder
 from shovel.pipeline.scan_service import ScanService
 from shovel.pipeline.sink import VectorRecord
+from shovel.services.connector_local_fs import LocalFsConnector
 from shovel.services.credentials import InMemoryCredentialStore
 from shovel.services.resource_service import ResourceDraft, ResourceService
 
@@ -448,7 +450,7 @@ async def test_incremental_discovers_same_second_edits_and_old_mtime_arrivals(
     assert embedder.calls == calls
 
 
-@pytest.mark.parametrize("failure", ["missing-root", "walk-permission", "stat-permission"])
+@pytest.mark.parametrize("failure", ["missing-root", "walk-permission", "stat-permission", "after-batch"])
 async def test_incomplete_discovery_preserves_index_and_disables_reconciliation(
     service: ScanService,
     sessions: async_sessionmaker[AsyncSession],
@@ -458,6 +460,9 @@ async def test_incomplete_discovery_preserves_index_and_disables_reconciliation(
     monkeypatch: pytest.MonkeyPatch,
     failure: str,
 ) -> None:
+    if failure == "after-batch":
+        for index in range(100):
+            (corpus / f"extra-{index}.txt").write_text("Discovery batch boundary.", encoding="utf-8")
     await service.scan(resource_id, mode=ScanMode.FULL_SWEEP)
     before = set(sink.records)
     if failure == "missing-root":
@@ -471,7 +476,7 @@ async def test_incomplete_discovery_preserves_index_and_disables_reconciliation(
             return original_scandir(path)
 
         monkeypatch.setattr(os, "scandir", fail_scandir)
-    else:
+    elif failure == "stat-permission":
         original_stat = Path.stat
 
         def fail_stat(path: Path, *args: Any, **kwargs: Any) -> Any:
@@ -480,6 +485,18 @@ async def test_incomplete_discovery_preserves_index_and_disables_reconciliation(
             return original_stat(path, *args, **kwargs)
 
         monkeypatch.setattr(Path, "stat", fail_stat)
+    else:
+        discover = LocalFsConnector.discover
+
+        async def fail_after_batch(connector, scope):
+            count = 0
+            async for item in discover(connector, scope):
+                yield item
+                count += 1
+                if count == 101:
+                    raise ConnectorDiscoveryError(str(corpus), "source disconnected after a batch")
+
+        monkeypatch.setattr(LocalFsConnector, "discover", fail_after_batch)
     try:
         outcome = await service.scan(resource_id, mode=ScanMode.FULL_SWEEP)
         assert outcome.state == JobState.FAILED
@@ -491,6 +508,9 @@ async def test_incomplete_discovery_preserves_index_and_disables_reconciliation(
             assert not job.may_reconcile_deletions
             documents = list(await session.scalars(select(Document)))
             assert all(doc.lifecycle_state != DocumentLifecycleState.TOMBSTONED for doc in documents)
+            if failure == "after-batch":
+                assert job.discovered == 101
+                assert sum(doc.last_seen_run == outcome.job_id for doc in documents) == 100
     finally:
         if failure == "missing-root":
             corpus.with_name(f"{corpus.name}-disconnected").rename(corpus)

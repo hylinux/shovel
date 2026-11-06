@@ -15,6 +15,7 @@ dependencies = [
     "agent-framework-openai>=1.17.0",
     "aiosqlite>=0.22.1",
     "alembic>=1.18.5",
+    "azure-identity>=1.25,<2",
     "cryptography>=46",
     "greenlet>=3.5.5",
     # 知识库 embedding 的 HTTP 客户端。直接用 httpx 而不是 openai SDK:

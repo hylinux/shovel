@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import sys
 from contextlib import AsyncExitStack
 from pathlib import Path
@@ -17,6 +18,7 @@ from openai import AsyncOpenAI
 from shovel.config.agent_config import AgentSettings
 from shovel.runtime.agent_extensions import AgentExtensions
 from shovel.runtime.errors import RuntimeFailure
+from shovel.runtime.mcp_config import MCPConfigurationService
 
 
 def completion(*, content: str | None = None, calls: list[dict[str, Any]] | None = None) -> httpx.Response:
@@ -197,6 +199,84 @@ async def test_real_mcp_transports_execute_and_close_on_owner_task(
             assert (await agent.run("Echo test.")).text == "MCP completed."
         finally:
             await asyncio.create_task(extensions.close())
+
+
+@pytest.mark.live
+@pytest.mark.skipif(
+    os.environ.get("SHOVEL_RUN_LEARN_MCP_TESTS") != "1",
+    reason="Explicit Microsoft Learn MCP network opt-in required",
+)
+@pytest.mark.parametrize(
+    ("tool_name", "arguments", "expected"),
+    [
+        (
+            "microsoft_docs_search",
+            {"query": "Microsoft Learn MCP Server endpoint Streamable HTTP"},
+            "learn.microsoft.com",
+        ),
+        (
+            "microsoft_docs_fetch",
+            {"url": "https://learn.microsoft.com/en-us/training/support/mcp"},
+            "https://learn.microsoft.com/api/mcp",
+        ),
+        (
+            "microsoft_code_sample_search",
+            {"query": "Azure Blob Storage Python upload_blob", "language": "python"},
+            "upload_blob",
+        ),
+    ],
+)
+async def test_learn_mcp_tools_execute_through_shovel_agent(
+    tmp_path: Path, tool_name: str, arguments: dict[str, str], expected: str
+) -> None:
+    service = MCPConfigurationService(tmp_path)
+    service.save(
+        json.dumps(
+            {
+                "mcpServers": {
+                    "microsoft_learn": {
+                        "type": "http",
+                        "url": "https://learn.microsoft.com/api/mcp",
+                        "allowed_tools": [
+                            "microsoft_docs_search",
+                            "microsoft_docs_fetch",
+                            "microsoft_code_sample_search",
+                        ],
+                    }
+                }
+            }
+        ),
+        service.read()["revision"],
+    )
+    requests: list[dict[str, Any]] = []
+
+    def model(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        requests.append(body)
+        if len(requests) == 1:
+            names = {item["function"]["name"] for item in body["tools"]}
+            name = f"mcp_microsoft_learn_{tool_name}"
+            assert name in names
+            return completion(calls=[tool_call(name, arguments)])
+        results = [message["content"] for message in body["messages"] if message["role"] == "tool"]
+        assert len(results) == 1
+        assert expected in results[0]
+        return completion(content="Microsoft Learn MCP completed.")
+
+    async with AsyncOpenAI(
+        api_key="test", http_client=httpx.AsyncClient(transport=httpx.MockTransport(model))
+    ) as sdk:
+        client = OpenAIChatCompletionClient(model="test", async_client=sdk)
+        extensions = AgentExtensions(AgentSettings(workspace_path=tmp_path))
+        try:
+            async with asyncio.timeout(90):
+                await extensions.load(client)
+                agent = Agent(client, tools=extensions.tools)
+                response = await agent.run("Run the selected public Microsoft Learn documentation tool.")
+                assert response.text == "Microsoft Learn MCP completed."
+                assert len(requests) == 2
+        finally:
+            await extensions.close()
 
 
 @pytest.mark.parametrize(

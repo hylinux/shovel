@@ -95,6 +95,71 @@ events. Full sweeps do not infer deletion from missing pages, and the indexing
 Document limit does not cap crawl requests. See the root README's website
 crawling section for policy, retry rules and supported content.
 
+## Microsoft Learn MCP example
+
+In **Settings → MCP Server Management**, merge this entry into the existing
+`mcpServers` object, preserving any other servers:
+
+```json
+{
+  "mcpServers": {
+    "microsoft_learn": {
+      "type": "http",
+      "url": "https://learn.microsoft.com/api/mcp",
+      "disabled": false,
+      "allowed_tools": [
+        "microsoft_docs_search",
+        "microsoft_docs_fetch",
+        "microsoft_code_sample_search"
+      ]
+    }
+  }
+}
+```
+
+The [official Microsoft Learn MCP server](https://learn.microsoft.com/en-us/training/support/mcp)
+uses Streamable HTTP and requires no authentication or API key. The domain is
+`learn.microsoft.com`, not `learning.microsoft.com`. Opening the MCP endpoint in
+a browser can return HTTP 405; that is not a connection test.
+
+Save the configuration, finish any active/queued chats, and use **Restart Agent**.
+Saving alone does not connect to the server; the next chat loads its tools.
+This config belongs to Shovel's workspace `mcp.json`, not Copilot CLI's
+`.github\mcp.json`. HTTP MCP does not require Python extensions to be enabled.
+
+In Chat, use these public-data-only prompts:
+
+| Test | Prompt | Expected evidence |
+| --- | --- | --- |
+| Documentation search | Use `mcp_microsoft_learn_microsoft_docs_search` to find the official Azure Functions Python developer guide. Summarize the programming models and provide the official URLs. Do not use local document search. | A matching MCP tool event and Learn search results, followed by an answer with official links. |
+| Complete article | Use `mcp_microsoft_learn_microsoft_docs_fetch` to read `https://learn.microsoft.com/en-us/training/support/mcp`. State its endpoint, transport and authentication requirements. | Endpoint `https://learn.microsoft.com/api/mcp`, Streamable HTTP, no authentication required. |
+| Code samples | Use `mcp_microsoft_learn_microsoft_code_sample_search` with query `Azure Blob Storage Python upload_blob` and language `python`. Explain one returned sample and cite its source. | A code-sample MCP call with Python results mentioning `upload_blob`. |
+
+An answer from model knowledge alone is not a passing MCP test: inspect the tool
+activity, then wait for `RUN_FINISHED`. A model must support tool calling to run
+these Chat checks; remote model providers may charge and receive prompt/tool
+content. Do not include private documents, credentials or business data.
+
+For a repeatable integration check, run from the repository root:
+
+```powershell
+$env:SHOVEL_RUN_LEARN_MCP_TESTS = "1"
+try {
+  uv run pytest backend\tests\test_agent_extensions.py::test_learn_mcp_tools_execute_through_shovel_agent --no-cov
+} finally {
+  Remove-Item Env:\SHOVEL_RUN_LEARN_MCP_TESTS
+}
+```
+
+The three cases validate Shovel's configuration service, extension loader and
+MAF Agent tool loop against the real public Learn MCP endpoint. Model responses
+are deterministic fixtures, so no model credentials or paid inference are used.
+Only fixed public queries/URLs are sent; the workspace is temporary and existing
+settings/stores are untouched. These cases skip unless explicitly opted in.
+They verify the integration, not a configured model's tool selection or the Web UI.
+The server's current tools and schemas are discovered when the connection opens;
+network/server failures remain test failures rather than silent skips.
+
 ## API contract
 
 All fetches use relative `/api/v1` paths. List endpoints return `{items: [...]}`. Resource mutations, scans, retries, and index cleanup return an Operation with HTTP 202; sessions return HTTP 201 on creation, and message creation returns the persisted Message after the model call. The Session interface retains the existing `/conversations` API paths and `conversation_id` wire field. IDs are URL-encoded. All `*_at` timestamps are numeric Unix seconds; the shared date formatter multiplies by 1,000 before constructing a JavaScript Date. Missing or invalid dates display `—`; Session history pages are deduplicated and ordered by numeric `updated_at`, while other API list ordering is preserved. Scan progress is a fraction from 0 to 1. Cancellation returns a Job; memory deletion returns `{deleted: true}`. Errors support `{error: {code, message, hint?}}` and FastAPI validation `detail`.

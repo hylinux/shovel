@@ -170,6 +170,61 @@ Offline fixtures are not proof that a particular model will extract facts or
 cite sources reliably. Remote chat/embedding providers receive the text sent to
 them and may charge for calls.
 
+### Azure OpenAI with Azure CLI authentication
+
+For `azure_openai`, an empty `security_key` selects Azure CLI authentication.
+Shovel uses the asynchronous `AzureCliCredential` and a cached bearer-token
+provider that refreshes tokens before expiry. Credentials are acquired lazily
+on model requests; startup does not sign in or run inference.
+
+```toml
+[model]
+model_provider_type = "azure_openai"
+base_endpoint = "https://YOUR-RESOURCE.openai.azure.com"
+model_name = "YOUR-DEPLOYMENT-NAME"
+api_version = "2025-04-01-preview"
+security_key = ""
+max_input_chars = 160000
+max_output_tokens = 1024
+timeout_seconds = 300
+```
+
+Use the resource root endpoint, your actual **deployment name**, and an API
+version supported by that deployment. This client uses the versioned Azure
+Chat Completions API, not the `/openai/v1` endpoint.
+
+Install dependencies from the committed lock and sign in before starting the
+Host:
+
+```powershell
+uv sync --python 3.14-x86_64 --locked --all-extras --dev
+az login --tenant YOUR-TENANT-ID
+uv run shovel run dev
+```
+
+The Host must run as the same OS user with access to that Azure CLI login and
+`az` on its PATH. Grant that identity **Cognitive Services OpenAI User** (or
+equivalent inference permissions) on the Azure OpenAI resource. Authentication
+does not bypass resource networking rules or enterprise egress policy.
+CLI login failures are reported explicitly; Shovel does not launch interactive
+login or silently fall back to an API key.
+
+A non-empty `security_key` preserves API-key authentication. Environment
+overrides such as `SHOVEL_MODEL__SECURITY_KEY` take precedence over the empty
+TOML value, so unset them when choosing CLI authentication. Do not supply a
+manually acquired access token as `security_key` or `AZURE_OPENAI_AD_TOKEN`;
+let the provider acquire and refresh tokens. CLI mode rejects a configured
+`AZURE_OPENAI_AD_TOKEN` rather than letting a static token bypass renewal.
+The generic `AZURE_OPENAI_ENDPOINT`, `AZURE_OPENAI_MODEL`, and
+`AZURE_OPENAI_API_VERSION` variables do not configure Shovel; use the TOML fields
+or their `SHOVEL_MODEL__...` equivalents.
+
+Separately configured `[memory.llm]` can use the same Azure OpenAI settings with
+an empty key, or remain local. Knowledge and Memory embedding authentication
+is unchanged; existing `bge-m3` models, index dimensions, and paths need not
+change. Remote model calls transmit the selected context to Azure and may incur
+charges. Restart the entire Host after changing configuration.
+
 ## Knowledge and RAG
 
 ### First keyword-only loop

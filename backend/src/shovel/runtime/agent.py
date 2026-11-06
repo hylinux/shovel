@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import re
 from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass, field, replace
@@ -38,6 +39,8 @@ from agent_framework import (
 from agent_framework.ag_ui import AgentFrameworkAgent
 from agent_framework.exceptions import ChatClientException
 from agent_framework.openai import OpenAIChatCompletionClient
+from azure.core.exceptions import ClientAuthenticationError
+from azure.identity.aio import AzureCliCredential, get_bearer_token_provider
 from openai import APIError, AsyncAzureOpenAI, AsyncOpenAI
 
 from shovel.config.model_settings import DefaultAgentModelSettings, ModelProviderType
@@ -180,6 +183,38 @@ def model_endpoint(settings: DefaultAgentModelSettings) -> str:
     raise RuntimeFailure("此模型供应商需要显式配置 base_endpoint。", status=503)
 
 
+class _AzureCliOpenAIClient(AsyncAzureOpenAI):
+    def __init__(self, **kwargs: Any) -> None:
+        if "AZURE_OPENAI_AD_TOKEN" in os.environ:
+            raise RuntimeFailure(
+                "Azure CLI authentication cannot be combined with AZURE_OPENAI_AD_TOKEN.",
+                status=503,
+                hint="Unset AZURE_OPENAI_AD_TOKEN so the provider can acquire and refresh tokens.",
+            )
+        self._credential = AzureCliCredential(process_timeout=30)
+        self._token_provider = get_bearer_token_provider(
+            self._credential, "https://cognitiveservices.azure.com/.default"
+        )
+        super().__init__(azure_ad_token_provider=self._access_token, **kwargs)
+
+    async def _access_token(self) -> str:
+        require_ordinary(EgressChannel.MODEL)
+        try:
+            return await self._token_provider()
+        except ClientAuthenticationError:
+            raise RuntimeFailure(
+                "Azure CLI authentication failed.",
+                status=503,
+                hint="Run az login for the resource tenant and check Azure OpenAI access permissions.",
+            ) from None
+
+    async def close(self) -> None:
+        try:
+            await super().close()
+        finally:
+            await self._credential.close()
+
+
 def create_framework_client(
     settings: DefaultAgentModelSettings, http_client: httpx.AsyncClient, *, max_iterations: int
 ) -> tuple[AsyncOpenAI, OpenAIChatCompletionClient[Any]]:
@@ -195,9 +230,12 @@ def create_framework_client(
     if settings.model_provider_type in (ModelProviderType.AZUREOPENAI, ModelProviderType.AZUREFOUNDRY):
         if not settings.api_version:
             raise RuntimeFailure("Azure 对话模型需要 api_version。", status=503)
-        sdk: AsyncOpenAI = AsyncAzureOpenAI(
-            **common, azure_endpoint=endpoint, api_version=settings.api_version
-        )
+        sdk: AsyncOpenAI
+        if settings.model_provider_type == ModelProviderType.AZUREOPENAI and not settings.security_key:
+            common["api_key"] = None
+            sdk = _AzureCliOpenAIClient(**common, azure_endpoint=endpoint, api_version=settings.api_version)
+        else:
+            sdk = AsyncAzureOpenAI(**common, azure_endpoint=endpoint, api_version=settings.api_version)
     else:
         sdk = AsyncOpenAI(**common, base_url=endpoint)
     return sdk, OpenAIChatCompletionClient(

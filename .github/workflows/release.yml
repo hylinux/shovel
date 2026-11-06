@@ -4,9 +4,17 @@ on:
   push:
     tags: [ "v*.*.*" ]
   workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing version tag to release (for example v0.1.5)
+        required: true
+        type: string
 
 permissions:
   contents: write     # 创建 Release 所需，无需任何 Secret
+
+env:
+  RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
 
 jobs:
   release:
@@ -14,6 +22,7 @@ jobs:
     steps:
       - uses: actions/checkout@v5
         with:
+          ref: ${{ inputs.tag && format('refs/tags/{0}', inputs.tag) || github.ref }}
           path: shovel
           fetch-depth: 0
 
@@ -27,14 +36,13 @@ jobs:
 
       # tag 必须与 pyproject 的 version 一致
       - name: Check tag matches project version
-        if: startsWith(github.ref, 'refs/tags/')
         working-directory: shovel
         shell: bash
         run: |
-          TAG="${GITHUB_REF_NAME#v}"
+          TAG="${RELEASE_TAG#v}"
           VER=$(python -c "import tomllib,pathlib;print(tomllib.loads(pathlib.Path('pyproject.toml').read_text())['project']['version'])")
           echo "tag=$TAG  project=$VER"
-          test "$TAG" = "$VER" || { echo "::error::tag $TAG != pyproject version $VER"; exit 1; }
+          test "$RELEASE_TAG" = "v$VER" || { echo "::error::tag $RELEASE_TAG != v$VER"; exit 1; }
 
       - name: Run tests before release
         working-directory: shovel
@@ -71,7 +79,10 @@ jobs:
         working-directory: shovel
         run: |
           uv venv .tools/package-smoke --python 3.14
-          uv pip install --python .tools/package-smoke/bin/python dist/*.whl
+          UV_PROJECT_ENVIRONMENT=.tools/package-smoke \
+            uv sync --locked --no-dev --no-editable --no-install-project
+          uv pip install --python .tools/package-smoke/bin/python \
+            --no-deps dist/*.whl
           .tools/package-smoke/bin/python scripts/smoke_wheel.py
 
       - name: List artifacts
@@ -81,10 +92,10 @@ jobs:
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ github.ref_name }}
-          name: ${{ github.ref_name }}
+          tag_name: ${{ env.RELEASE_TAG }}
+          name: ${{ env.RELEASE_TAG }}
           files: |
             shovel/dist/*.whl
             shovel/dist/*.tar.gz
           generate_release_notes: true
-          prerelease: ${{ contains(github.ref_name, 'rc') || contains(github.ref_name, 'beta') }}
+          prerelease: ${{ contains(env.RELEASE_TAG, 'rc') || contains(env.RELEASE_TAG, 'beta') }}

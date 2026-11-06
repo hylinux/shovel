@@ -709,6 +709,11 @@ Main-branch provenance jobs attest qualifying candidate artifacts after the
 required lanes succeed; they do not issue organization trust or live approval.
 See [Actions](https://github.com/hylinux/shovel/actions) for actual run status and
 [release workflow](.github/workflows/release.yml) for release automation.
+Release wheel validation installs dependencies from `uv.lock`, then installs the
+built wheel with `--no-deps` to avoid resolving newer, untested dependencies.
+To retry a release without moving its tag, run the Release workflow from `main`
+with the existing version tag in its required `tag` input. It checks out that
+tag and verifies it matches the project version before building and publishing.
 
 Historical validation reports describe the commits/environments measured.
 Neither old failures nor old successes establish the result for a new final

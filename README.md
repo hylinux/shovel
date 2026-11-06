@@ -172,6 +172,9 @@ them and may charge for calls.
 
 ### Azure OpenAI with Azure CLI authentication
 
+See the [complete Azure OpenAI configuration reference](Documents/azure_openai_configuration.md)
+for chat, Memory, embedding model selection, authentication, and index migration.
+
 For `azure_openai`, an empty `security_key` selects Azure CLI authentication.
 Shovel uses the asynchronous `AzureCliCredential` and a cached bearer-token
 provider that refreshes tokens before expiry. Credentials are acquired lazily

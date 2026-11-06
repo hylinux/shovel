@@ -1,6 +1,6 @@
 "use client";
 
-import { LanguageSelector, useI18n } from "./locale-context";
+import { useI18n } from "./locale-context";
 
 import { useEffect, useReducer, useRef, useState, type FormEvent, type KeyboardEvent, type PointerEvent } from "react";
 import Link from "next/link";
@@ -24,14 +24,14 @@ const navigationGroups = [
     { view: "Background tasks", symbol: "≡" },
     { view: "Search Documents", symbol: "⌕" },
   ] },
+  { id: "development-navigation", label: "Development", symbol: "⌘", items: [
+    { view: "Skills", symbol: "▧" },
+    { view: "Workflows", symbol: "⌘" },
+  ] },
   { id: "service-navigation", label: "Services", symbol: "◷", items: [
     { view: "Proactive Services", symbol: "◷" },
     { view: "Approval Center", symbol: "✓" },
     { view: "Activity", symbol: "↗" },
-  ] },
-  { id: "development-navigation", label: "Development", symbol: "⌘", items: [
-    { view: "Skills", symbol: "▧" },
-    { view: "Workflows", symbol: "⌘" },
   ] },
 ] as const;
 const descriptions: Record<View, string> = {
@@ -149,8 +149,7 @@ export default function Home() {
         </nav>
         <div className="sidebar-bottom">
           <nav className="settings-navigation" aria-label={t("Settings navigation")}><button aria-current={view === "Settings" ? "page" : undefined} onClick={() => navigate("Settings")}><span className="nav-symbol" aria-hidden="true">⚙</span>{t("Settings")}</button></nav>
-          <LanguageSelector />
-          <div className="sidebar-footer"><span className={`connection-dot ${status.data && !status.error ? "connected" : ""}`} />{status.data && !status.error ? t("Local runtime connected") : status.loading ? t("Connecting to runtime…") : t("Runtime unavailable")}<p>{t("Your files. Your model choices.")}</p></div>
+          <div className="sidebar-footer"><span className={`connection-dot ${status.data && !status.error ? "connected" : ""}`} />{status.data && !status.error ? t("Local runtime connected") : status.loading ? t("Connecting to runtime…") : t("Runtime unavailable")}</div>
         </div>
         <SidebarResizeHandle />
       </aside>

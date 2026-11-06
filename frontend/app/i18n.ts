@@ -833,6 +833,7 @@ export const chinese: Readonly<Record<string, string>> = {
   "memory.index.rebuild": "重建记忆索引",
   "Capability": "能力",
   "Language": "界面语言",
+  "Choose the interface language. Changes apply immediately and are saved in this browser.": "选择界面语言。更改会立即生效，并保存在当前浏览器中。",
   "Language preference could not be saved. Your selection applies only to this page.": "无法保存语言偏好。您的选择仅在当前页面有效。",
   "Language preference could not be restored. English is used until you choose a language.": "无法读取语言偏好。选择语言前将使用英文。",
   "Unsupported interface language.": "不支持的界面语言。",

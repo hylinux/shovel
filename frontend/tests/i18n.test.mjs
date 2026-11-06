@@ -129,9 +129,16 @@ test("The locale provider keeps server rendering in English without accessing br
   const require = createRequire(import.meta.url);
   new Function("require", "exports", outputText)(id => id === "./i18n" ? i18n : require(id), exports);
   const { LocaleProvider, LanguageSelector } = exports;
-  const html = renderToStaticMarkup(createElement(LocaleProvider, null, createElement(LanguageSelector)));
+  const html = renderToStaticMarkup(createElement(LocaleProvider, null,
+    createElement(LanguageSelector),
+    createElement(LanguageSelector, { id: "settings-interface-language" }),
+  ));
   assert.match(html, /aria-label="Language"/);
   assert.match(html, /value="en"[^>]*selected=""/);
   assert.match(html, /value="zh-CN"/);
+  for (const id of ["interface-language", "settings-interface-language"]) {
+    assert.equal(html.match(new RegExp(`id="${id}"`, "g"))?.length, 1);
+    assert.match(html, new RegExp(`<label for="${id}">Language / 语言</label>`));
+  }
   assert.throws(() => renderToStaticMarkup(createElement(LanguageSelector)), /requires LocaleProvider/);
 });

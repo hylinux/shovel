@@ -98,6 +98,7 @@ dd { margin: 0 0 8px; }
 .load-sessions { width: 100%; margin-top: 8px; font-size: 12px; }
 .sidebar-bottom { flex-shrink: 0; margin-top: auto; padding-top: 16px; }
 .language-selector { margin: 12px 10px 0; }
+.settings-card .language-selector { margin: 0; max-width: 360px; }
 .language-selector label { font-size: 12px; color: var(--muted); }
 .language-selector select { margin-top: 5px; padding: 7px 9px; }
 .language-error { color: var(--danger); font-size: 12px; margin-top: 7px; }
@@ -225,7 +226,7 @@ progress::-moz-progress-bar { background: var(--accent); }
 .search-options select { margin-top: 6px; }
 .grow { flex: 1; min-width: 0; }
 .settings-content { display: grid; gap: 22px; max-width: 1120px; }
-.settings-index { position: sticky; top: 16px; z-index: 1; display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 5px; padding: 5px; border: 1px solid var(--border); border-radius: 10px; background: var(--surface); box-shadow: 0 3px 14px #263f5008; }
+.settings-index { position: sticky; top: 16px; z-index: 1; display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 5px; padding: 5px; border: 1px solid var(--border); border-radius: 10px; background: var(--surface); box-shadow: 0 3px 14px #263f5008; }
 .settings-index button { display: block; min-height: 48px; padding: 10px 12px; border: 0; border-radius: 6px; color: var(--muted); background: transparent; text-align: center; font-weight: 550; font-size: 13px; }
 .settings-index button:hover, .settings-index button:focus-visible, .settings-index button[aria-selected="true"] { color: var(--accent); background: var(--accent-soft); }
 .settings-panel { display: grid; min-width: 0; gap: 22px; }

@@ -1,6 +1,6 @@
 "use client";
 
-import { useI18n } from "./locale-context";
+import { LanguageSelector, useI18n } from "./locale-context";
 
 import { useRef, useState, type KeyboardEvent } from "react";
 import { segment, useAction, useQuery, type Items, type Memory, type Operation, type Status } from "./api";
@@ -20,6 +20,7 @@ const settingsTabs = [
   { id: "memory", label: "Manage long-term Memory" },
   { id: "mcp", label: "MCP Server Management" },
   { id: "instructions", label: "Agent instructions" },
+  { id: "language", label: "Language" },
 ] as const;
 type SettingsTab = typeof settingsTabs[number]["id"];
 
@@ -51,9 +52,18 @@ export function Settings({ status }: { status?: Status }) {
       {visited.includes(tab.id) && (tab.id === "runtime" ? <RuntimeConfiguration status={status} />
         : tab.id === "memory" ? <MemoryManagement status={status} />
           : tab.id === "mcp" ? <MCPManagement />
-            : <AgentInstructionsManagement running={Boolean(status?.chat_capacity && (status.chat_capacity.running || status.chat_capacity.waiting))} />)}
+            : tab.id === "instructions" ? <AgentInstructionsManagement running={Boolean(status?.chat_capacity && (status.chat_capacity.running || status.chat_capacity.waiting))} />
+              : <LanguageSettings />)}
     </div>)}
   </div>;
+}
+
+function LanguageSettings() {
+  const { t } = useI18n();
+  return <section className="settings-card" aria-labelledby="settings-language-heading">
+    <header className="settings-card-header"><div><h2 id="settings-language-heading">{t("Language")}</h2><p className="muted">{t("Choose the interface language. Changes apply immediately and are saved in this browser.")}</p></div></header>
+    <LanguageSelector id="settings-interface-language" />
+  </section>;
 }
 
 function RuntimeConfiguration({ status }: { status?: Status }) {

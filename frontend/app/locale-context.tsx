@@ -75,11 +75,11 @@ export function useI18n(): I18n {
   return context;
 }
 
-export function LanguageSelector() {
+export function LanguageSelector({ id = "interface-language" }: { id?: string }) {
   const { locale, setLocale, error, t } = useI18n();
   return <div className="language-selector">
-    <label htmlFor="interface-language">Language / 语言</label>
-    <select id="interface-language" aria-label={t("Language")} value={locale} onChange={event => setLocale(event.target.value)}>
+    <label htmlFor={id}>Language / 语言</label>
+    <select id={id} aria-label={t("Language")} value={locale} onChange={event => setLocale(event.target.value)}>
       <option value="en" lang="en">English</option>
       <option value="zh-CN" lang="zh-CN">简体中文</option>
     </select>

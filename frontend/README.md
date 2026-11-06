@@ -24,6 +24,10 @@ npm run dev
 
 Open `http://localhost:3000`. Development alone rewrites `/api/*` to the HTTP backend at the specified host and port (defaults shown above). Folder paths refer to the backend machine, not the browser. Windows paths such as `C:\Users\you\Documents` are preserved as entered.
 
+Keep Tailwind directives in `app\tailwind.css` and handwritten layout rules in
+`app\globals.css`, imported in that order. This keeps incremental layout edits
+outside the Tailwind loader's cached compiler so development serves fresh CSS.
+
 With `uv run shovel run dev`, `[shovel.chat]` browser diagnostics are forwarded
 to the terminal with the `web` prefix. A shared `run_id` correlates submission,
 HTTP status and backend request ID, first text, tool activity, saved-message

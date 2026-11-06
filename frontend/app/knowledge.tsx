@@ -72,7 +72,7 @@ function Chat({ sessionId, status, onActivity }: { sessionId: string; status?: S
         event.preventDefault();
         if (!event.repeat && !sendDisabled) event.currentTarget.form?.requestSubmit();
       }
-    }} placeholder={t("Ask about your documents…")} rows={4} maxLength={16000} required disabled={action.busy} aria-describedby="message-shortcuts" />
+    }} placeholder={t("Ask about your documents…")} rows={3} maxLength={16000} required disabled={action.busy} aria-describedby="message-shortcuts" />
     <div className="composer-footer"><span className="muted" id="message-shortcuts">{t("Ctrl + Enter to send · Enter for a new line")}</span>
       <button className="primary" aria-keyshortcuts="Control+Enter" disabled={sendDisabled}>{action.busy ? t("Waiting for model…") : t("Send Message")}</button></div>
   </form></>;

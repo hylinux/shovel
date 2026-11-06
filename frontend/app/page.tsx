@@ -156,8 +156,8 @@ export default function Home() {
         </div>
         <SidebarResizeHandle />
       </aside>
-      <main id="main" className="main" tabIndex={-1}>
-        <header className="page-heading"><div><h1>{t(view)}</h1><p>{t(descriptions[view])}</p></div><span className="local-label">{t("Local-first runtime")}</span></header>
+      <main id="main" className={view === "Chat" ? "main main-chat" : "main"} tabIndex={-1}>
+        <header className="page-heading"><div><h1>{t(view)}</h1><p title={view === "Chat" ? t(descriptions[view]) : undefined}>{t(descriptions[view])}</p></div>{view !== "Chat" && <span className="local-label">{t("Local-first runtime")}</span>}</header>
         <Feedback error={status.error} retry={status.refresh} />
         {resourcesNeeded && <Feedback error={resources.error} retry={resources.refresh} />}
         {view === "Resources" && <Resources status={status.data} refresh={resources.refresh} />}
@@ -172,7 +172,7 @@ export default function Home() {
           {item === "Skills" && <CapabilityLibrary kind="skill" active={view === item} />}
           {item === "Workflows" && <CapabilityLibrary kind="workflow" active={view === item} />}
         </div>)}
-        <footer className="page-footer">{t("Shovel · Local documents, connected knowledge")}</footer>
+        {view !== "Chat" && <footer className="page-footer">{t("Shovel · Local documents, connected knowledge")}</footer>}
       </main>
     </div>
   );

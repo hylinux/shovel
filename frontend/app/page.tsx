@@ -131,13 +131,17 @@ export default function Home() {
     setSelectedSession("");
     refreshSessions();
   }
+  const connectionLabel = status.data && !status.error ? t("Local runtime connected") : status.loading ? t("Connecting to runtime…") : t("Runtime unavailable");
   return (
     <div className="workbench">
       <title>{t("Shovel — local knowledge workbench")}</title>
       <a className="skip-link" href="#main">{t("Skip to content")}</a>
       <aside id="sidebar" className="sidebar">
         <Link href="/" className="brand" aria-label={t("Shovel home")}><span className="brand-mark" aria-hidden="true">{t("S")}</span>{t("Shovel")}</Link>
-        <p className="sidebar-caption">{t("Personal Agent Platform")}</p>
+        <div className="sidebar-caption">
+          <span className="sidebar-caption-label" title={t("Personal Agent Platform")}>{t("Personal Agent Platform")}</span>
+          <div className="sidebar-connection" title={connectionLabel}><span className={`connection-dot ${status.data && !status.error ? "connected" : ""}`} aria-hidden="true" /><span className="connection-label">{connectionLabel}</span></div>
+        </div>
         <nav className="main-navigation" aria-label={t("Main navigation")}>
           {navigationGroups.map((group) => <SidebarGroup key={group.id} group={group} view={view} onNavigate={navigate} />)}
           <div className="chat-navigation" data-expanded={showSessions}>
@@ -149,7 +153,6 @@ export default function Home() {
         </nav>
         <div className="sidebar-bottom">
           <nav className="settings-navigation" aria-label={t("Settings navigation")}><button aria-current={view === "Settings" ? "page" : undefined} onClick={() => navigate("Settings")}><span className="nav-symbol" aria-hidden="true">⚙</span>{t("Settings")}</button></nav>
-          <div className="sidebar-footer"><span className={`connection-dot ${status.data && !status.error ? "connected" : ""}`} />{status.data && !status.error ? t("Local runtime connected") : status.loading ? t("Connecting to runtime…") : t("Runtime unavailable")}</div>
         </div>
         <SidebarResizeHandle />
       </aside>

@@ -19,7 +19,7 @@ inference local**.
 | Area | Current state |
 | --- | --- |
 | Personal workbench | Streaming Chat, persistent sessions, Search Documents, Resources, Background tasks, and Settings are implemented. |
-| Knowledge and Memory | Durable ingestion, keyword/vector retrieval, citations, cross-session facts, index cleanup, and restart recovery are implemented. Model-dependent behavior still requires suitable models. |
+| Knowledge and Memory | Durable concurrent ingestion across resources, keyword/vector retrieval, citations, cross-session facts, index cleanup, and restart recovery are implemented. Model-dependent behavior still requires suitable models. |
 | Capability platform | Immutable versions, one durable Execution lifecycle, narrowing permissions, approvals, serial Workflow V1, and event/interval/daily Proactive Services are implemented. |
 | Enterprise security | Authentication/IPC controls, information-flow and source-policy gates, external-effect recovery contracts, governance controls, and signed rollout enforcement are implemented. Unsupported or unqualified enterprise paths remain denied. |
 | Distribution and evidence | Bundled-wheel smoke tests, Windows native/controlled-installation candidates, inventory checks, and CI provenance workflows are implemented. Candidate artifacts are not organization-approved installations. |
@@ -269,15 +269,35 @@ even if the old and new models both output 1024 dimensions.
 Host (default **5**, range **1-64**). Set it to `1` for serial scanning, or use
 `SHOVEL_PERFORMANCE__MAX_CONCURRENT_SCANS` as an environment override, then
 restart the Host. Different resources can scan concurrently; all profiles and
-jobs for the same resource remain serial. A queued non-scan operation is a
-barrier: active scans finish before resource changes, cleanup or platform work
-execute. Memory retains its separate worker.
+jobs for the same resource remain serial. With the default configuration, up to
+**five different resources** can scan at once; excess jobs are queued:
+
+```toml
+[performance]
+max_concurrent_scans = 5
+```
+
+In the scan worker's queue, a non-scan operation is a barrier: active scans
+finish before that operation runs. This includes queued resource changes,
+cleanup, and root platform executions. Memory extraction and Execution
+maintenance run in separate workers.
+
+Discovery enumerates source items **outside SQLite write transactions**, then
+persists batches of at most 100 items using short `BEGIN IMMEDIATE` transactions;
+Web Search retains per-item commits. Waiting for directory, Outlook, or website
+enumeration does not hold the database write lock, allowing other scans,
+Job heartbeats, and Execution maintenance to proceed. SQLite still permits
+only one writer at a time; concurrent scans do not make database writes parallel.
 
 This limits jobs, not documents or embedding batch size. Zvec native writes
 remain serialized, and Azure quotas can still limit embedding throughput.
 Queued receipts and Job IDs remain durable; stopping the Host cancels and
 drains in-flight scan tasks, requeuing interrupted scans for restart rather
-than treating shutdown as user cancellation.
+than treating shutdown as user cancellation. Complete discovery and a successful
+final-batch commit are required before deletion reconciliation; failed or
+interrupted discovery cannot authorize deletion of unseen documents.
+Already failed scans are not automatically restarted: inspect the error and
+submit a new scan after correcting its cause.
 
 ## Knowledge and RAG
 
@@ -615,6 +635,7 @@ handling, and includes coverage by default. Focused examples:
 
 ```powershell
 uv run pytest backend\tests\test_chunker.py::test_same_input_yields_identical_ids --no-cov
+uv run pytest backend\tests\test_scan_concurrency.py backend\tests\test_scan_pipeline.py --no-cov
 uv run pytest backend\tests\test_native_memory.py backend\tests\test_memory_tasks.py --no-cov
 uv run pytest backend\tests\test_platform_demos.py --no-cov
 uv run pytest backend\tests\test_enterprise_rollout.py --no-cov
@@ -623,6 +644,11 @@ uv run pytest backend\tests\test_enterprise_rollout.py --no-cov
 Offline tests do not require model credentials. Runtime tests must isolate
 SQLite, workspace, knowledge-vector, and Memory-vector paths so a running local
 Host does not hold their locks.
+
+The scan regressions cover concurrent capacity, slow discovery alongside
+maintenance and heartbeats, cancellation, same-Job restart recovery, and
+partial-discovery deletion safeguards. These are isolated offline fixtures,
+not live mailbox, provider-throughput, or release acceptance measurements.
 
 From `frontend\`, after restoring the committed package lock:
 

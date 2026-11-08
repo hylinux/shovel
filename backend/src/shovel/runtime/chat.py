@@ -10,7 +10,7 @@ import structlog
 from ag_ui.core import BaseEvent, CustomEvent, EventType, RunErrorEvent, RunFinishedEvent, RunStartedEvent
 from agent_framework import ChatResponse, Message
 from anyio import CancelScope
-from sqlalchemy import func, select, update
+from sqlalchemy import func, select, text, update
 
 from shovel.db.base import now_ts
 from shovel.db.model.runtime import ChatMessage, Conversation
@@ -27,7 +27,7 @@ from shovel.runtime.agent import EventSink, ShovelAgent
 from shovel.runtime.agent_instructions import AgentInstructionsView
 from shovel.runtime.diagnostics import trace, trace_context
 from shovel.runtime.errors import NotFound, RuntimeFailure
-from shovel.runtime.schemas import AgentInstructionsInput, MessageInput
+from shovel.runtime.schemas import AgentInstructionsInput, MessageInput, WorkingMemoryInput
 
 if TYPE_CHECKING:
     from shovel.runtime.service import Runtime
@@ -152,6 +152,26 @@ class ChatService:
             rows = list(await session.scalars(statement.order_by(ChatMessage.sequence.desc()).limit(limit)))
             return list(reversed(rows))
 
+    async def working_update(
+        self,
+        identifier: str,
+        task_id: str,
+        *,
+        body: WorkingMemoryInput | None = None,
+        revision: int | None = None,
+    ) -> dict[str, object] | None:
+        lock = self._locks.setdefault(identifier, asyncio.Lock())
+        if lock.locked():
+            raise RuntimeFailure("此 Session 正在生成回答,完成后才能修改工作记忆。", status=409)
+        async with lock:
+            await self.conversation(identifier)
+            if body is not None:
+                return await self.runtime.memory.working.save(identifier, task_id, body)
+            if revision is None:
+                raise ValueError("Working Memory deletion requires an observed revision.")
+            await self.runtime.memory.working.delete(identifier, task_id, revision)
+            return None
+
     async def send(
         self,
         identifier: str,
@@ -247,6 +267,8 @@ class ChatService:
         on_event: EventSink | None = None,
     ) -> ChatMessage:
         require_ordinary(EgressChannel.PERSISTENCE, request)
+        if request.working_task_id is not None:
+            await self.runtime.memory.working.context(identifier, request.working_task_id)
         if on_event is not None:
             consumer = on_event
 
@@ -314,10 +336,15 @@ class ChatService:
             require_ordinary(EgressChannel.PERSISTENCE, result)
             persistence_started = perf_counter()
             async with self.runtime.sessions() as session:
+                await session.execute(text("BEGIN IMMEDIATE"))
                 saved = await session.get(ChatMessage, answer.id)
                 assert saved is not None
                 saved.state, saved.content = "completed", result.content
                 saved.citations, saved.warnings = result.sources, result.warnings
+                if request.working_task_id is not None:
+                    await self.runtime.memory.working.record_turn(
+                        session, identifier, request.working_task_id, user, saved, generation
+                    )
                 if result.extract_long_term:
                     saved.memory_operation_id = await self.runtime.memory_tasks.enqueue(
                         session, user, generation=generation, run_id=run_id

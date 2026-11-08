@@ -33,18 +33,20 @@ from ..base import (
 # 1. WORKING MEMORY — scoped to one task
 # --------------------------------------------------------------------------- #
 class MemoryWorking(Base):
-    """Scratch state for one agent run.
+    """Owned task snapshots use PLAN slots with bounded JSON content.
 
-    Working memory *will* overflow: a 50-turn task cannot keep every tool result
-    in context. Rather than silently truncating (which drops the goal along with
-    the noise), slots are typed and compacted by priority — ``scratch`` first,
-    ``goal`` never. ``archived_blob_hash`` keeps the full text in the CAS so a
-    compacted slot can still be reopened by id.
+    Older unowned scratch slots remain quarantined. Archive/CAS fields are
+    reserved scaffolding, not an implemented blob-compaction mechanism.
     """
 
     __tablename__ = "memory_working"
 
     id: Mapped[str] = mapped_column(sa.Text, primary_key=True, default=lambda: new_id("wm"))
+    workspace_id: Mapped[str] = mapped_column(sa.Text, nullable=False, default="")
+    user_id: Mapped[str] = mapped_column(sa.Text, nullable=False, default="")
+    task_id: Mapped[str] = mapped_column(sa.Text, nullable=False, default="")
+    revision: Mapped[int] = mapped_column(sa.Integer, nullable=False, default=1)
+    updated_at: Mapped[int] = mapped_column(sa.Integer, nullable=False, default=now_ts)
     session_id: Mapped[str] = mapped_column(sa.Text, nullable=False)
     agent_id: Mapped[str | None] = mapped_column(sa.Text)
     turn: Mapped[int] = mapped_column(sa.Integer, default=0, nullable=False)
@@ -68,6 +70,16 @@ class MemoryWorking(Base):
     expires_at: Mapped[int | None] = mapped_column(sa.Integer)
 
     __table_args__ = (
+        Index(
+            "uq_wm_task",
+            "workspace_id",
+            "user_id",
+            "agent_id",
+            "session_id",
+            "task_id",
+            unique=True,
+            sqlite_where=text("task_id != ''"),
+        ),
         Index("idx_wm_session", "session_id", "turn"),
         Index("idx_wm_live", "session_id", "slot", sqlite_where=text("validity_state = 'active'")),
         Index("idx_wm_gc", "expires_at", sqlite_where=text("expires_at IS NOT NULL")),
@@ -107,6 +119,7 @@ class NativeMemory(Base, ValidityMixin, SalienceMixin, MemoryOwnership):
     validity_state: Mapped[MemoryValidityState] = mapped_column(
         Enum(MemoryValidityState), default=MemoryValidityState.ACTIVE, nullable=False
     )
+    review_data: Mapped[dict[str, Any]] = mapped_column(JSONDict, default=dict, nullable=False)
 
 
 # --------------------------------------------------------------------------- #

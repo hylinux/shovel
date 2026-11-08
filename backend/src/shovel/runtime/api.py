@@ -47,6 +47,7 @@ from shovel.runtime.schemas import (
     HistoryPruneInput,
     MCPConfigurationInput,
     MemoryInput,
+    MemoryReviewInput,
     MessageInput,
     ProfileInput,
     ReasonInput,
@@ -54,6 +55,7 @@ from shovel.runtime.schemas import (
     ResourceUpdate,
     ScanInput,
     SearchInput,
+    WorkingMemoryInput,
 )
 from shovel.runtime.service import Runtime
 from shovel.services import connector_registry
@@ -745,6 +747,32 @@ def configure_api(
     async def message(identifier: str, body: MessageInput, rt: RuntimeDependency) -> dict[str, Any]:
         return message_view(await rt.chat.send(identifier, body))
 
+    @router.get("/conversations/{identifier}/working-memory")
+    async def working_memories(identifier: str, rt: RuntimeDependency) -> dict[str, Any]:
+        await rt.chat.conversation(identifier)
+        return {"items": await rt.memory.working.list(identifier)}
+
+    @router.put("/conversations/{identifier}/working-memory/{task_id}")
+    async def save_working_memory(
+        identifier: str,
+        task_id: str,
+        body: WorkingMemoryInput,
+        rt: RuntimeDependency,
+    ) -> dict[str, Any]:
+        result = await rt.chat.working_update(identifier, task_id, body=body)
+        assert result is not None
+        return result
+
+    @router.delete("/conversations/{identifier}/working-memory/{task_id}")
+    async def delete_working_memory(
+        identifier: str,
+        task_id: str,
+        rt: RuntimeDependency,
+        revision: int = Query(ge=1),
+    ) -> dict[str, bool]:
+        await rt.chat.working_update(identifier, task_id, revision=revision)
+        return {"deleted": True}
+
     @router.post("/agent")
     async def agent_run(body: RunAgentInput, rt: RuntimeDependency) -> StreamingResponse:
         await rt.chat.conversation(body.thread_id)
@@ -796,12 +824,59 @@ def configure_api(
         rt: RuntimeDependency,
         request_key: RequestKey = None,
     ) -> dict[str, Any]:
+        replay = await rt.memory_tasks.replay(
+            "memory.create", {"memory": body.command_payload()}, request_key
+        )
+        if replay is not None:
+            return operation_view(replay)
         async with rt.sessions() as session:
             generation = await rt.memory_tasks.generation(session)
         operation = await rt.operations.enqueue(
             "memory.create",
             {
-                "memory": body.model_dump(mode="json"),
+                "memory": body.command_payload(),
+                "workspace_id": rt.memory.owner.workspace_id,
+                "user_id": rt.memory.owner.user_id,
+                "generation": generation,
+            },
+            request_key=request_key,
+        )
+        rt.memory_wake.set()
+        return operation_view(operation)
+
+    @router.get("/memories/{identifier}")
+    async def memory_detail(
+        identifier: str,
+        rt: RuntimeDependency,
+        conversation_id: str = "",
+    ) -> dict[str, Any]:
+        from shovel.memory.service import view
+
+        return view(await rt.memory.owned(identifier, conversation_id=conversation_id))
+
+    @router.post("/memories/{identifier}/review", status_code=202)
+    async def review_memory(
+        identifier: str,
+        body: MemoryReviewInput,
+        rt: RuntimeDependency,
+        request_key: RequestKey = None,
+    ) -> dict[str, Any]:
+        intent = {**body.model_dump(mode="json"), "memory_id": identifier}
+        replay = await rt.memory_tasks.replay("memory.review", intent, request_key)
+        if replay is not None:
+            return operation_view(replay)
+        current = await rt.memory.owned(identifier, conversation_id=body.conversation_id)
+        if current.state.value not in ("candidate", "active") or (
+            body.decision == "approve" and current.state.value != "candidate"
+        ):
+            raise RuntimeFailure("此 Memory 状态不允许所请求的审核操作。", status=409)
+        async with rt.sessions() as session:
+            generation = await rt.memory_tasks.generation(session)
+        operation = await rt.operations.enqueue(
+            "memory.review",
+            {
+                **body.model_dump(mode="json"),
+                "memory_id": identifier,
                 "workspace_id": rt.memory.owner.workspace_id,
                 "user_id": rt.memory.owner.user_id,
                 "generation": generation,
@@ -818,17 +893,24 @@ def configure_api(
         rt: RuntimeDependency,
         request_key: RequestKey = None,
     ) -> dict[str, Any]:
+        replay = await rt.memory_tasks.replay(
+            "memory.update", {"memory": body.command_payload(), "replace_id": identifier}, request_key
+        )
+        if replay is not None:
+            return operation_view(replay)
         current = await rt.memory.repository.get(
             replace(rt.memory.owner, session_id=body.session_id), identifier
         )
         if current.kind.value != body.kind:
             raise RuntimeFailure("更新不能更改 Memory 类型。")
+        if current.state.value != "active" or current.scope.kind.value != body.scope:
+            raise RuntimeFailure("只能更新同一 Scope 中的 active Memory。", status=409)
         async with rt.sessions() as session:
             generation = await rt.memory_tasks.generation(session)
         operation = await rt.operations.enqueue(
             "memory.update",
             {
-                "memory": body.model_dump(mode="json"),
+                "memory": body.command_payload(),
                 "workspace_id": rt.memory.owner.workspace_id,
                 "user_id": rt.memory.owner.user_id,
                 "generation": generation,
@@ -841,6 +923,9 @@ def configure_api(
 
     @router.post("/memory/index/rebuild", status_code=202)
     async def rebuild_memory(rt: RuntimeDependency, request_key: RequestKey = None) -> dict[str, Any]:
+        replay = await rt.memory_tasks.replay("memory.rebuild", {}, request_key)
+        if replay is not None:
+            return operation_view(replay)
         async with rt.sessions() as session:
             generation = await rt.memory_tasks.generation(session)
         operation = await rt.operations.enqueue(

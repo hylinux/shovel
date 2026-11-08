@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import re
 from collections import defaultdict
 from dataclasses import dataclass
 from time import perf_counter
@@ -12,6 +11,7 @@ from sqlalchemy import and_, column, or_, select, table, text, tuple_
 from shovel.db.model.config import Resource
 from shovel.db.model.content import Chunk, Document
 from shovel.db.model.retrieval import RetrievalLog
+from shovel.db.search_terms import keyword_terms
 from shovel.domain.enums import (
     DocClass,
     DocumentLifecycleState,
@@ -138,7 +138,7 @@ class RetrievalService:
         )
 
     async def _keyword(self, request: SearchInput, scope: list[str], limit: int) -> list[str]:
-        terms = list(dict.fromkeys(re.findall(r"\w+", request.query.casefold())))[:32]
+        terms = keyword_terms(request.query)
         if not terms:
             raise RuntimeFailure("搜索内容至少包含一个文字或数字。")
         long = [term for term in terms if len(term) >= 3]

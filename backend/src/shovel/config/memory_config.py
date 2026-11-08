@@ -42,6 +42,9 @@ class MemorySettings(BaseModel):
     min_confidence: float = Field(default=0.8, ge=0, le=1)
     summary_max_chars: int = Field(default=2000, ge=100, le=8000)
     history_messages: int = Field(default=20, ge=4, le=100)
+    review_required: bool = False
+    working_context_max_chars: int = Field(default=3000, ge=1500, le=16000)
+    working_ttl_seconds: int = Field(default=604800, ge=60, le=7776000)
     embedder: EmbeddingSettings = Field(default_factory=EmbeddingSettings)
     # An unset model follows [model]; this client has its own lifecycle.
     llm: MemoryModelSettings = Field(default_factory=MemoryModelSettings)

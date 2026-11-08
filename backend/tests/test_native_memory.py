@@ -847,7 +847,7 @@ async def test_semantic_merge_requires_a_known_equivalent_target(
         return [
             replace(
                 fact("Green tea is the user's preferred beverage."),
-                object="tea, green",
+                object="green tea",
                 merge_with=original.id,
             )
         ]
@@ -892,16 +892,351 @@ async def test_budget_and_sqlite_revalidation(runtime: Runtime) -> None:
             return [VectorHit(item.id, MemoryType.SEMANTIC, item.revision, 0.95)]
 
     service = MemoryService(repo, Index(), runtime.memory.extractor, scope, max_chars=500)
-    assert await service.retrieve("tea") == []
+    assert await service.retrieve("unrelated") == []
     async with runtime.sessions() as session:
         row = await session.get(MemoryBelief, item.id)
         assert row is not None
         row.model_version = "v1"
         await session.commit()
-    found = await service.retrieve("tea")
+    found = await service.retrieve("unrelated")
     assert found and len(json.dumps(found, ensure_ascii=False)) <= 500
     service.max_chars = 50
     assert await service.retrieve("tea") == []
+
+
+async def test_keyword_recall_without_embeddings_obeys_scope_and_lifecycle(runtime: Runtime) -> None:
+    repo, scope = runtime.memory.repository, runtime.memory.owner
+    text = "The project uses SQLite and \u672c\u5730\u4f18\u5148."
+    candidate = MemoryCandidate(text, predicate="uses", object="SQLite", topic="storage")
+    own = (await repo.consolidate(scope, [candidate], Provenance("manual")))[0]
+    for foreign in (
+        replace(scope, workspace_id="other"),
+        replace(scope, user_id="other"),
+        replace(scope, agent_id="other"),
+        replace(scope, kind=ScopeKind.SESSION, session_id="private"),
+    ):
+        await repo.consolidate(foreign, [candidate], Provenance("manual"))
+    await repo.consolidate(
+        scope,
+        [replace(candidate, text="SQLite expired", object="old", expires_at=now_ts() - 1)],
+        Provenance("manual"),
+    )
+    for query in ("SQLITE", "\u672c\u5730\u4f18\u5148", "\u672c\u5730", 'SQLite" OR nonexistent'):
+        result = await runtime.memory.search(query, conversation_id="public")
+        assert [item["id"] for item in result] == [own.id]
+        assert result[0]["recall_sources"] == ["keyword"]
+    await repo.transition(scope, own.id, MemoryState.REJECTED)
+    assert await runtime.memory.search("SQLite", conversation_id="public") == []
+    assert await repo.consolidate(scope, [candidate], Provenance("manual")) == []
+
+
+async def test_non_equivalent_merge_keeps_distinct_values(
+    runtime: Runtime, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo, scope = runtime.memory.repository, runtime.memory.owner
+    old = (await repo.consolidate(scope, [fact()], Provenance("manual")))[0]
+
+    async def extract(_source: str, related: Any = ()) -> list[MemoryCandidate]:
+        return [
+            replace(
+                fact("User prefers black tea."),
+                object="black tea",
+                evidence="I prefer black tea.",
+                merge_with=old.id,
+            )
+        ]
+
+    monkeypatch.setattr(runtime.memory.extractor, "extract", extract)
+    saved = await runtime.memory.application.extract(
+        "I prefer black tea.", Provenance("user_message"), related=[old]
+    )
+    assert saved[0].id != old.id
+    assert {item.object for item in await repo.list_records(scope)} == {"green tea", "black tea"}
+
+
+async def test_review_correction_is_atomic_and_replay_survives_epoch(
+    runtime: Runtime, api: httpx.AsyncClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from shovel.db.model.runtime import Operation
+
+    source = "I choose black tea instead of green tea."
+    identifier = (await api.post("/api/v1/conversations", json={})).json()["id"]
+    async with runtime.sessions() as session:
+        user = ChatMessage(conversation_id=identifier, role="user", content=source, sequence=1)
+        session.add(user)
+        await session.commit()
+        generation = await runtime.memory_tasks.generation(session)
+    original = (
+        await runtime.memory.repository.consolidate(runtime.memory.owner, [fact()], Provenance("manual"))
+    )[0]
+    operation = await runtime.operations.enqueue(
+        "memory.extract",
+        {
+            "user_message_id": user.id,
+            "conversation_id": identifier,
+            "generation": generation,
+            "workspace_id": runtime.memory.owner.workspace_id,
+            "user_id": runtime.memory.owner.user_id,
+        },
+    )
+
+    async def extract(_source: str) -> list[MemoryCandidate]:
+        return [replace(fact("User prefers black tea."), object="black tea", evidence=source, replaces=True)]
+
+    runtime.memory.application.review_required = True
+    monkeypatch.setattr(runtime.memory.extractor, "extract", extract)
+    await runtime.memory_tasks.run_once()
+    assert (await runtime.operations.get(operation.id)).result["candidates"] == 1
+    history = (await api.get("/api/v1/memories?include_history=true")).json()["items"]
+    pending = next(item for item in history if item["state"] == "candidate")
+    assert pending["provenance"][0]["evidence"] == source
+    assert [item["id"] for item in await runtime.memory.search("tea")] == [original.id]
+    headers = {"Idempotency-Key": "approve-correction"}
+    body = {"decision": "approve"}
+    queued = await api.post(f"/api/v1/memories/{pending['id']}/review", json=body, headers=headers)
+    assert queued.status_code == 202
+    await runtime.memory_tasks.run_once()
+    assert (await runtime.operations.get(queued.json()["id"])).state == "succeeded"
+    assert (await runtime.memory.owned(original.id)).state == MemoryState.SUPERSEDED
+    assert [item["id"] for item in await runtime.memory.search("tea")] == [pending["id"]]
+    await runtime.memory_tasks.invalidate()
+    repeated = await api.post(f"/api/v1/memories/{pending['id']}/review", json=body, headers=headers)
+    assert repeated.status_code == 202 and repeated.json()["id"] == queued.json()["id"]
+    conflicting = await api.post(
+        f"/api/v1/memories/{pending['id']}/review", json={"decision": "reject"}, headers=headers
+    )
+    assert conflicting.status_code == 409
+    async with runtime.sessions() as session:
+        receipt = await session.get(Operation, queued.json()["id"])
+        assert receipt is not None and receipt.result["committed"]
+
+
+@pytest.mark.parametrize("invalidate", ["epoch", "source"])
+async def test_review_fences_old_candidate_sources(
+    runtime: Runtime, api: httpx.AsyncClient, invalidate: str
+) -> None:
+    identifier = (await api.post("/api/v1/conversations", json={})).json()["id"]
+    async with runtime.sessions() as session:
+        user = ChatMessage(conversation_id=identifier, role="user", content="I prefer green tea.", sequence=1)
+        session.add(user)
+        await session.commit()
+        generation = await runtime.memory_tasks.generation(session)
+    candidate = (
+        await runtime.memory.repository.consolidate(
+            runtime.memory.owner,
+            [fact()],
+            Provenance("user_message", identifier, user.id),
+            generation=generation,
+            review_required=True,
+        )
+    )[0]
+    if invalidate == "epoch":
+        await runtime.memory_tasks.invalidate()
+    else:
+        async with runtime.sessions() as session:
+            await session.delete(await session.get(ChatMessage, user.id))
+            await session.commit()
+    response = await api.post(f"/api/v1/memories/{candidate.id}/review", json={"decision": "approve"})
+    await runtime.memory_tasks.run_once()
+    assert (await runtime.operations.get(response.json()["id"])).state == "cancelled"
+    assert (await runtime.memory.owned(candidate.id)).state == MemoryState.CANDIDATE
+    assert await runtime.memory.search("tea") == []
+    rejected = await api.post(f"/api/v1/memories/{candidate.id}/review", json={"decision": "reject"})
+    await runtime.memory_tasks.run_once()
+    assert (await runtime.operations.get(rejected.json()["id"])).state == "succeeded"
+    assert (
+        await runtime.memory.repository.consolidate(
+            runtime.memory.owner, [fact()], Provenance("manual"), review_required=True
+        )
+        == []
+    )
+
+
+async def test_episode_dates_do_not_merge_and_unknown_date_is_not_record_time(runtime: Runtime) -> None:
+    from shovel.memory.service import view
+
+    repo, scope = runtime.memory.repository, runtime.memory.owner
+    event = MemoryCandidate("The migration completed.", kind=MemoryType.EPISODIC)
+    first = (await repo.consolidate(scope, [replace(event, occurred_at=0)], Provenance("manual")))[0]
+    second = (await repo.consolidate(scope, [replace(event, occurred_at=86400)], Provenance("manual")))[0]
+    unknown = (
+        await repo.consolidate(
+            scope, [replace(event, text="A different undated migration completed.")], Provenance("manual")
+        )
+    )[0]
+    assert first.id != second.id and first.occurred_at == 0 and second.occurred_at == 86400
+    assert view(unknown)["occurred_at"] is None
+    assert view(unknown)["episode_time_source"] == "recorded"
+
+
+@pytest.mark.parametrize(
+    "source,date_value,valid",
+    [
+        ("I completed migration on 2026-11-03.", "2026-11-03", True),
+        ("I completed migration yesterday.", None, True),
+        ("I completed migration yesterday.", "2026-11-03", False),
+        ("I completed migration on 2026-02-30.", "2026-02-30", False),
+    ],
+)
+async def test_extractor_episode_date_requires_calendar_and_exact_evidence(
+    runtime: Runtime, source: str, date_value: str | None, valid: bool
+) -> None:
+    from datetime import UTC, datetime
+
+    from shovel.runtime.agent import create_framework_client
+
+    output = {
+        "candidates": [
+            {
+                "text": "Migration completed.",
+                "kind": "episodic",
+                "subject": "user",
+                "predicate": "decides",
+                "object": "migration",
+                "topic": "migration",
+                "confidence": 0.95,
+                "importance": 0.5,
+                "evidence": source,
+                "occurred_on": date_value,
+            }
+        ]
+    }
+
+    def response(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "created": 1,
+                "choices": [{"message": {"role": "assistant", "content": json.dumps(output)}}],
+            },
+        )
+
+    extractor = runtime.memory.extractor
+    extractor._http = httpx.AsyncClient(transport=httpx.MockTransport(response))
+    extractor._sdk, extractor._framework = create_framework_client(
+        runtime.settings.model, extractor._http, max_iterations=1
+    )
+    if not valid:
+        with pytest.raises(ValueError):
+            await extractor.extract(source)
+    else:
+        candidates = await extractor.extract(source)
+        assert candidates[0].occurred_at == (
+            int(datetime(2026, 11, 3, tzinfo=UTC).timestamp()) if date_value else None
+        )
+
+
+async def test_memory_upgrade_preserves_old_rows_backfills_keywords_and_quarantines_working(
+    runtime: Runtime,
+) -> None:
+    from sqlalchemy import text
+    from sqlalchemy.ext.asyncio import AsyncEngine
+
+    from shovel.db.migrations import upgrade_database
+    from shovel.db.model.memory import MemoryWorking
+
+    repo, scope = runtime.memory.repository, runtime.memory.owner
+    old = (await repo.consolidate(scope, [fact()], Provenance("manual")))[0]
+    async with runtime.sessions() as session:
+        session.add(MemoryWorking(id="legacy-working", session_id="legacy-session", content="old scratch"))
+        await session.commit()
+    engine = runtime.sessions.kw["bind"]
+    assert isinstance(engine, AsyncEngine)
+    async with engine.begin() as connection:
+        for table in ("memory_belief", "memory_episode", "memory_procedure"):
+            for event in ("insert", "update", "delete"):
+                await connection.exec_driver_sql(f"DROP TRIGGER {table}_search_{event}")
+            await connection.exec_driver_sql(f"ALTER TABLE {table} DROP COLUMN review_data")
+        await connection.exec_driver_sql("DROP TABLE memory_search")
+        await connection.exec_driver_sql("DROP INDEX uq_wm_task")
+        for column in ("workspace_id", "user_id", "task_id", "revision", "updated_at"):
+            await connection.exec_driver_sql(f"ALTER TABLE memory_working DROP COLUMN {column}")
+        await connection.exec_driver_sql("DELETE FROM schema_migration WHERE version=22")
+    await upgrade_database(engine)
+    await upgrade_database(engine)
+    restored = await repo.get(scope, old.id)
+    assert restored.fingerprint == old.fingerprint and restored.provenance == old.provenance
+    assert [item["id"] for item in await runtime.memory.search("tea")] == [old.id]
+    assert await runtime.memory.working.list("legacy-session") == []
+    async with runtime.sessions() as session:
+        assert await session.scalar(text("SELECT count(*) FROM memory_search")) == 1
+        legacy = await session.get(MemoryWorking, "legacy-working")
+        assert legacy is not None and legacy.content == "old scratch" and legacy.workspace_id == ""
+    await repo.transition(scope, old.id, MemoryState.DELETED)
+    async with runtime.sessions() as session:
+        assert await session.scalar(text("SELECT count(*) FROM memory_search")) == 0
+
+
+async def test_episode_api_preserves_day_precision_on_text_edit(
+    runtime: Runtime, api: httpx.AsyncClient
+) -> None:
+    from datetime import UTC, datetime
+
+    timestamp = int(datetime(2026, 11, 3, tzinfo=UTC).timestamp())
+    payload = {
+        "text": "Migration completed.",
+        "kind": "episodic",
+        "occurred_at": timestamp,
+        "time_precision": "day",
+    }
+    created = await api.post("/api/v1/memories", json=payload)
+    assert created.status_code == 202
+    await runtime.memory_tasks.run_once()
+    original = (await api.get("/api/v1/memories")).json()["items"][0]
+    assert original["episode_time_precision"] == "day"
+    edited = await api.put(
+        f"/api/v1/memories/{original['id']}", json={**payload, "text": "The tested migration completed."}
+    )
+    assert edited.status_code == 202
+    await runtime.memory_tasks.run_once()
+    updated = (await api.get("/api/v1/memories")).json()["items"][0]
+    assert updated["occurred_at"] == timestamp and updated["episode_time_precision"] == "day"
+    assert (
+        await api.post(
+            "/api/v1/memories",
+            json={
+                **payload,
+                "occurred_at": timestamp + 60,
+            },
+        )
+    ).status_code == 422
+    assert (
+        await api.post(
+            "/api/v1/memories",
+            json={
+                "text": "Stable fact.",
+                "kind": "semantic",
+                "occurred_at": timestamp,
+            },
+        )
+    ).status_code == 422
+
+
+async def test_old_default_memory_payload_replays_after_hard_forget(
+    runtime: Runtime, api: httpx.AsyncClient
+) -> None:
+    payload = {"text": "User prefers green tea.", "object": "green tea", "topic": "drink"}
+    headers = {"Idempotency-Key": "old-format-memory-create"}
+    created = await api.post("/api/v1/memories", json=payload, headers=headers)
+    assert created.status_code == 202
+    operation = await runtime.operations.get(created.json()["id"])
+    assert "time_precision" not in operation.payload["memory"]
+    await runtime.memory_tasks.run_once()
+    item = (await api.get("/api/v1/memories")).json()["items"][0]
+    assert (await api.delete(f"/api/v1/memories/{item['id']}?hard=true")).status_code == 200
+    repeated = await api.post("/api/v1/memories", json=payload, headers=headers)
+    assert repeated.status_code == 202 and repeated.json()["id"] == created.json()["id"]
+    assert (await api.get("/api/v1/memories")).json()["items"] == []
+    assert (
+        await api.post(
+            "/api/v1/memories",
+            json={
+                **payload,
+                "text": "Changed intent.",
+            },
+            headers=headers,
+        )
+    ).status_code == 409
 
 
 @pytest.mark.parametrize(

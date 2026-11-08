@@ -22,6 +22,7 @@ from shovel.db.model.runtime import ChatMessage, Conversation, MemoryEpoch, Oper
 from shovel.exceptions.pipeline import EmbeddingError, VectorSinkError
 from shovel.memory.agent_framework import AgentFrameworkMemoryExtractor
 from shovel.memory.domain import (
+    EXTRACTION_VERSION,
     ExtractionCancelled,
     MemoryCandidate,
     MemoryRecord,
@@ -33,6 +34,7 @@ from shovel.memory.domain import (
 from shovel.memory.service import MemoryService as NativeMemoryService
 from shovel.memory.service import view
 from shovel.memory.sqlite_repository import SQLiteMemoryRepository
+from shovel.memory.working import WorkingMemoryService
 from shovel.memory.zvec_index import ZvecMemoryIndex
 from shovel.pipeline.embedder import build_embedder
 from shovel.protection.egress import EgressChannel, require_ordinary
@@ -77,7 +79,9 @@ class MemoryService:
             min_confidence=settings.memory.min_confidence,
             max_chars=settings.memory.context_max_chars,
             max_items=settings.memory.max_items,
+            review_required=settings.memory.review_required,
         )
+        self.working = WorkingMemoryService(sessions, self.owner, settings.memory)
         self._active: asyncio.Task[Any] | None = None
         self._index_error: str | None = None
         self._maintenance_lock = asyncio.Lock()
@@ -140,6 +144,8 @@ class MemoryService:
             ),
             "pending_index_operations": int(pending or 0),
             "last_error": self._index_error or (state.last_error if state else None),
+            "keyword_available": True,
+            "review_required": self.settings.memory.review_required,
         }
 
     async def search(self, query: str, *, conversation_id: str = "") -> list[dict[str, Any]]:
@@ -179,6 +185,7 @@ class MemoryService:
         )
 
     async def forget_conversation(self, identifier: str) -> None:
+        await self.working.forget(identifier)
         scope = replace(self.owner, session_id=identifier)
         for row in await self.repository.list_records(scope, limit=10000, states=tuple(MemoryState)):
             if row.scope.kind == ScopeKind.SESSION:
@@ -211,6 +218,7 @@ class MemoryService:
             importance=payload.importance,
             expires_at=payload.expires_at,
             occurred_at=payload.occurred_at,
+            time_precision=payload.time_precision,
         )
         await self.repository.consolidate(
             scope,
@@ -244,7 +252,7 @@ class MemoryService:
                 self._log.warning("memory.consolidation.index_unavailable", error_type=self._index_error)
             saved = await self.application.extract(
                 source,
-                Provenance("user_message", conversation_id, message_id),
+                Provenance("user_message", conversation_id, message_id, extractor_version=EXTRACTION_VERSION),
                 operation_id=operation_id,
                 generation=generation,
                 related=related,
@@ -265,6 +273,7 @@ class MemoryService:
 
     async def maintain(self) -> bool:
         expired = await self.repository.expire_due(self.owner)
+        expired += await self.working.expire_due()
         if self.index is None:
             return bool(expired)
         async with self._maintenance_lock:

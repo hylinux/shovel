@@ -387,10 +387,13 @@ output       = memory_candidates JSON Schema
 姓名、职业、时区、语言的用户属性在程序层规范为 semantic 和稳定 topic，
 避免模型把稳定职业误分类为事件而丢失结构化属性。
 成功提交后，核心用户属性可由 SQLite 直接跨 Session 读取；
-其他事实的语义召回仍需要 `[memory.embedder]` 和可用索引。
+其他事实可通过独立 Memory 关键词索引召回；语义召回仍需要
+`[memory.embedder]` 和可用索引。
 
-自动候选 schema 当前不输出 `expires_at` 或 `occurred_at`。
-事件记录未提供事件时刻时使用写入时刻；不能把它理解为已实现自然语言日期解析。
+自动候选不输出 `expires_at`，可提供证据中明确出现的 ISO `occurred_on` 日期，
+程序校验后转换为 UTC 当日零点的 Unix 秒，表示日期精度而非精确发生时刻。
+无明确日期的新事件对外 `occurred_at=null`，记录时间仍独立保留。
+旧事件保留原值并标记 `legacy_unspecified`，不实现任意自然语言时间推理。
 
 ### 7.5 第四层：程序校验
 
@@ -471,18 +474,23 @@ object 规范化不同
 ```mermaid
 stateDiagram-v2
     [*] --> active: 合法候选经整理提交
+    [*] --> candidate: 开启人工审核时提交
+    candidate --> active: 人工批准并重新校验
+    candidate --> rejected: 人工拒绝
+    candidate --> deleted: 用户忘记
     active --> superseded: 显式纠正或管理更新
     active --> expired: 到达有效期
     active --> deleted: 用户忘记
-    active --> rejected: 显式仓库状态转换
+    active --> rejected: 人工拒绝
     superseded --> deleted: 显式删除
     expired --> deleted: 显式删除
     deleted --> [*]: hard delete
 ```
 
-领域枚举还包括 `candidate`、`rejected`，但正常自动提取中候选是内存值，
-被拒绝候选不会自动持久化为一条 rejected 记录。
-不要从枚举存在推断已经有候选审批界面。
+`memory.review_required` 默认 false，保留原有自动激活；开启后有效自动候选
+先持久化为 `candidate`，人工批准后才参与召回。Settings/API 支持批准候选
+和拒绝 candidate/active，拒绝保留墓碑。无效来源或不满足准入的模型候选
+仍被排除，不自动保存成 rejected。审核和事实/索引变更复用 Operation 原子回执。
 
 ### 9.2 软删除
 
@@ -532,7 +540,7 @@ stateDiagram-v2
 核心属性只按结构化身份去重，不采用模型建议的语义合并覆盖新值；
 例如旧的泛化职业不能吞掉新声明的资深 Java 职业。
 
-其余事实保留以下语义路径：
+其余事实具有独立的 Memory FTS5 关键词路径，与下面的语义路径组合：
 
 1. 使用独立 `[memory.embedder]` 向量化当前问题。
 2. Zvec 按 workspace、user、Scope、agent/session 和模型版本过滤。
@@ -541,7 +549,8 @@ stateDiagram-v2
 5. 应用 `memory.min_similarity` 门槛。
 6. 按 ID 回到 SQLite 读取当前记录。
 7. 复核归属、类型、revision、模型版本、active 状态和有效期。
-8. 核心属性优先，其余通过复核的记录按分数排序；统一按字符与条数预算选择，
+8. 核心属性优先，其余通过复核的关键词/向量记录用 RRF 汇总相关性后排序；
+   统一按字符与条数预算选择，
    更新访问统计。向量命中的旧核心属性不能绕过当前 SQLite 属性投影。
 
 残留向量、过时 revision、旧模型向量和已删除记录不能单凭向量命中进入上下文。
@@ -559,7 +568,9 @@ score =
   + 0.05 × min(1, ln(1 + access_count) / 5)
 ```
 
-相关性先经过门槛，再和重要性、置信度、记录新近性、访问次数共同排序。
+向量相关性先经过门槛，关键词/向量排名以 `1/(60+position)` 汇总，
+乘以 `61/2` 并封顶 1 后作为非 Profile 的 relevance，再与其他因素共同排序。
+关键词候选不依赖向量模型版本；两条路径都必须满足 SQLite 的可见性和有效状态。
 时间项使用 `recorded_at`，不是 `last_accessed_at`；
 没有后台不断改写重要性的“遗忘曲线”任务。
 
@@ -966,6 +977,9 @@ API version、凭据等；遗漏的普通字段使用该配置模型自身默认
 | `min_confidence` | 0.8 | 自动候选置信度门槛 |
 | `history_messages` | 20 | 最近完成消息的窗口，不是轮数 |
 | `summary_max_chars` | 2000 | 摘要输出上限，注入时仍可能进一步缩减 |
+| `review_required` | false | 自动候选先等待人工审核，既有 active 记录不改变 |
+| `working_context_max_chars` | 3000 | 所选工作任务上下文预算，关键字段超预算明确报错 |
+| `working_ttl_seconds` | 604800 | 工作任务未显式提供有效期时保留七天 |
 
 所有时间戳使用 UTC Unix 秒，所有上述字符预算都不是 token 预算。
 
@@ -1201,16 +1215,17 @@ Zvec 可重建不代表“随时删除正在使用的索引目录”是安全操
 
 以下边界来自真实调用链，而不是仅依据 ORM 类的说明文字：
 
-1. `MemoryWorking` 已有槽位、压缩等模型字段，但未接入主 Agent 的 working-memory
-   持久调度；当前短期上下文实际依赖聊天历史、摘要和 MAF 单次运行上下文。
+1. `MemoryWorking` 已接入用户维护的 Session/task 快照、CAS 修订、有效期和主 Agent
+   显式任务选择。尚未实现模型自动规划、进度确认、槽位 CAS blob 压缩或副作用恢复；
+   Execution 仍是业务状态权威。History/Summary/MAF 上下文继续独立。
 2. `MemoryLink`、`MemoryRevision`、`StandingQuery` 是已有模型/扩展点，
    当前原生 Memory 路径没有构建完整关联图、逐次修订日志或主动订阅推送。
 3. 自动提取仅 semantic/episodic；procedural 只可显式维护，
    不具备自动学习、成功率反馈优化或自动修改 Skills/工作流的闭环。
-4. 自动候选不提供完整时间推理；有效期等可显式管理，
+4. 自动事件仅校验原文中的明确 ISO 日期，不提供完整时间推理；有效期等可显式管理，
    不存在任意历史时点的完整双时态查询接口。
 5. 对原始事实的宽泛敏感性、真假、自然语言等价和主体归属，没有完备判定器。
-6. 缺失 Memory embedder 时没有长期语义召回替代算法；
+6. 缺失 Memory embedder 时保留 Profile/关键词召回，但没有通用语义替代算法；
    未提炼成事实的旧消息不会因为保存过就自动跨会话检索。
 7. 异步摘要存在追赶窗口；强字符预算可能排除一部分历史或已召回事实。
 8. 子 Agent / Workflow 不自动继承主 Agent 的 Memory、RAG、instructions 和 Skills。
@@ -1220,6 +1235,9 @@ Zvec 可重建不代表“随时删除正在使用的索引目录”是安全操
 
 这些限制不应被文档中的“理论分类”或“数据库字段已经存在”掩盖。
 后续扩展应保持现有权威存储、来源、Scope、事务和遗忘围栏不变量。
+
+第 1–3 步的具体 API、配置、验收与后续边界见
+[Memory 完整化路线](memory_completion_roadmap.md)。
 
 ## 24. 源码阅读索引
 

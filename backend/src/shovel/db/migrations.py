@@ -404,6 +404,71 @@ def _upgrade(connection: Connection) -> None:
             )
         )
 
+    if 22 not in versions:
+        for table in ("memory_belief", "memory_episode", "memory_procedure"):
+            columns = {row[1] for row in connection.exec_driver_sql(f"PRAGMA table_info({table})")}
+            if "review_data" not in columns:
+                connection.exec_driver_sql(
+                    f"ALTER TABLE {table} ADD COLUMN review_data TEXT NOT NULL DEFAULT '{{}}'"
+                )
+        columns = {row[1] for row in connection.exec_driver_sql("PRAGMA table_info(memory_working)")}
+        for name, definition in {
+            "workspace_id": "TEXT NOT NULL DEFAULT ''",
+            "user_id": "TEXT NOT NULL DEFAULT ''",
+            "task_id": "TEXT NOT NULL DEFAULT ''",
+            "revision": "INTEGER NOT NULL DEFAULT 1",
+            "updated_at": "INTEGER NOT NULL DEFAULT 0",
+        }.items():
+            if name not in columns:
+                connection.exec_driver_sql(f"ALTER TABLE memory_working ADD COLUMN {name} {definition}")
+        connection.exec_driver_sql(
+            "CREATE UNIQUE INDEX IF NOT EXISTS uq_wm_task ON memory_working "
+            "(workspace_id,user_id,agent_id,session_id,task_id) WHERE task_id != ''"
+        )
+        connection.exec_driver_sql(
+            "CREATE VIRTUAL TABLE IF NOT EXISTS memory_search "
+            "USING fts5(memory_id UNINDEXED, kind UNINDEXED, text, tokenize='trigram')"
+        )
+        for table, kind, body in (
+            ("memory_belief", "semantic", "COALESCE(note, subject || ' ' || predicate || ' ' || object)"),
+            ("memory_episode", "episodic", "summary"),
+            ("memory_procedure", "procedural", "instruction"),
+        ):
+            new_body = (
+                "COALESCE(new.note, new.subject || ' ' || new.predicate || ' ' || new.object)"
+                if kind == "semantic"
+                else f"new.{body}"
+            )
+            for event in ("INSERT", "UPDATE"):
+                changes = {
+                    "semantic": "note,subject,predicate,object,validity_state",
+                    "episodic": "summary,validity_state",
+                    "procedural": "instruction,validity_state",
+                }[kind]
+                action = event if event == "INSERT" else f"UPDATE OF {changes}"
+                connection.exec_driver_sql(
+                    f"""CREATE TRIGGER IF NOT EXISTS {table}_search_{event.lower()}
+                    AFTER {action} ON {table} BEGIN
+                      DELETE FROM memory_search WHERE memory_id = new.id AND kind = '{kind}';
+                      INSERT INTO memory_search(memory_id,kind,text)
+                        SELECT new.id,'{kind}',{new_body} WHERE new.validity_state = 'active';
+                    END"""  # noqa: S608 -- fixed migration identifiers, never user input
+                )
+            connection.exec_driver_sql(
+                f"""CREATE TRIGGER IF NOT EXISTS {table}_search_delete AFTER DELETE ON {table} BEGIN
+                  DELETE FROM memory_search WHERE memory_id = old.id AND kind = '{kind}';
+                END"""  # noqa: S608 -- fixed migration identifiers, never user input
+            )
+            connection.exec_driver_sql(
+                f"INSERT INTO memory_search(memory_id,kind,text) SELECT id,'{kind}',{body} "  # noqa: S608
+                f"FROM {table} WHERE validity_state = 'active'"
+            )
+        connection.execute(
+            insert(SchemaMigration).values(
+                version=22, name="memory_review_keyword_and_working_context", applied_at=now_ts()
+            )
+        )
+
 
 async def upgrade_database(engine: AsyncEngine) -> None:
     async with engine.begin() as connection:

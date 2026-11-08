@@ -23,6 +23,7 @@ class MemoryExtractor(Protocol):
 
 
 class MemoryRepository(Protocol):
+    async def keyword(self, scope: MemoryScope, query: str, *, limit: int) -> list[MemoryRecord]: ...
     async def profile(self, scope: MemoryScope, *, limit: int) -> list[MemoryRecord]: ...
     async def assertion_time(self, scope: MemoryScope, source: str) -> int | None: ...
     async def list_records(
@@ -38,6 +39,7 @@ class MemoryRepository(Protocol):
         operation_id: str | None = None,
         generation: int | None = None,
         replace_id: str | None = None,
+        review_required: bool = False,
     ) -> list[MemoryRecord]: ...
     async def transition(
         self, scope: MemoryScope, identifier: str, state: MemoryState, *, hard: bool = False

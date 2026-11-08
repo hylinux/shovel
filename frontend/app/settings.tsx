@@ -3,10 +3,10 @@
 import { LanguageSelector, useI18n } from "./locale-context";
 
 import { useRef, useState, type KeyboardEvent } from "react";
-import { segment, useAction, useQuery, type Items, type Memory, type Operation, type Status } from "./api";
+import { type Status } from "./api";
 import { MCPManagement } from "./mcp";
 import { AgentInstructionsManagement } from "./instructions";
-import { Empty, Feedback } from "./ui";
+import { MemoryManagement } from "./memories";
 
 const warmupNames: Record<string, string> = {
   index: "Knowledge index",
@@ -24,7 +24,7 @@ const settingsTabs = [
 ] as const;
 type SettingsTab = typeof settingsTabs[number]["id"];
 
-export function Settings({ status }: { status?: Status }) {
+export function Settings({ status, sessionId = "" }: { status?: Status; sessionId?: string }) {
   const { t } = useI18n();
   const [active, setActive] = useState<SettingsTab>("runtime");
   const [visited, setVisited] = useState<SettingsTab[]>(["runtime"]);
@@ -50,7 +50,7 @@ export function Settings({ status }: { status?: Status }) {
     </div>
     {settingsTabs.map((tab) => <div key={tab.id} className="settings-panel" id={`settings-panel-${tab.id}`} role="tabpanel" aria-labelledby={`settings-tab-${tab.id}`} hidden={active !== tab.id} tabIndex={0}>
       {visited.includes(tab.id) && (tab.id === "runtime" ? <RuntimeConfiguration status={status} />
-        : tab.id === "memory" ? <MemoryManagement status={status} />
+        : tab.id === "memory" ? <MemoryManagement status={status} sessionId={sessionId} />
           : tab.id === "mcp" ? <MCPManagement />
             : tab.id === "instructions" ? <AgentInstructionsManagement running={Boolean(status?.chat_capacity && (status.chat_capacity.running || status.chat_capacity.waiting))} />
               : <LanguageSettings />)}
@@ -97,35 +97,4 @@ function RuntimeConfiguration({ status }: { status?: Status }) {
       {!status?.warmup && !status?.chat_capacity && <p className="muted">{status ? t("Performance metrics are not available from this Host.") : t("Waiting for runtime status…")}</p>}
     </section>
   </>;
-}
-
-function MemoryManagement({ status }: { status?: Status }) {
-  const { t } = useI18n();
-  const [memoryOpen, setMemoryOpen] = useState(false);
-  return <section className="settings-card" id="settings-memory" aria-labelledby="settings-memory-heading" tabIndex={-1}>
-      <header className="settings-card-header">
-        <div><p className="settings-kicker">{t("User context")}</p><h2 id="settings-memory-heading">{t("Manage long-term Memory")}</h2><p className="muted">{t("Review the facts your Agent remembers across sessions.")}</p></div>
-        <button disabled={!status?.memory_configured} onClick={() => setMemoryOpen(!memoryOpen)} aria-expanded={memoryOpen} aria-controls="saved-memory">{memoryOpen ? t("Hide saved Memory") : t("Load saved Memory")}</button>
-      </header>
-      <p className="muted">{t("Saved facts are read locally from SQLite. Semantic recall uses your configured ")}<code>[memory.embedder]</code>{t("; extraction uses ")}<code>[memory.llm]</code>{t(" or the main model.")}</p>
-      {status?.memory && <p role="status">{t("Semantic index: ")}<strong>{t(status.memory.index_state)}</strong> · {status.memory.pending_index_operations}{t(" pending")}{status.memory.last_error && <span className="warning"> · {status.memory.last_error}</span>}</p>}
-      <details className="settings-details"><summary>{t("How Memory works")}</summary><p>{t("Session history and session summaries are separate from long-term facts. Native Memory extracts durable user assertions, consolidates duplicates and preserves superseded facts.")}</p><p>{t("Deleting a session removes its summary and session-scoped Memory, not cross-session facts. Forgetting a fact hides it immediately; vector cleanup is retried in the background. This does not erase source messages or backups.")}</p></details>
-      <div id="saved-memory" hidden={!memoryOpen}>{memoryOpen && <Memories indexEnabled={status?.memory?.index_state !== "disabled"} />}</div>
-    </section>;
-}
-
-function Memories({ indexEnabled }: { indexEnabled: boolean }) {
-  const { t } = useI18n();
-  const memories = useQuery<Items<Memory>>("/memories");
-  const [confirmId, setConfirmId] = useState("");
-  const action = useAction();
-  async function rebuild() {
-    const result = await action.run<Operation>("/memory/index/rebuild");
-    if (result) action.setNotice(`Index rebuild queued: ${result.id}. Track it in Background tasks.`);
-  }
-  async function forget(id: string) {
-    const result = await action.run<{ deleted: boolean }>(`/memories/${segment(id)}`, undefined, "DELETE");
-    if (result?.deleted) { setConfirmId(""); memories.refresh(); action.setNotice("Memory forgotten."); }
-  }
-  return <div className="memory-panel"><button disabled={action.busy || !indexEnabled} onClick={rebuild}>{t("Rebuild semantic index")}</button><Feedback error={memories.error} retry={memories.refresh} /><Feedback error={action.error} notice={action.notice} />{memories.loading ? <p role="status">{t("Loading saved Memory…")}</p> : memories.data?.items.length === 0 ? <Empty title={t("No saved facts")}>{t("Long-term facts extracted from your messages will appear here.")}</Empty> : memories.data?.items.map((item) => <article className="memory-row" key={item.id}><div><p className="preserve">{item.memory}</p><p className="muted">{[item.kind, item.scope, item.state].filter(Boolean).map(value => t(value || "")).join(" · ")}</p></div>{confirmId === item.id ? <div className="confirmation"><p>{t("Forget this saved fact? Its vector will also be cleaned up.")}</p><div className="button-row"><button className="danger" disabled={action.busy} onClick={() => forget(item.id)}>{t("Confirm forget")}</button><button disabled={action.busy} onClick={() => setConfirmId("")}>{t("Keep fact")}</button></div></div> : <button disabled={action.busy} onClick={() => setConfirmId(item.id)}>{t("Forget…")}</button>}</article>)}</div>;
 }

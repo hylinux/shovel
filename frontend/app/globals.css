@@ -272,6 +272,18 @@ progress::-moz-progress-bar { background: var(--accent); }
 .memory-panel { margin-top: 20px; }
 .memory-row { padding: 18px 0; border-bottom: 1px solid var(--border); }
 .memory-row > button { margin-top: 10px; }
+.memory-editor { margin: 16px 0; padding: 16px; border: 1px solid var(--border); border-radius: 12px; }
+.memory-editor fieldset { border: 0; padding: 0; min-width: 0; }
+.memory-editor label { display: flex; flex-direction: column; gap: 6px; margin-bottom: 12px; }
+.memory-editor textarea, .memory-editor input, .memory-editor select { width: 100%; }
+.memory-fields { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 0 12px; }
+.memory-evidence { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 6px 14px; }
+.memory-evidence-pair { display: contents; }
+.memory-evidence dd { margin: 0; overflow-wrap: anywhere; }
+.memory-source { margin: 12px 0; padding-left: 14px; border-left: 2px solid var(--border); }
+.working-memory { margin: 0; padding: 12px 24px; border-top: 1px solid var(--border); max-height: 45vh; overflow-y: auto; flex-shrink: 0; }
+.working-task-row { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; margin: 10px 0; }
+.working-task-row > span:first-child { flex: 1; min-width: 140px; }
 .platform-view[hidden] { display: none; }
 .platform-section { min-width: 0; }
 .platform-section > h2 { margin-block: 20px; }

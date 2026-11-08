@@ -7,12 +7,16 @@ import re
 import unicodedata
 from dataclasses import dataclass, field
 from enum import StrEnum
+from typing import Literal
 
 
 class MemoryType(StrEnum):
     SEMANTIC = "semantic"
     EPISODIC = "episodic"
     PROCEDURAL = "procedural"
+
+
+EXTRACTION_VERSION = "native-v2"
 
 
 PROFILE_TOPICS = {
@@ -82,6 +86,7 @@ class MemoryCandidate:
     expires_at: int | None = None
     occurred_at: int | None = None
     merge_with: str | None = None
+    time_precision: Literal["day", "instant"] = "instant"
 
     @property
     def fingerprint(self) -> str:
@@ -89,6 +94,8 @@ class MemoryCandidate:
             f"{self.kind}|{normalize(self.subject)}|{self.predicate}|"
             f"{normalize(self.topic)}|{normalize(self.object or self.text)}"
         )
+        if self.kind == MemoryType.EPISODIC and self.occurred_at is not None:
+            key += f"|occurred_at={self.occurred_at}"
         return hashlib.sha256(key.encode()).hexdigest()
 
 
@@ -126,6 +133,9 @@ class MemoryRecord:
     provenance: list[dict[str, str | int | None]] = field(default_factory=list)
     occurred_at: int | None = None
     asserted_at: int | None = None
+    source: str = "stated"
+    episode_time_source: str | None = None
+    episode_time_precision: str | None = None
 
 
 @dataclass(frozen=True)
@@ -191,6 +201,12 @@ def eligible_source(source: str) -> bool:
 
 
 def same_fact(record: MemoryRecord, candidate: MemoryCandidate) -> bool:
+    if (
+        candidate.kind == MemoryType.EPISODIC
+        and candidate.occurred_at is not None
+        and record.occurred_at != candidate.occurred_at
+    ):
+        return False
     return record.kind == candidate.kind and (
         record.fingerprint == candidate.fingerprint
         or (candidate.kind != MemoryType.SEMANTIC and normalize(record.text) == normalize(candidate.text))

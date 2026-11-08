@@ -366,13 +366,14 @@ See [scan pipeline](Documents/scan_pipeline.md) and
 
 ## Native Memory
 
-Native Memory keeps three distinct things:
+Native Memory keeps four distinct layers:
 
 | Layer | Purpose and scope |
 | --- | --- |
 | Conversation history | Persisted turns in one session. |
 | Session Summary | Bounded summary for that session's continued context. |
 | Long-term facts | Explicitly scoped facts with provenance, confidence, revision, expiry, and supersession; agent-scoped facts can cross sessions. |
+| Working context | User-maintained Session/task goals, constraints and plans; explicitly selected, revision-checked, expiring, and not an execution authority. |
 
 Memory is enabled by default per request. Automatic extraction reads only the
 **current user's message**, using an isolated, tool-free MAF Agent, and runs
@@ -388,7 +389,9 @@ active facts in the matching workspace/user/agent scope.
 
 Core profile questions use a bounded, deterministic SQLite fact lookup rather
 than relying solely on vector similarity. Other recall can use the independent
-Memory index. If a new session appears to forget a fact, check extraction
+Memory index and an independent SQLite keyword index. Without embedding, profile
+and keyword recall remain available, but general semantic recall does not.
+If a new session appears to forget a fact, check extraction
 Operation status, saved facts/scope, expiry, and embedder availability before
 assuming the chat model configuration is the only cause.
 
@@ -398,12 +401,14 @@ is not persistence confirmation.
 
 ### Lifecycle and deletion
 
-Memory management in Settings/API supports inspection and lifecycle operations.
+Memory management in Settings/API supports sources, editing, history, review and forgetting.
+Set `[memory].review_required = true` to keep newly extracted facts pending
+human approval; the default preserves automatic activation. Rejected facts retain tombstones.
 Recall revalidates vector hits against SQLite scope, state, revision, model
 version, and expiry. Forgetting advances workspace/user generations so older
 tasks and stale vectors cannot resurrect forgotten facts.
 
-Deleting a session removes its history, summary, and session-scoped Memory,
+Deleting a session removes its history, summary, working tasks and session-scoped Memory,
 not independently saved agent-scoped cross-session facts. Soft deletion retains
 a tombstone. **Logical deletion is not physical erasure**, including of SQLite
 WAL, vector files, backups, or underlying media.
@@ -413,6 +418,8 @@ Versioned Skill Memory access is disabled in V1.
 
 See the [native Memory implementation](Documents/native_memory_architecture.md)
 for configuration, extraction, recall, recovery, and current limitations.
+The [Memory completion roadmap](Documents/memory_completion_roadmap.md) documents
+implemented phases 1–3 and the separate future experience-learning stages.
 
 ## Capability, Workflow, and Proactive Services
 

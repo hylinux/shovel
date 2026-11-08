@@ -5,6 +5,7 @@ from typing import Any, Literal
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from shovel.domain.enums import ScanMode, Sensitivity
+from shovel.memory.working import WorkingMemoryInput as WorkingMemoryInput
 from shovel.runtime.agent_instructions import MAX_INSTRUCTIONS_CHARS
 
 SearchMode = Literal["auto", "keyword", "vector", "hybrid"]
@@ -58,6 +59,7 @@ class MemoryInput(InputModel):
     importance: float = Field(default=0.5, ge=0, le=1)
     expires_at: int | None = Field(default=None, ge=0)
     occurred_at: int | None = Field(default=None, ge=0)
+    time_precision: Literal["day", "instant"] = "instant"
 
     @model_validator(mode="after")
     def explicit_scope(self) -> MemoryInput:
@@ -67,7 +69,23 @@ class MemoryInput(InputModel):
             raise ValueError("只有 session Scope 需要且必须提供 session_id。")
         if _SECRET.search(self.text + self.object + self.topic + self.subject):
             raise ValueError("不能将凭据保存到 Memory。")
+        if self.occurred_at is not None and self.kind != "episodic":
+            raise ValueError("只有 episodic Memory 可以提供 occurred_at。")
+        if self.time_precision == "day" and (
+            self.kind != "episodic" or self.occurred_at is None or self.occurred_at % 86400
+        ):
+            raise ValueError("day 精度需要 episodic Memory 的 UTC 零点日期。")
         return self
+
+    def command_payload(self) -> dict[str, Any]:
+        return self.model_dump(
+            mode="json", exclude={"time_precision"} if self.time_precision == "instant" else set()
+        )
+
+
+class MemoryReviewInput(InputModel):
+    decision: Literal["approve", "reject"]
+    conversation_id: str = Field(default="", max_length=200)
 
 
 class MCPConfigurationInput(BaseModel):
@@ -224,6 +242,13 @@ class MessageInput(InputModel):
     resource_ids: list[str] = Field(default_factory=list, max_length=200)
     memory_enabled: bool = True
     search_mode: SearchMode = "auto"
+    working_task_id: str | None = Field(default=None, min_length=1, max_length=200)
+
+    @model_validator(mode="after")
+    def working_requires_memory(self) -> MessageInput:
+        if self.working_task_id is not None and not self.memory_enabled:
+            raise ValueError("使用 Working Memory 的请求必须启用 Memory。")
+        return self
 
 
 class CredentialInput(InputModel):

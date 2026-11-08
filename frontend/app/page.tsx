@@ -164,7 +164,7 @@ export default function Home() {
         {view === "Background tasks" && <Tasks resources={resources.data?.items || []} />}
         {view === "Search Documents" && <SearchDocuments resources={resources.data?.items || []} status={status.data} />}
         {view === "Chat" && <><Feedback error={sessionError} retry={retryInitialSession} />{creatingSession && !selectedSession ? <p role="status">{t("Opening session…")}</p> : <Knowledge status={status.data} sessionId={selectedSession} onSessionChanged={refreshSessions} />}</>}
-        {view === "Settings" && <Settings status={status.data} />}
+        {view === "Settings" && <Settings status={status.data} sessionId={selectedSession} />}
         {platformViews.filter((item) => visited.has(item)).map((item) => <div key={item} className="platform-view" hidden={view !== item}>
           {item === "Proactive Services" && <ProactiveServices active={view === item} />}
           {item === "Approval Center" && <ApprovalCenter active={view === item} />}

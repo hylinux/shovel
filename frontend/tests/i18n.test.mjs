@@ -120,6 +120,18 @@ test("Localized timestamps remain Unix seconds and preserve invalid-date handlin
   for (const value of [undefined, null, NaN, Infinity, 1e20]) assert.equal(localizedDate(value, "zh-CN"), "—");
 });
 
+test("Day precision formats a UTC calendar date without a clock and default timestamps retain their format", () => {
+  const timestamp = Date.UTC(2026, 10, 8, 23, 30) / 1000;
+  const instant = new Date(timestamp * 1000);
+  for (const [language, tag] of [["en", "en-US"], ["zh-CN", "zh-CN"]]) {
+    assert.equal(localizedDate(timestamp, language, "day"), instant.toLocaleDateString(tag, { timeZone: "UTC" }));
+    assert.equal(localizedDate(timestamp, language), instant.toLocaleString(tag));
+    assert.equal(localizedDate(timestamp, language, "instant"), localizedDate(timestamp, language));
+    assert.ok(!localizedDate(timestamp, language, "day").includes(":"));
+    for (const value of [null, undefined, NaN, Infinity, 1e20]) assert.equal(localizedDate(value, language, "day"), "—");
+  }
+});
+
 test("The locale provider keeps server rendering in English without accessing browser storage", () => {
   const source = readFileSync(new URL("../app/locale-context.tsx", import.meta.url), "utf8");
   const { outputText } = ts.transpileModule(source, {

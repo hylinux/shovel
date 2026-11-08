@@ -1,7 +1,7 @@
 "use client";
 
 import { createContext, useContext, useEffect, useMemo, useSyncExternalStore, type ReactNode } from "react";
-import { defaultLocale, isLocale, localizedDate, localeStorageKey, readLocale, translate, writeLocale, type Locale, type TranslationValues } from "./i18n";
+import { defaultLocale, isLocale, localizedDate, localeStorageKey, readLocale, translate, writeLocale, type DatePrecision, type Locale, type TranslationValues } from "./i18n";
 
 type LanguageState = { locale: Locale; error: string };
 const initialState: LanguageState = { locale: defaultLocale, error: "" };
@@ -37,7 +37,7 @@ type I18n = {
   error: string;
   setLocale: (locale: string) => void;
   t: (message: string, values?: TranslationValues) => string;
-  date: (value?: number | null) => string;
+  date: (value?: number | null, precision?: DatePrecision) => string;
 };
 const LocaleContext = createContext<I18n | null>(null);
 
@@ -64,7 +64,7 @@ export function LocaleProvider({ children }: { children: ReactNode }) {
     ...current,
     setLocale: selectLocale,
     t: (message, values) => translate(message, current.locale, values),
-    date: value => localizedDate(value, current.locale),
+    date: (value, precision) => localizedDate(value, current.locale, precision),
   }), [current]);
   return <LocaleContext.Provider value={value}>{children}</LocaleContext.Provider>;
 }

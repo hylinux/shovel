@@ -3,9 +3,11 @@
 import { useI18n } from "./locale-context";
 
 import { useEffect, useRef, useState, type FormEvent } from "react";
-import { segment, useAction, useAgentAction, useQuery, type MessagePage, type Operation, type Status } from "./api";
+import { segment, useAction, useAgentAction, useQuery, type Items, type WorkingMemory, type MessagePage, type Operation, type Status } from "./api";
 import { Empty, Feedback, Sources } from "./ui";
 import { chatTrace } from "./agent-client";
+import { memoryExtractionNotice, selectedWorkingTask } from "./memory-model";
+import { WorkingMemoryPanel } from "./working-memory";
 
 export function Knowledge({ status, sessionId, onSessionChanged }: { status?: Status; sessionId: string; onSessionChanged: () => void }) {
   const { t } = useI18n();
@@ -21,6 +23,10 @@ function Chat({ sessionId, status, onActivity }: { sessionId: string; status?: S
   const history = useQuery<MessagePage>(`/conversations/${segment(sessionId)}/messages?limit=100${before ? `&before=${before}` : ""}`);
   const [content, setContent] = useState("");
   const [pendingQuestion, setPendingQuestion] = useState("");
+  const working = useQuery<Items<WorkingMemory>>(`/conversations/${segment(sessionId)}/working-memory`, 5000);
+  const [workingTaskId, setWorkingTaskId] = useState("");
+  const chosenTask = working.error || working.loading ? null : selectedWorkingTask(working.data?.items ?? [], workingTaskId);
+  const workingUnavailable = Boolean(workingTaskId && !chosenTask);
   const action = useAgentAction();
   const messagesRef = useRef<HTMLDivElement>(null);
   const questionRef = useRef<HTMLTextAreaElement>(null);
@@ -34,7 +40,7 @@ function Chat({ sessionId, status, onActivity }: { sessionId: string; status?: S
     const messages = messagesRef.current;
     if (messages) messages.scrollTop = messages.scrollHeight;
   }, [before, history.data, history.loading, pendingQuestion, action.busy, action.text, action.tool]);
-  const sendDisabled = action.busy || !content.trim() || !status?.model_configured || !status?.memory_configured || history.loading || Boolean(history.error);
+  const sendDisabled = action.busy || !content.trim() || !status?.model_configured || !status?.memory_configured || history.loading || Boolean(history.error) || workingUnavailable;
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (sendDisabled) return;
@@ -42,13 +48,14 @@ function Chat({ sessionId, status, onActivity }: { sessionId: string; status?: S
     const runId = crypto.randomUUID();
     chatTrace("chat.submit", { run_id: runId, conversation_id: sessionId, input_chars: question.length });
     setPendingQuestion(question);
-    const response = await action.run(sessionId, { content: question, resource_ids: [], memory_enabled: true, search_mode: "auto" }, runId);
+    const response = await action.run(sessionId, { content: question, resource_ids: [], memory_enabled: true, search_mode: "auto", working_task_id: chosenTask }, runId);
     chatTrace("chat.settled", { run_id: runId, conversation_id: sessionId, success: response });
     if (response) { setContent(""); setBefore(undefined); }
     onActivity();
     setPendingQuestion("");
     // Failed model calls may still have persisted user and failed assistant messages.
     history.refresh();
+    working.refresh();
     chatTrace("chat.history.refresh.requested", { run_id: runId, conversation_id: sessionId });
   }
   return <><div ref={messagesRef} className="messages" aria-label={t("Session messages")} aria-busy={history.loading || action.busy}>
@@ -66,9 +73,10 @@ function Chat({ sessionId, status, onActivity }: { sessionId: string; status?: S
       <article className="message user"><MessageHeading user /><p className="preserve">{pendingQuestion}</p></article>
       <article className="message assistant"><MessageHeading user={false} />{action.text ? <p className="preserve">{action.text}</p> : <p className="muted">{t("Shovel is preparing an answer…")}</p>}{action.tool && <p className="muted">{t("Tool: ")}{action.tool}</p>}</article>
     </div>}
-  </div><form className="composer" onSubmit={submit}>
+  </div><WorkingMemoryPanel sessionId={sessionId} query={working} selected={workingTaskId} onSelect={setWorkingTaskId} disabled={action.busy} /><form className="composer" onSubmit={submit}>
     {status && (!status.model_configured || !status.memory_configured) && <p className="warning">{t("Configure Chat and Memory in Settings before sending a message.")}</p>}
     <Feedback error={action.error} />
+    {workingUnavailable && <p className="warning" role="alert">{t("The selected working task is unavailable. Refresh or select an active task, or explicitly choose No working task before sending.")}</p>}
     <label htmlFor="question">{t("Message")}</label>
     <textarea ref={questionRef} id="question" value={content} onChange={(event) => setContent(event.target.value)} onKeyDown={(event) => {
       if (event.key === "Enter" && event.ctrlKey && !event.nativeEvent.isComposing) {
@@ -106,7 +114,7 @@ function MemoryTaskStatus({ id }: { id: string }) {
   }
   return <div className="memory-task">
     <p className={operation?.state === "failed" ? "warning" : "muted"} role="status">{t("Long-term Memory: ")}{operation
-      ? memoryTaskPending(operation) ? t("updating in background") : operation.state === "succeeded" ? operation.result.memories === 0 ? t("no durable facts found") : t("saved in SQLite") : operation.state
+      ? memoryTaskPending(operation) ? t("updating in background") : operation.state === "succeeded" ? t(memoryExtractionNotice(operation.result)) : t(operation.state)
       : t("checking…")}</p>
     {operation?.error && <p className="muted">{t(operation.error)}</p>}
     {operation?.state === "failed" && <button disabled={action.busy} onClick={retry}>{action.busy ? t("Retrying…") : t("Retry Memory update")}</button>}

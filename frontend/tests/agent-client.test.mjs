@@ -48,11 +48,26 @@ test("default Agent request enables Memory and retrieval without a session mode"
     captured = JSON.parse(options.body);
     return response(captured);
   });
+
   await runAgentMessage("/api/v1/agent", "conversation",
     { content: "Hello", resource_ids: [], memory_enabled: true, search_mode: "auto" },
     new AbortController().signal, () => {}, () => {});
   assert.deepEqual(captured.forwardedProps,
     { resource_ids: [], memory_enabled: true, search_mode: "auto" });
+});
+
+test("AG-UI forwards the explicitly selected working task without changing wire identity", async (t) => {
+  let captured;
+  t.mock.method(globalThis, "fetch", async (_url, options) => {
+    captured = JSON.parse(options.body);
+    return response(captured);
+  });
+  await runAgentMessage("/api/v1/agent", "session/a",
+    { ...input, memory_enabled: true, working_task_id: "task/用户" },
+    new AbortController().signal, () => {}, () => {});
+  assert.equal(captured.forwardedProps.working_task_id, "task/用户");
+  assert.equal(captured.forwardedProps.memory_enabled, true);
+  assert.equal(captured.threadId, "session/a");
 });
 
 test("AG-UI renders incremental text before the response body and durable run finish", { timeout: 5000 }, async (t) => {

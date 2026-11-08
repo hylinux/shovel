@@ -11,6 +11,7 @@ export type AgentMessageInput = {
   resource_ids: string[];
   memory_enabled: boolean;
   search_mode: string;
+  working_task_id?: string | null;
 };
 
 export async function runAgentMessage(

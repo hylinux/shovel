@@ -50,6 +50,16 @@ def view(record: MemoryRecord) -> dict[str, object]:
         "expires_at": record.expires_at,
         "provenance": record.provenance,
         "occurred_at": record.occurred_at,
+        "episode_time_source": record.episode_time_source,
+        "episode_time_precision": record.episode_time_precision,
+        "source": record.source,
+        "confidence": record.confidence,
+        "importance": record.importance,
+        "subject": record.subject,
+        "predicate": record.predicate,
+        "object": record.object,
+        "topic": record.topic,
+        "session_id": record.scope.session_id,
     }
 
 
@@ -65,10 +75,12 @@ class MemoryService:
         min_confidence: float = 0.8,
         max_chars: int = 2000,
         max_items: int = 10,
+        review_required: bool = False,
     ) -> None:
         self.repository, self.index, self.extractor, self.scope = repository, index, extractor, scope
         self.min_similarity, self.min_confidence = min_similarity, min_confidence
         self.max_chars, self.max_items = max_chars, max_items
+        self.review_required = review_required
 
     async def extract(
         self,
@@ -117,12 +129,15 @@ class MemoryService:
                     or normalize(target.subject) != normalize(candidate.subject)
                 ):
                     raise ValueError("Extractor proposed an unsupported semantic merge.")
-                if candidate.subject == "user" and candidate.predicate in PROFILE_TOPICS:
+                if (candidate.subject == "user" and candidate.predicate in PROFILE_TOPICS) or (
+                    normalize(target.object) != normalize(candidate.object)
+                    or normalize(target.topic) != normalize(candidate.topic)
+                ):
                     accepted[index] = replace(candidate, merge_with=None)
                     ignored_profile_merges += 1
         if ignored_profile_merges:
             structlog.get_logger().warning(
-                "memory.extraction.profile_merge_ignored", count=ignored_profile_merges
+                "memory.extraction.non_equivalent_merge_ignored", count=ignored_profile_merges
             )
         if any(
             c.predicate
@@ -149,6 +164,7 @@ class MemoryService:
             provenance,
             operation_id=operation_id,
             generation=generation,
+            review_required=self.review_required,
         )
 
     async def related(self, source: str) -> list[MemoryRecord]:
@@ -182,12 +198,22 @@ class MemoryService:
         profile = await self.repository.profile(scope, limit=self.max_items)
         found = {record.id: (record, rank(record, 1, now)) for record in profile}
         profile_ids = set(found)
+        channels = {record.id: ["profile"] for record in profile}
+        relevance: dict[str, float] = {}
+        for position, record in enumerate(
+            await self.repository.keyword(scope, query, limit=self.max_items * 4), 1
+        ):
+            if record.id in profile_ids or (record.subject == "user" and record.predicate in PROFILE_TOPICS):
+                continue
+            found[record.id] = (record, 0)
+            relevance[record.id] = 1 / (60 + position)
+            channels[record.id] = ["keyword"]
         hits = (
             await self.index.search(query, scope, self.max_items * 4)
             if self.index is not None and use_index
             else []
         )
-        for hit in hits:
+        for position, hit in enumerate(hits, 1):
             if hit.similarity < self.min_similarity:
                 continue
             try:
@@ -204,15 +230,31 @@ class MemoryService:
                 or (record.expires_at is not None and record.expires_at <= now)
             ):
                 continue
-            score = rank(record, hit.similarity, now)
-            if hit.id not in found or score > found[hit.id][1]:
-                found[hit.id] = (record, score)
+            found[hit.id] = (record, 0)
+            relevance[hit.id] = relevance.get(hit.id, 0) + 1 / (60 + position)
+            channels.setdefault(hit.id, []).append("vector")
+        for identifier, score in relevance.items():
+            record = found[identifier][0]
+            found[identifier] = (record, rank(record, min(1, score * 61 / 2), now))
         selected: list[dict[str, object]] = []
         identifiers = []
         for record, _score in sorted(
             found.values(), key=lambda item: (item[0].id not in profile_ids, -item[1], item[0].id)
         ):
-            entry = view(record)
+            entry = {
+                key: value
+                for key, value in view(record).items()
+                if key in ("id", "memory", "kind", "scope", "source", "confidence", "revision")
+            }
+            if record.kind == MemoryType.EPISODIC:
+                entry.update(
+                    occurred_at=record.occurred_at,
+                    episode_time_source=record.episode_time_source,
+                    episode_time_precision=record.episode_time_precision,
+                )
+            if record.expires_at is not None:
+                entry["expires_at"] = record.expires_at
+            entry["recall_sources"] = channels[record.id]
             if record.kind == MemoryType.SEMANTIC:
                 entry.update(subject=record.subject, predicate=record.predicate, object=record.object)
             entry["provenance"] = [

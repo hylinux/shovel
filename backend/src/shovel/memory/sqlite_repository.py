@@ -6,7 +6,8 @@ from collections.abc import Sequence
 from dataclasses import asdict, replace
 from typing import Any
 
-from sqlalchemy import and_, case, func, or_, select, text, true, update
+from sqlalchemy import and_, case, column, func, or_, select, text, true, update
+from sqlalchemy import table as sql_table
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from shovel.db.base import now_ts
@@ -19,6 +20,7 @@ from shovel.db.model.memory import (
     NativeMemory,
 )
 from shovel.db.model.runtime import ChatMessage, MemoryEpoch, Operation
+from shovel.db.search_terms import keyword_terms
 from shovel.domain.enums import MemoryPredicate, MemorySource, MemoryValidityState, VectorState
 from shovel.memory.domain import (
     PROFILE_TOPICS,
@@ -43,6 +45,7 @@ _TABLES: dict[MemoryType, type[Row]] = {
     MemoryType.EPISODIC: MemoryEpisode,
     MemoryType.PROCEDURAL: MemoryProcedure,
 }
+_FTS = sql_table("memory_search", column("memory_id"), column("kind"), column("rank"))
 
 
 def _visible(table: Any, scope: MemoryScope) -> Any:
@@ -103,7 +106,20 @@ def record(row: Row, kind: MemoryType) -> MemoryRecord:
         superseded_by=row.superseded_by,
         model_version=row.model_version,
         provenance=row.provenance,
-        occurred_at=row.occurred_at if isinstance(row, MemoryEpisode) else None,
+        occurred_at=(
+            row.occurred_at
+            if isinstance(row, MemoryEpisode) and row.meta.get("event_time_source") != "recorded"
+            else None
+        ),
+        source=row.source.value,
+        episode_time_source=(
+            str(row.meta.get("event_time_source", "legacy_unspecified"))
+            if isinstance(row, MemoryEpisode)
+            else None
+        ),
+        episode_time_precision=(
+            str(row.meta.get("event_time_precision", "unknown")) if isinstance(row, MemoryEpisode) else None
+        ),
     )
 
 
@@ -123,6 +139,46 @@ def _intent(session: AsyncSession, row: Row, kind: MemoryType, action: str) -> N
 class SQLiteMemoryRepository:
     def __init__(self, sessions: async_sessionmaker[AsyncSession]) -> None:
         self.sessions = sessions
+
+    async def keyword(self, scope: MemoryScope, query: str, *, limit: int) -> list[MemoryRecord]:
+        terms = keyword_terms(query)
+        long, short = [t for t in terms if len(t) >= 3], [t for t in terms if len(t) < 3]
+        found: dict[str, tuple[MemoryRecord, float]] = {}
+        async with self.sessions() as session:
+            for kind, model in _TABLES.items():
+                base = select(model).where(
+                    _visible(model, scope),
+                    model.validity_state == MemoryValidityState.ACTIVE,
+                    or_(model.valid_until.is_(None), model.valid_until > now_ts()),
+                )
+                if long:
+                    expression = " OR ".join(f'"{term}"' for term in long)
+                    fts_rows = await session.execute(
+                        base.add_columns(_FTS.c.rank)
+                        .join(_FTS, and_(_FTS.c.memory_id == model.id, _FTS.c.kind == kind.value))
+                        .where(text("memory_search MATCH :query"))
+                        .order_by(_FTS.c.rank, model.id)
+                        .limit(limit),
+                        {"query": expression},
+                    )
+                    for row, score in fts_rows:
+                        found[row.id] = (record(row, kind), float(score))
+                if short:
+                    body = (
+                        func.coalesce(MemoryBelief.note, MemoryBelief.object_)
+                        if kind == MemoryType.SEMANTIC
+                        else MemoryEpisode.summary
+                        if kind == MemoryType.EPISODIC
+                        else MemoryProcedure.instruction
+                    )
+                    rows = await session.scalars(
+                        base.where(or_(*(body.icontains(term, autoescape=True) for term in short)))
+                        .order_by(model.recorded_at.desc(), model.id)
+                        .limit(limit)
+                    )
+                    for row in rows:
+                        found.setdefault(row.id, (record(row, kind), 0.0))
+        return [item for item, _ in sorted(found.values(), key=lambda pair: (pair[1], pair[0].id))[:limit]]
 
     async def profile(self, scope: MemoryScope, *, limit: int) -> list[MemoryRecord]:
         table = MemoryBelief
@@ -229,6 +285,7 @@ class SQLiteMemoryRepository:
         operation_id: str | None = None,
         generation: int | None = None,
         replace_id: str | None = None,
+        review_required: bool = False,
     ) -> list[MemoryRecord]:
         require_ordinary(EgressChannel.MEMORY, candidates)
         results = []
@@ -274,7 +331,7 @@ class SQLiteMemoryRepository:
                             table.scope_kind == scope.kind.value,
                             table.agent_id == agent,
                             table.session_id == conversation,
-                            table.validity_state.in_(("active", "deleted")),
+                            table.validity_state.in_(("active", "candidate", "deleted", "rejected")),
                         )
                     )
                 )
@@ -290,10 +347,19 @@ class SQLiteMemoryRepository:
                 rows = [
                     r
                     for r in rows
-                    if r.validity_state in (MemoryValidityState.ACTIVE, MemoryValidityState.DELETED)
+                    if r.validity_state
+                    in (
+                        MemoryValidityState.ACTIVE,
+                        MemoryValidityState.CANDIDATE,
+                        MemoryValidityState.DELETED,
+                        MemoryValidityState.REJECTED,
+                    )
                 ]
                 duplicate = next((r for r in rows if same_fact(record(r, candidate.kind), candidate)), None)
-                if duplicate is not None and duplicate.validity_state == MemoryValidityState.DELETED:
+                if duplicate is not None and duplicate.validity_state in (
+                    MemoryValidityState.DELETED,
+                    MemoryValidityState.REJECTED,
+                ):
                     continue
                 if candidate.merge_with:
                     duplicate = next((r for r in rows if r.id == candidate.merge_with), None)
@@ -310,7 +376,10 @@ class SQLiteMemoryRepository:
                 )
                 evidence = asdict(replace(provenance, evidence=candidate.evidence, asserted_at=asserted_at))
                 if duplicate is not None and replace_id is None:
-                    if duplicate.validity_state == MemoryValidityState.ACTIVE:
+                    if duplicate.validity_state in (
+                        MemoryValidityState.ACTIVE,
+                        MemoryValidityState.CANDIDATE,
+                    ):
                         duplicate.confidence = max(duplicate.confidence, candidate.confidence)
                         duplicate.importance = max(duplicate.importance, candidate.importance)
                         if evidence not in duplicate.provenance:
@@ -329,6 +398,10 @@ class SQLiteMemoryRepository:
                     "provenance": [evidence],
                     "valid_until": candidate.expires_at,
                     "source": MemorySource.STATED,
+                    "validity_state": (
+                        MemoryValidityState.CANDIDATE if review_required else MemoryValidityState.ACTIVE
+                    ),
+                    "review_data": {"replaces": candidate.replaces, "generation": generation},
                 }
                 if candidate.kind == MemoryType.SEMANTIC:
                     row: Row = MemoryBelief(
@@ -341,7 +414,17 @@ class SQLiteMemoryRepository:
                     )
                 elif candidate.kind == MemoryType.EPISODIC:
                     row = MemoryEpisode(
-                        **common, summary=candidate.text, occurred_at=candidate.occurred_at or now_ts()
+                        **common,
+                        summary=candidate.text,
+                        occurred_at=candidate.occurred_at if candidate.occurred_at is not None else now_ts(),
+                        meta={
+                            "event_time_source": "explicit"
+                            if candidate.occurred_at is not None
+                            else "recorded",
+                            "event_time_precision": candidate.time_precision
+                            if candidate.occurred_at is not None
+                            else "unknown",
+                        },
                     )
                 else:
                     row = MemoryProcedure(
@@ -352,8 +435,13 @@ class SQLiteMemoryRepository:
                     )
                 replaced: list[Row] = []
                 for previous in rows:
-                    if previous.validity_state == MemoryValidityState.ACTIVE and (
-                        previous.id == replace_id or conflicts(record(previous, candidate.kind), candidate)
+                    if (
+                        not review_required
+                        and previous.validity_state == MemoryValidityState.ACTIVE
+                        and (
+                            previous.id == replace_id
+                            or conflicts(record(previous, candidate.kind), candidate)
+                        )
                     ):
                         previous.validity_state = MemoryValidityState.SUPERSEDED
                         previous.invalidated_at = now_ts()
@@ -367,14 +455,111 @@ class SQLiteMemoryRepository:
                 await session.flush()
                 for previous in replaced:
                     previous.superseded_by = row.id
-                _intent(session, row, candidate.kind, "upsert")
+                if not review_required:
+                    _intent(session, row, candidate.kind, "upsert")
                 results.append(record(row, candidate.kind))
             if operation is not None:
                 operation.state, operation.finished_at = "succeeded", now_ts()
-                operation.result = {"committed": True, "memories": len(results)}
+                operation.result = {
+                    "committed": True,
+                    "memories": len(results),
+                    "candidates": sum(r.state == MemoryState.CANDIDATE for r in results),
+                }
                 operation.error = None
             await session.commit()
         return results
+
+    async def review(
+        self, scope: MemoryScope, identifier: str, decision: str, *, operation_id: str, generation: int
+    ) -> None:
+        async with self.sessions() as session:
+            await session.execute(text("BEGIN IMMEDIATE"))
+            operation = await session.get(Operation, operation_id)
+            epoch = await session.scalar(
+                select(MemoryEpoch).where(
+                    MemoryEpoch.workspace_id == scope.workspace_id, MemoryEpoch.user_id == scope.user_id
+                )
+            )
+            if (
+                operation is None
+                or operation.state != "running"
+                or epoch is None
+                or epoch.generation != generation
+                or operation.payload.get("workspace_id") != scope.workspace_id
+                or operation.payload.get("user_id") != scope.user_id
+            ):
+                raise ExtractionCancelled()
+            row, kind = await self._find(session, scope, identifier)
+            if row.validity_state not in (MemoryValidityState.ACTIVE, MemoryValidityState.CANDIDATE):
+                raise RuntimeFailure("只能审核 candidate 或 active Memory。", status=409)
+            if decision == "approve":
+                if row.validity_state != MemoryValidityState.CANDIDATE:
+                    raise RuntimeFailure("只能批准 candidate Memory。", status=409)
+                if row.review_data.get("generation") not in (None, generation):
+                    raise ExtractionCancelled()
+                if row.valid_until is not None and row.valid_until <= now_ts():
+                    raise RuntimeFailure("Memory 候选已过期。", status=409)
+                for source in row.provenance:
+                    if source.get("source_kind") == "user_message":
+                        message = await session.get(ChatMessage, source.get("message_id"))
+                        if (
+                            message is None
+                            or message.role != "user"
+                            or message.conversation_id != source.get("conversation_id")
+                            or not source.get("evidence")
+                            or str(source["evidence"]) not in message.content
+                        ):
+                            raise ExtractionCancelled()
+                current = record(row, kind)
+                candidate = MemoryCandidate(
+                    current.text,
+                    kind=kind,
+                    subject=current.subject,
+                    predicate=current.predicate,
+                    object=current.object,
+                    topic=current.topic,
+                    occurred_at=current.occurred_at,
+                    replaces=bool(row.review_data.get("replaces")),
+                )
+                model = _TABLES[kind]
+                previous_rows = await session.scalars(
+                    select(model).where(
+                        model.id != row.id,
+                        model.workspace_id == row.workspace_id,
+                        model.user_id == row.user_id,
+                        model.scope_kind == row.scope_kind,
+                        model.agent_id == row.agent_id,
+                        model.session_id == row.session_id,
+                        model.validity_state.in_(("active", "deleted", "rejected")),
+                    )
+                )
+                for previous in previous_rows:
+                    prior = record(previous, kind)
+                    if same_fact(prior, candidate):
+                        raise RuntimeFailure("等价记忆已存在或已被忘记/拒绝,请重新检查候选。", status=409)
+                    if previous.validity_state == MemoryValidityState.ACTIVE and conflicts(prior, candidate):
+                        old_time = previous.provenance[-1].get("asserted_at") if previous.provenance else None
+                        new_time = row.provenance[-1].get("asserted_at") if row.provenance else None
+                        if isinstance(old_time, int) and isinstance(new_time, int) and old_time > new_time:
+                            raise RuntimeFailure("候选纠正早于当前事实,请重新确认最新事实。", status=409)
+                        previous.validity_state = MemoryValidityState.SUPERSEDED
+                        previous.invalidated_at = now_ts()
+                        previous.superseded_by = row.id
+                        previous.supersede_reason = "Human review of explicit correction"
+                        _intent(session, previous, kind, "delete")
+                row.validity_state = MemoryValidityState.ACTIVE
+                _intent(session, row, kind, "upsert")
+            elif decision == "reject":
+                row.validity_state = MemoryValidityState.REJECTED
+                row.invalidated_at = now_ts()
+                _intent(session, row, kind, "delete")
+            else:
+                raise ValueError("Unsupported Memory review decision.")
+            row.review_data = {**row.review_data, "decision": decision, "reviewed_at": now_ts()}
+            operation.state, operation.finished_at = "succeeded", now_ts()
+            operation.result = {"committed": True, "decision": decision, "memory_id": identifier}
+            operation.error = None
+            await session.commit()
 
     async def transition(
         self, scope: MemoryScope, identifier: str, state: MemoryState, *, hard: bool = False

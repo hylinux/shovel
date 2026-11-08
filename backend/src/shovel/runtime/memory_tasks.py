@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 import asyncio
-from typing import TYPE_CHECKING
+from dataclasses import replace
+from typing import TYPE_CHECKING, Any
 
 from anyio import CancelScope
 from sqlalchemy import func, select, text, update
@@ -10,7 +11,7 @@ from sqlalchemy.sql.elements import ColumnElement
 
 from shovel.db.base import now_ts
 from shovel.db.model.runtime import ChatMessage, MemoryEpoch, Operation
-from shovel.memory.domain import ExtractionCancelled
+from shovel.memory.domain import EXTRACTION_VERSION, ExtractionCancelled
 from shovel.runtime.diagnostics import trace, trace_context
 from shovel.runtime.errors import RuntimeFailure
 from shovel.runtime.requests import request_fingerprint, request_operation_id
@@ -39,6 +40,26 @@ class MemoryTaskService:
             raise RuntimeFailure("Memory 任务版本尚未初始化。", status=503)
         return value
 
+    async def replay(self, kind: str, intent: dict[str, Any], request_key: str | None) -> Operation | None:
+        if request_key is None:
+            return None
+        async with self.runtime.sessions() as session:
+            previous = await session.get(Operation, request_operation_id(request_key))
+        if previous is None:
+            return None
+        owned = {
+            **intent,
+            "workspace_id": self.runtime.memory.owner.workspace_id,
+            "user_id": self.runtime.memory.owner.user_id,
+        }
+        original = {key: value for key, value in previous.payload.items() if key != "generation"}
+        if previous.kind != kind or request_fingerprint(kind, original, None) != request_fingerprint(
+            kind, owned, None
+        ):
+            raise RuntimeFailure("此请求键已用于不同的操作或参数;请为新意图使用新的请求键。", status=409)
+        trace("operation.replayed", operation_id=previous.id, kind=kind, state=previous.state)
+        return previous
+
     async def enqueue(
         self,
         session: AsyncSession,
@@ -51,7 +72,8 @@ class MemoryTaskService:
         from shovel.protection.egress import EgressChannel, require_ordinary
 
         require_ordinary(EgressChannel.MEMORY, user.content)
-        key = f"{kind}:{user.id}:native-v1"
+        version = EXTRACTION_VERSION if kind == "memory.extract" else "native-v1"
+        key = f"{kind}:{user.id}:{version}"
         payload = {
             "user_message_id": user.id,
             "conversation_id": user.conversation_id,
@@ -217,6 +239,17 @@ class MemoryTaskService:
                         await self.runtime.memory.rebuild()
                     elif operation.kind in ("memory.create", "memory.update"):
                         await self.runtime.memory.write(operation)
+                    elif operation.kind == "memory.review":
+                        await self.runtime.memory.repository.review(
+                            replace(
+                                self.runtime.memory.owner,
+                                session_id=operation.payload.get("conversation_id", ""),
+                            ),
+                            operation.payload["memory_id"],
+                            operation.payload["decision"],
+                            operation_id=operation.id,
+                            generation=operation.payload["generation"],
+                        )
                     else:
                         raise RuntimeFailure("未知的 Memory 操作。")
             except ExtractionCancelled:

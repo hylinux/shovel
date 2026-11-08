@@ -75,8 +75,8 @@ class WebSearchConfig(BaseModel):
 
     start_url: str = Field(
         description=(
-            "Public website URL; crawl stays on its origin. HTML page URLs crawl their containing "
-            "directory; directory URLs crawl only that subtree."
+            "Public website URL; crawl stays on its origin. HTML and extensionless page URLs crawl "
+            "their containing directory; directory URLs ending in / crawl only that subtree."
         )
     )
     max_pages: int = Field(default=1000, ge=1, le=10000)
@@ -103,7 +103,7 @@ class WebScope:
         self.start_url = canonical_url(start_url)
         self.root = httpx.URL(self.start_url)
         path = unquote(self.root.path)
-        if not path.endswith("/") and posixpath.splitext(path)[1].lower() in {".html", ".htm", ".xhtml"}:
+        if not path.endswith("/") and posixpath.splitext(path)[1].lower() in {"", ".html", ".htm", ".xhtml"}:
             path = posixpath.dirname(path)
         self.path = path.rstrip("/")
 

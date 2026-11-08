@@ -180,6 +180,26 @@ def test_explicit_directory_and_non_html_document_scopes_are_not_broadened() -> 
     assert not document.contains(SITE + "/docs/other.pdf")
 
 
+def test_extensionless_page_scope_includes_siblings_but_not_other_sections() -> None:
+    start = SITE + "/zh-cn/guides/vision"
+    scope = WebScope(start)
+    assert scope.start_url == start
+    assert scope.resolve("thinking_mode#overview", start) == SITE + "/zh-cn/guides/thinking_mode"
+    assert scope.contains(SITE + "/zh-cn/guides/chapters/tools")
+    for url in (
+        SITE + "/zh-cn/guides-other/vision",
+        SITE + "/zh-cn/api/create-chat-completion",
+        SITE + "/guides/vision",
+        "https://other.example.com/zh-cn/guides/vision",
+        "http://docs.example.com/zh-cn/guides/vision",
+        SITE + "/zh-cn/guides/%2e%2e/api",
+    ):
+        assert not scope.contains(url)
+    directory = WebScope(start + "/")
+    assert directory.contains(start + "/chapter")
+    assert not directory.contains(SITE + "/zh-cn/guides/thinking_mode")
+
+
 async def test_transport_rejects_mixed_private_dns_and_pins_public_ip(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -528,6 +548,70 @@ async def test_tutorial_page_recursively_crawls_and_indexes_linked_chapters(
     assert len(site.paths) == len(set(site.paths))
     assert set(site.paths) == {"/robots.txt", "/sitemap.xml"} | {httpx.URL(url).path for url in expected}
     hits = await RetrievalService(runtime).search(SearchInput(query="Tutorial", mode="keyword"))
+    assert {hit["doc_uri"] for hit in hits["items"]} == expected
+
+
+@pytest.mark.parametrize("redirect", [False, True])
+async def test_extensionless_documentation_page_crawls_and_indexes_sidebar_links(
+    runtime: Runtime, site: Site, redirect: bool
+) -> None:
+    page_path = "/zh-cn/guides/vision/" if redirect else "/zh-cn/guides/vision"
+    if redirect:
+        site.add("/zh-cn/guides/vision", "", status=301, location=page_path)
+    site.add(
+        page_path,
+        "<h1>Documentation Vision</h1><nav>"
+        '<a href="/zh-cn/guides/thinking_mode">Thinking</a>'
+        '<a href="/zh-cn/guides/thinking_mode#overview">Duplicate</a>'
+        '<a href="/zh-cn/guides/tool_calls">Tools</a>'
+        '<a href="/zh-cn/guides/blocked">Blocked</a>'
+        '<a rel="nofollow" href="/zh-cn/guides/never">Do not follow</a></nav>'
+        '<a href="/zh-cn/api/create-chat-completion">Other section</a>'
+        '<a href="/guides/vision">Other language</a>'
+        '<a href="https://other.example.com/zh-cn/guides/vision">External</a>',
+    )
+    site.add(
+        "/robots.txt",
+        "User-agent: *\nDisallow: /zh-cn/guides/blocked",
+        **{"content-type": "text/plain"},
+    )
+    site.add(
+        "/zh-cn/guides/thinking_mode",
+        "<h1>Documentation Thinking</h1><p>Thinking mode content.</p>"
+        '<a href="tool_calls">Tools</a><a href="vision">Start</a>',
+    )
+    site.add(
+        "/zh-cn/guides/tool_calls",
+        "<h1>Documentation Tools</h1><p>Tool calling content.</p>"
+        '<a href="thinking_mode#overview">Thinking</a>',
+    )
+    resource = await runtime.resources.create(
+        ResourceDraft(
+            name="extensionless-docs",
+            connector_kind="web_search",
+            config={"start_url": SITE + "/zh-cn/guides/vision"},
+        )
+    )
+    assert (await runtime.resources.verify(resource.id)).ok
+    site.requests.clear()
+    sink = Sink()
+    result = await ScanService(runtime.sessions, runtime.resources, embedder=Embedder(), sink=sink).scan(
+        resource.id
+    )
+    expected = {
+        SITE + page_path,
+        SITE + "/zh-cn/guides/thinking_mode",
+        SITE + "/zh-cn/guides/tool_calls",
+    }
+    assert result.state is JobState.SUCCEEDED
+    assert result.parsed == result.embedded == 3
+    assert {record.doc_uri for record in sink.records} == expected
+    assert set(site.paths) == {"/robots.txt", "/sitemap.xml", "/zh-cn/guides/vision"} | {
+        httpx.URL(url).path for url in expected
+    }
+    assert len(site.paths) == len(set(site.paths))
+    assert any("robots.txt disallow" in warning for warning in result.warnings)
+    hits = await RetrievalService(runtime).search(SearchInput(query="Documentation", mode="keyword"))
     assert {hit["doc_uri"] for hit in hits["items"]} == expected
 
 

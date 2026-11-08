@@ -114,7 +114,12 @@ Configure `[model]` for chat, optional `[memory.embedder]` for Memory semantic r
 
 **Resources → Web Search** accepts a canonical public website URL and crawl
 limits. The URL fences the origin/path; the crawler discovers links and XML
-Sitemaps without JavaScript execution or login. The form configures page/depth,
+Sitemaps without JavaScript execution or login. HTML and extensionless page URLs
+follow links within their containing directory: `/zh-cn/guides/vision` crawls
+within `/zh-cn/guides/`, not the entire site. Directory URLs must end in `/`
+to restrict crawling to that subtree; for example, use `/docs/`, not `/docs`.
+Non-HTML file URLs such as PDFs retain their own path scope.
+The form configures page/depth,
 request delay, retry attempts, download/time limits and optional query URLs.
 **Crawl website** uses the existing durable scan endpoint and embedding toggle.
 robots.txt and noindex/nofollow are respected; private networks and unsafe

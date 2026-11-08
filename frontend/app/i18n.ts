@@ -430,7 +430,7 @@ export const chinese: Readonly<Record<string, string>> = {
   "Download limit (MiB)": "下载上限（MiB）",
   "Time limit (minutes)": "时间上限（分钟）",
   "Include query URLs (may create duplicate pages or crawl traps)": "包含带查询参数的 URL（可能产生重复页面或爬取陷阱）",
-  "Only crawl sites you are permitted to index. Crawling stays on the same origin. An HTML page URL follows links within its containing directory; a directory URL limits crawling to that subtree. robots.txt, noindex/nofollow and slower site-requested rates are respected. Private networks, logins and JavaScript rendering are not supported.": "仅爬取您有权索引的网站。爬取限制在同源范围内。HTML 页面 URL 跟踪其所在目录内的链接；目录 URL 将范围限制在对应子树。遵守 robots.txt、noindex/nofollow 及网站要求的较慢速率。不支持私有网络、登录和 JavaScript 渲染。",
+  "Only crawl sites you are permitted to index. Crawling stays on the same origin. HTML and extensionless page URLs follow links within their containing directory; directory URLs ending in / limit crawling to that subtree. robots.txt, noindex/nofollow and slower site-requested rates are respected. Private networks, logins and JavaScript rendering are not supported.": "仅爬取您有权索引的网站。爬取限制在同源范围内。HTML 页面及无扩展名页面 URL 跟踪其所在目录内的链接；以 / 结尾的目录 URL 将范围限制在对应子树。遵守 robots.txt、noindex/nofollow 及网站要求的较慢速率。不支持私有网络、登录和 JavaScript 渲染。",
   "Links and Sitemaps discover pages. Limits and failures are reported in Background tasks; a scan cannot guarantee complete website coverage. Creation verifies access; use Crawl website afterwards to index text and generate embeddings.": "通过链接和 Sitemap 发现页面。限制和失败会在后台任务中报告；扫描不能保证覆盖整个网站。创建时验证访问，之后使用“爬取网站”索引正文并生成向量。",
   "Adding website…": "正在添加网站…",
   "Resource name": "资源名称",

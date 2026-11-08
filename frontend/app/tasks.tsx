@@ -116,7 +116,7 @@ function JobRow({ job, refresh }: { job: Job; refresh: () => void }) {
 function Events({ jobId }: { jobId: string }) {
   const { t, date } = useI18n();
   const events = useQuery<Items<JobEvent>>(`/jobs/${segment(jobId)}/events`, 2000);
-  return <div className="events"><h4>{t("Job events")}</h4><Feedback error={events.error} retry={events.refresh} />{events.loading ? <p role="status">{t("Loading events…")}</p> : !events.data?.items.length ? <p className="muted">{t("No events recorded yet.")}</p> : <ol>{events.data.items.map((event) => <li key={event.id}><div><time>{date(event.logged_at)}</time><span className="event-level">{t(event.level)}</span><span>{t(event.stage)} · {event.code}</span></div><p>{event.message}</p>{event.doc_uri && <p className="path">{event.doc_uri}</p>}</li>)}</ol>}</div>;
+  return <div className="events"><h4>{t("Job events")}</h4><Feedback error={events.error} retry={events.refresh} />{events.loading ? <p role="status">{t("Loading events…")}</p> : !events.data?.items.length ? <p className="muted">{t("No events recorded yet.")}</p> : <ol>{events.data.items.map((event) => <li key={event.id}><div><time>{date(event.logged_at)}</time><span className="event-level">{t(event.level)}</span><span>{event.stage && <>{t(event.stage)} · </>}{event.code}</span></div><p>{event.message}</p>{event.doc_uri && <p className="path">{event.doc_uri}</p>}</li>)}</ol>}</div>;
 }
 
 function OperationRow({ operation, refresh }: { operation: Operation; refresh: () => void }) {

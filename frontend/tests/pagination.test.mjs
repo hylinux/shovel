@@ -10,8 +10,8 @@ import { orderSearchResults } from "../app/search-results.ts";
 import { translate } from "../app/i18n.ts";
 
 const require = createRequire(import.meta.url);
-function load(name, overrides) {
-  const source = readFileSync(new URL(`../app/${name}`, import.meta.url), "utf8");
+function load(name, overrides, expose = "") {
+  const source = readFileSync(new URL(`../app/${name}`, import.meta.url), "utf8") + expose;
   const { outputText } = ts.transpileModule(source, {
     compilerOptions: { module: ts.ModuleKind.CommonJS, jsx: ts.JsxEmit.ReactJSX, target: ts.ScriptTarget.ES2022 },
   });
@@ -23,6 +23,59 @@ function load(name, overrides) {
   }, exports);
   return exports;
 }
+
+for (const locale of ["en", "zh-CN"]) test(`Inspect events opens nullable API events and can hide them (${locale})`, () => {
+  let eventsOpen = false;
+  const queries = [];
+  const react = { ...require("react"), useState() {
+    return [eventsOpen, value => { eventsOpen = value; }];
+  } };
+  const events = [
+    { id: 1, logged_at: 1700000000, level: "error", stage: null, code: "PARSE_FAILED", message: "File read failed <details>", doc_uri: "file:///C:/notes/a.txt" },
+    { id: 2, logged_at: 1700000001, level: "warn", stage: "parse", code: "PARSE_EMPTY", message: "Empty document", doc_uri: null },
+    { id: 3, logged_at: 1700000002, level: "info", stage: null, code: null, message: null, doc_uri: null },
+  ];
+  const api = {
+    active: () => false, segment: encodeURIComponent, useAction: () => ({}),
+    useQuery(path, interval) {
+      queries.push({ path, interval });
+      return { data: { items: events }, loading: false, refresh() {} };
+    },
+  };
+  const localization = { useI18n: () => ({
+    t: (message, values) => translate(message, locale, values), date: value => `timestamp:${value}`,
+  }) };
+  const ui = load("ui.tsx", { "./api": api, "./locale-context": localization });
+  const { JobRow } = load("tasks.tsx", {
+    react, "./api": api, "./ui": ui, "./locale-context": localization,
+    "./pagination-query": {}, "./request-recovery": {},
+  }, "\nexport { JobRow };");
+  const job = { id: "job/123", state: "failed", scan_mode: "incremental", resource_id: "res_123" };
+  function render() { return JobRow({ job, refresh() {} }); }
+  function toggle(tree) {
+    return tree.props.children.find(child => child?.props?.className === "button-row").props.children[0];
+  }
+  const closed = render();
+  assert.equal(toggle(closed).props["aria-expanded"], false);
+  assert.equal(toggle(closed).props.children, translate("Inspect events", locale));
+  assert.doesNotMatch(renderToStaticMarkup(closed), /class="events"/);
+  assert.deepEqual(queries, []);
+  toggle(closed).props.onClick();
+  const opened = render();
+  assert.equal(toggle(opened).props["aria-expanded"], true);
+  assert.equal(toggle(opened).props.children, translate("Hide events", locale));
+  const html = renderToStaticMarkup(opened);
+  assert.match(html, /class="events"/);
+  assert.equal((html.match(/<li>/g) || []).length, 3);
+  assert.match(html, /<span>PARSE_FAILED<\/span>/);
+  assert.ok(html.includes(`${translate("parse", locale)} · PARSE_EMPTY`));
+  assert.match(html, /File read failed &lt;details&gt;/);
+  assert.match(html, /file:\/\/\/C:\/notes\/a.txt/);
+  assert.match(html, /timestamp:1700000000/);
+  assert.deepEqual(queries, [{ path: "/jobs/job%2F123/events", interval: 2000 }]);
+  toggle(opened).props.onClick();
+  assert.doesNotMatch(renderToStaticMarkup(render()), /class="events"/);
+});
 
 test("page ranges cover partial last pages and clamp after items are removed", () => {
   const last = pagination(23, 3, 10);

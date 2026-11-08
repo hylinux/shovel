@@ -183,7 +183,7 @@ function SidebarResizeHandle() {
   const handle = useRef<HTMLDivElement>(null);
   const drag = useRef<{ pointerId: number; x: number; width: number } | null>(null);
   const [resizing, setResizing] = useState(false);
-  const [dimensions, setDimensions] = useState({ width: 325, maximum: 420 });
+  const [dimensions, setDimensions] = useState({ width: 375, maximum: 420 });
   function maximumWidth() {
     return Math.max(200, Math.min(420, Math.round(window.innerWidth * .4)));
   }

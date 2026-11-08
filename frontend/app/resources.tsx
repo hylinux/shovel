@@ -2,27 +2,35 @@
 
 import { useI18n } from "./locale-context";
 
-import { useState, type FormEvent } from "react";
-import { type Connector, type Items, type Operation, type OutlookFolder, type OutlookStore, type Resource, type Status, segment, useAction, useQuery } from "./api";
+import { useCallback, useEffect, useRef, useState, type FormEvent } from "react";
+import { type Connector, type Items, type Operation, type OutlookFolder, type OutlookStore, type Resource, type Status, active, segment, useAction, useQuery } from "./api";
 import { usePageQuery } from "./pagination-query";
 import { Badge, Empty, Feedback, Pagination } from "./ui";
 import { Profiles } from "./profiles";
 
-export function Resources({ status, refresh }: { status?: Status; refresh: () => void }) {
+export function Resources({ status, refresh, onTasks }: { status?: Status; refresh: () => void; onTasks: () => void }) {
   const { t } = useI18n();
   const connectors = useQuery<Items<Connector>>("/connectors");
   const [adding, setAdding] = useState(false);
   const [filter, setFilter] = useState("");
+  const [creations, setCreations] = useState<{ operation: Operation; name: string }[]>([]);
   const page = usePageQuery<Resource>(`/resources?q=${segment(filter)}`, 2000);
   const resources = page.data?.items;
   const loading = page.loading;
-  function refreshResources() { page.refresh(); refresh(); }
+  const refreshPage = page.refresh;
+  const refreshResources = useCallback(() => { refreshPage(); refresh(); }, [refreshPage, refresh]);
+  function onQueued(operation: Operation, name: string) {
+    setCreations((current) => [...current.filter((item) => item.operation.id !== operation.id), { operation, name }]);
+    refreshResources();
+    setAdding(false);
+  }
   const [kind, setKind] = useState("local_fs");
   const connector = connectors.data?.items.find((connector) => connector.kind === kind);
   const visible = resources || [];
   return <section>
     <div className="section-toolbar"><div><h2>{t("Connected resources ")}<span className="count">{page.data?.total ?? "—"}</span></h2><p>{t("Choose local documents, classic Outlook mail or a public website, verify access, then build its search index.")}</p></div><button className="primary" onClick={() => setAdding(!adding)} aria-expanded={adding}>{adding ? t("Close form") : t("+ Add resource")}</button></div>
-    {adding && <div className="inline-panel"><h3>{t("Add a resource")}</h3><Feedback error={connectors.error} retry={connectors.refresh} />{connectors.loading ? <p role="status">{t("Loading connectors…")}</p> : <><label>{t("Resource type")}<select value={kind} onChange={(event) => setKind(event.target.value)}><option value="local_fs">{t("Local folder")}</option><option value="outlook_local">{t("Classic Outlook mail (Windows)")}</option><option value="web_search">{t("Web Search — public website")}</option></select></label>{!connector ? <p>{t("This resource type is not available from this runtime.")}</p> : <><p>{connector.description}</p>{kind === "outlook_local" ? <CreateOutlookResource onCreated={() => { refreshResources(); setAdding(false); }} /> : kind === "web_search" ? <CreateWebResource onCreated={() => { refreshResources(); setAdding(false); }} /> : <CreateResource onCreated={() => { refreshResources(); setAdding(false); }} />}</>}</>}</div>}
+    {adding && <div className="inline-panel"><h3>{t("Add a resource")}</h3><p className="muted">{t("Resource creation is queued. Running scans finish before creation and verification start.")}</p><Feedback error={connectors.error} retry={connectors.refresh} />{connectors.loading ? <p role="status">{t("Loading connectors…")}</p> : <><label>{t("Resource type")}<select value={kind} onChange={(event) => setKind(event.target.value)}><option value="local_fs">{t("Local folder")}</option><option value="outlook_local">{t("Classic Outlook mail (Windows)")}</option><option value="web_search">{t("Web Search — public website")}</option></select></label>{!connector ? <p>{t("This resource type is not available from this runtime.")}</p> : <><p>{connector.description}</p>{kind === "outlook_local" ? <CreateOutlookResource onQueued={onQueued} /> : kind === "web_search" ? <CreateWebResource onQueued={onQueued} /> : <CreateResource onQueued={onQueued} />}</>}</>}</div>}
+    {creations.map(({ operation, name }) => <ResourceCreationNotice key={operation.id} operation={operation} name={name} onFinished={refreshResources} onTasks={onTasks} onDismiss={() => setCreations((current) => current.filter((item) => item.operation.id !== operation.id))} />)}
     <div className="list-toolbar"><label className="search-field"><span className="sr-only">{t("Filter resources")}</span><input type="search" placeholder={t("Filter by name, folder path or website…")} maxLength={2000} value={filter} onChange={(event) => setFilter(event.target.value)} /></label><span className="muted">{t("Automatically refreshed")}</span></div>
     <Feedback error={page.error} retry={page.refresh} />
     {loading && !resources ? <p role="status" className="empty">{t("Loading resources…")}</p> : !resources ? <Empty title={t("Resources unavailable")}>{t("Resolve the connection error above to load your resources.")}</Empty> : !visible.length ? <Empty title={filter ? t("No matching resources") : t("Connect your knowledge")}>{filter ? t("Try a different name, path or website.") : t("Add a local folder, Outlook mail or public website resource. Nothing is indexed until you run a scan.")}</Empty> : <div className="resource-list">{visible.map((resource) => <ResourceRow key={resource.id} resource={resource} status={status} refresh={refreshResources} />)}</div>}
@@ -30,19 +38,53 @@ export function Resources({ status, refresh }: { status?: Status; refresh: () =>
   </section>;
 }
 
-function CreateResource({ onCreated }: { onCreated: () => void }) {
+function pollCreation(operation: Operation) { return active(operation.state); }
+
+export function ResourceCreationNotice({ operation, name, onFinished, onTasks, onDismiss }: {
+  operation: Operation; name: string; onFinished: () => void; onTasks: () => void; onDismiss: () => void;
+}) {
+  const { t } = useI18n();
+  const query = useQuery<Operation>(`/operations/${segment(operation.id)}`, 2000, pollCreation);
+  const current = query.data || operation;
+  const finished = ["succeeded", "completed", "completed_with_errors", "failed", "cancelled"].includes(current.state);
+  const reported = useRef(false);
+  useEffect(() => {
+    if (finished && !reported.current) { reported.current = true; onFinished(); }
+  }, [finished, onFinished]);
+  const problem = ["completed_with_errors", "failed", "cancelled"].includes(current.state);
+  const message = current.state === "queued" ? "Resource creation queued. It will start after running scans finish."
+    : current.state === "running" ? "Creating and verifying the resource. It may not be listed yet."
+    : current.state === "succeeded" || current.state === "completed" ? "Resource creation completed. If it is not visible, check the filter and pagination."
+    : current.state === "completed_with_errors" ? "Resource creation finished with errors. Check Background tasks for details."
+    : current.state === "failed" ? "Resource creation failed. Check Background tasks before submitting again."
+    : current.state === "cancelled" ? "Resource creation was cancelled. Check Background tasks before submitting again."
+    : "Resource creation status is not recognized. Check Background tasks.";
+  const detail = current.error || (typeof current.result.message === "string" ? current.result.message : "");
+  return <article className="inline-panel">
+    <div className="title-line"><h3>{name}</h3><Badge state={current.state} /></div>
+    <p className={problem ? "feedback error" : finished ? "feedback success" : "muted"} role={problem ? "alert" : "status"}>{t(message)}</p>
+    {detail && <p className="reason">{t(detail)}</p>}
+    <p className="path">{t("Creation task")}: {current.id}</p>
+    <Feedback error={query.error} retry={query.refresh} />
+    <div className="button-row"><button onClick={onTasks}>{t("View in Background tasks")}</button>{finished && <button onClick={onDismiss}>{t("Dismiss notification")}</button>}</div>
+  </article>;
+}
+
+type CreationProps = { onQueued: (operation: Operation, name: string) => void };
+
+function CreateResource({ onQueued }: CreationProps) {
   const { t } = useI18n();
   const action = useAction();
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     const form = new FormData(event.currentTarget);
     const result = await action.run<Operation>("/resources", { name: String(form.get("name")).trim(), connector_kind: "local_fs", config: { root_path: String(form.get("root_path")).trim() }, description: String(form.get("description")).trim() || undefined, verify: true, scan: false });
-    if (result) onCreated();
+    if (result) onQueued(result, String(form.get("name")).trim());
   }
   return <form onSubmit={submit} className="form-grid"><label>{t("Name")}<input name="name" required maxLength={200} placeholder={t("Research notes")} autoFocus disabled={action.busy} /></label><label>{t("Folder path")}<input name="root_path" required placeholder={"C:\\Users\\you\\Documents"} className="path" disabled={action.busy} /></label><label className="full">{t("Description ")}<span className="muted">{t("(optional)")}</span><input name="description" placeholder={t("What is in this folder?")} disabled={action.busy} /></label><div className="full"><Feedback error={action.error} /><p className="muted">{t("Creation verifies folder access. Scanning is a separate, explicit action.")}</p><button className="primary" disabled={action.busy}>{action.busy ? t("Adding folder…") : t("Add and verify")}</button></div></form>;
 }
 
-function CreateOutlookResource({ onCreated }: { onCreated: () => void }) {
+function CreateOutlookResource({ onQueued }: CreationProps) {
   const { t } = useI18n();
   const stores = useQuery<Items<OutlookStore>>("/outlook/stores");
   const [storeId, setStoreId] = useState("");
@@ -50,11 +92,11 @@ function CreateOutlookResource({ onCreated }: { onCreated: () => void }) {
     <Feedback error={stores.error} retry={stores.refresh} />
     {stores.loading ? <p role="status">{t("Connecting to classic Outlook…")}</p> : <label>{t("Mailbox")}<select value={storeId} onChange={(event) => setStoreId(event.target.value)}><option value="">{t("Select a mailbox")}</option>{stores.data?.items.map((store) => <option value={store.id} key={store.id}>{store.name}</option>)}</select></label>}
     {stores.data?.items.length === 0 && <p>{t("No Outlook stores are available. Open classic Outlook and configure a profile, then retry.")}</p>}
-    {storeId && <OutlookFolderForm key={storeId} storeId={storeId} onCreated={onCreated} />}
+    {storeId && <OutlookFolderForm key={storeId} storeId={storeId} onQueued={onQueued} />}
   </>;
 }
 
-function CreateWebResource({ onCreated }: { onCreated: () => void }) {
+function CreateWebResource({ onQueued }: CreationProps) {
   const { t } = useI18n();
   const action = useAction();
   async function submit(event: FormEvent<HTMLFormElement>) {
@@ -73,7 +115,7 @@ function CreateWebResource({ onCreated }: { onCreated: () => void }) {
       },
       description: String(form.get("description")).trim() || undefined, verify: true, scan: false,
     });
-    if (result) onCreated();
+    if (result) onQueued(result, String(form.get("name")).trim());
   }
   return <form onSubmit={submit} className="form-grid">
     <label>{t("Name")}<input name="name" required maxLength={200} placeholder={t("Product documentation")} autoFocus disabled={action.busy} /></label>
@@ -93,7 +135,7 @@ function CreateWebResource({ onCreated }: { onCreated: () => void }) {
   </form>;
 }
 
-function OutlookFolderForm({ storeId, onCreated }: { storeId: string; onCreated: () => void }) {
+function OutlookFolderForm({ storeId, onQueued }: CreationProps & { storeId: string }) {
   const { t } = useI18n();
   const [parents, setParents] = useState<OutlookFolder[]>([]);
   const [selected, setSelected] = useState<OutlookFolder[]>([]);
@@ -110,7 +152,7 @@ function OutlookFolderForm({ storeId, onCreated }: { storeId: string; onCreated:
       description: selected.map((folder) => folder.path).join("; ").slice(0, 1000),
       verify: true, scan: false,
     });
-    if (result) onCreated();
+    if (result) onQueued(result, String(form.get("name")).trim());
   }
   return <form className="form-grid" onSubmit={submit}>
     <label className="full">{t("Resource name")}<input required name="name" maxLength={200} disabled={action.busy} placeholder={t("Work mail")} /></label>

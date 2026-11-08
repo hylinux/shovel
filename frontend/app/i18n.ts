@@ -4,6 +4,17 @@ export const defaultLocale: Locale = "en";
 export type TranslationValues = Record<string, string | number | boolean | null | undefined>;
 
 export const chinese: Readonly<Record<string, string>> = {
+  "Resource creation is queued. Running scans finish before creation and verification start.": "资源创建通过后台队列执行，正在运行的扫描结束后才会开始创建和验证。",
+  "Resource creation queued. It will start after running scans finish.": "资源创建任务已排队，将在正在运行的扫描结束后开始执行。",
+  "Creating and verifying the resource. It may not be listed yet.": "正在创建和验证资源，列表中可能暂时还看不到。",
+  "Resource creation completed. If it is not visible, check the filter and pagination.": "资源创建已完成。如果列表中看不到，请检查筛选条件和分页。",
+  "Resource creation finished with errors. Check Background tasks for details.": "资源创建已结束，但存在错误。请在后台任务中查看详情。",
+  "Resource creation failed. Check Background tasks before submitting again.": "资源创建失败。再次提交前，请先在后台任务中检查结果。",
+  "Resource creation was cancelled. Check Background tasks before submitting again.": "资源创建已取消。再次提交前，请先在后台任务中检查结果。",
+  "Resource creation status is not recognized. Check Background tasks.": "无法识别资源创建状态，请在后台任务中查看。",
+  "Creation task": "创建任务",
+  "View in Background tasks": "在后台任务中查看",
+  "Dismiss notification": "关闭通知",
   "Skill library": "技能库",
   "Workflows": "工作流",
   "Skills": "技能",

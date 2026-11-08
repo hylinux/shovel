@@ -160,7 +160,7 @@ export default function Home() {
         <header className="page-heading"><div><h1>{t(view)}</h1><p title={view === "Chat" ? t(descriptions[view]) : undefined}>{t(descriptions[view])}</p></div>{view !== "Chat" && <span className="local-label">{t("Local-first runtime")}</span>}</header>
         <Feedback error={status.error} retry={status.refresh} />
         {resourcesNeeded && <Feedback error={resources.error} retry={resources.refresh} />}
-        {view === "Resources" && <Resources status={status.data} refresh={resources.refresh} />}
+        {view === "Resources" && <Resources status={status.data} refresh={resources.refresh} onTasks={() => navigate("Background tasks")} />}
         {view === "Background tasks" && <Tasks resources={resources.data?.items || []} />}
         {view === "Search Documents" && <SearchDocuments resources={resources.data?.items || []} status={status.data} />}
         {view === "Chat" && <><Feedback error={sessionError} retry={retryInitialSession} />{creatingSession && !selectedSession ? <p role="status">{t("Opening session…")}</p> : <Knowledge status={status.data} sessionId={selectedSession} onSessionChanged={refreshSessions} />}</>}

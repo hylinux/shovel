@@ -15,6 +15,7 @@ import os
 from collections.abc import AsyncIterator, Sequence
 from pathlib import Path
 from typing import Any
+from unittest.mock import mock_open
 
 import pytest
 import pytest_asyncio
@@ -24,7 +25,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 from shovel.db.base import Base
 from shovel.db.model.config import ScanProfile
 from shovel.db.model.content import Chunk, Document
-from shovel.db.model.execution import Job
+from shovel.db.model.execution import Job, JobEvent
 from shovel.db.model.retrieval import DeletionOutbox
 from shovel.domain.enums import (
     DocumentLifecycleState,
@@ -41,6 +42,7 @@ from shovel.pipeline.cleanup import IndexCleanupService
 from shovel.pipeline.embedder import NullEmbedder
 from shovel.pipeline.scan_service import ScanService
 from shovel.pipeline.sink import VectorRecord
+from shovel.services.connector_base import DiscoveredItem, DiscoveryScope
 from shovel.services.connector_local_fs import LocalFsConnector
 from shovel.services.credentials import InMemoryCredentialStore
 from shovel.services.resource_service import ResourceDraft, ResourceService
@@ -706,6 +708,80 @@ async def test_incremental_scan_never_tombstones(
 # --------------------------------------------------------------------------- #
 # 容错
 # --------------------------------------------------------------------------- #
+@pytest.mark.parametrize("failure", ["missing", "permission", "mid-read"])
+async def test_local_file_read_failure_does_not_abort_the_run(
+    service: ScanService,
+    sessions: async_sessionmaker[AsyncSession],
+    resource_id: str,
+    corpus: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    failure: str,
+) -> None:
+    discover = LocalFsConnector.discover
+    path_open = Path.open
+    failed_path = corpus / "notes.md"
+    original_bytes = failed_path.read_bytes()
+    opened: list[str] = []
+    broken_open = mock_open()
+    broken_open.return_value.read.side_effect = [b"# incomplete", OSError("Read interrupted")]
+
+    async def sorted_discover(
+        connector: LocalFsConnector, scope: DiscoveryScope
+    ) -> AsyncIterator[DiscoveredItem]:
+        items = [item async for item in discover(connector, scope)]
+        for item in sorted(items, key=lambda item: item.external_id):
+            yield item
+
+    def failing_open(path: Path, *args: Any, **kwargs: Any) -> Any:
+        opened.append(path.name)
+        if path == failed_path:
+            if failure == "missing":
+                path.unlink()
+            elif failure == "permission":
+                raise PermissionError("Read denied")
+            else:
+                return broken_open(*args, **kwargs)
+        return path_open(path, *args, **kwargs)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(LocalFsConnector, "discover", sorted_discover)
+        patch.setattr(Path, "open", failing_open)
+        outcome = await service.scan(resource_id, mode=ScanMode.FULL_SWEEP)
+
+    assert opened == ["notes.md", "readme.txt"]
+    assert outcome.state is JobState.COMPLETED_WITH_ERRORS
+    assert outcome.failed_docs == 1
+    assert outcome.fetched == outcome.parsed == outcome.embedded == 1
+    assert outcome.bytes_read == (corpus / "readme.txt").stat().st_size
+    async with sessions() as session:
+        job = await session.get(Job, outcome.job_id)
+        assert job is not None
+        assert job.state is JobState.COMPLETED_WITH_ERRORS
+        assert job.failed_docs == 1
+        document = await session.get(Document, (failed_path.as_uri(), resource_id))
+        assert document is not None
+        assert document.pipe_state is DocumentPipeState.FAILED
+        assert document.pipe_attempts == 1
+        assert document.skip_reason
+        events = list(await session.scalars(select(JobEvent).where(JobEvent.job_id == outcome.job_id)))
+        errors = [event for event in events if event.doc_uri == failed_path.as_uri()]
+        assert len(errors) == 1
+        assert errors[0].message == document.skip_reason
+        assert not any(event.code == "JOB_ABORTED" for event in events)
+        assert not list(
+            await session.scalars(
+                select(Chunk).where(Chunk.doc_uri == failed_path.as_uri(), Chunk.resource_id == resource_id)
+            )
+        )
+
+    if failure == "missing":
+        failed_path.write_bytes(original_bytes)
+    retried = await service.scan(resource_id, mode=ScanMode.INCREMENTAL)
+    assert retried.state is JobState.SUCCEEDED
+    assert retried.parsed == 1
+    assert retried.skipped_unchanged == 1
+
+
 async def test_one_bad_document_does_not_abort_the_run(
     service: ScanService,
     sessions: async_sessionmaker[AsyncSession],

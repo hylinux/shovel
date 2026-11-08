@@ -41,6 +41,8 @@ from shovel.runtime.memory import MemoryService
 from shovel.runtime.requests import request_operation_id
 from shovel.runtime.schemas import MessageInput, ResourceInput, ScanInput, SearchInput
 from shovel.runtime.service import Runtime, create_runtime
+from shovel.services.connector_base import DiscoveredItem, DiscoveryScope
+from shovel.services.connector_local_fs import LocalFsConnector
 from shovel.services.resource_service import ResourceDraft, ResourceService
 from shovel.vector.store import init_vector_store
 
@@ -900,6 +902,54 @@ async def test_resource_scan_search_and_cleanup_api(
     assert (await api.get(f"/api/v1/resources/{resource_id}")).status_code == 404
     assert (await api.post("/api/v1/search", json={"query": "Shovel"})).json()["items"] == []
     assert (await api.get(f"/api/v1/operations/{deletion['id']}")).status_code == 200
+
+
+async def test_scan_operation_completes_with_errors_when_discovered_file_disappears(
+    runtime: Runtime,
+    api: httpx.AsyncClient,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "notes"
+    root.mkdir()
+    missing = root / "a.txt"
+    missing.write_text("This file disappears after discovery.", encoding="utf-8")
+    (root / "b.txt").write_text("Remaining document is searchable.", encoding="utf-8")
+    response = await api.post(
+        "/api/v1/resources",
+        json={"name": "documents", "connector_kind": "local_fs", "config": {"root_path": str(root)}},
+    )
+    assert response.status_code == 202
+    resource_id = response.json()["resource_id"]
+    assert await runtime.operations.run_once()
+
+    discover = LocalFsConnector.discover
+
+    async def disappearing_discover(
+        connector: LocalFsConnector, scope: DiscoveryScope
+    ) -> AsyncIterator[DiscoveredItem]:
+        items = [item async for item in discover(connector, scope)]
+        for item in sorted(items, key=lambda item: item.external_id):
+            yield item
+        missing.unlink()
+
+    monkeypatch.setattr(LocalFsConnector, "discover", disappearing_discover)
+    response = await api.post(f"/api/v1/resources/{resource_id}/scans", json={"embed": False})
+    assert response.status_code == 202
+    queued = response.json()
+    assert await runtime.operations.run_once()
+    receipt = (await api.get(f"/api/v1/operations/{queued['id']}")).json()
+    assert receipt["state"] == "completed_with_errors"
+    assert receipt["result"]["failed_docs"] == 1
+    assert receipt["error"]
+    job = (await api.get(f"/api/v1/jobs/{queued['job_id']}")).json()
+    assert job["state"] == "completed_with_errors"
+    assert job["discovered"] == 2
+    assert job["parsed"] == job["failed_docs"] == 1
+    assert job["progress"] == 1.0
+    result = await api.post("/api/v1/search", json={"query": "Remaining", "mode": "keyword"})
+    assert result.status_code == 200
+    assert len(result.json()["items"]) == 1
 
 
 async def test_idempotent_requests_replay_receipts_and_reject_changed_intent(

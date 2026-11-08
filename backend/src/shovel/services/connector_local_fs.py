@@ -24,6 +24,7 @@ from typing import ClassVar, NoReturn
 from pydantic import BaseModel, ConfigDict, Field, SecretStr, field_validator
 
 from shovel.domain.enums import DocClass, Modality, Sensitivity
+from shovel.exceptions.pipeline import ParseError
 from shovel.exceptions.resource import (
     ConnectorCapabilityError,
     ConnectorDiscoveryError,
@@ -339,14 +340,16 @@ class LocalFsConnector:
         if not self.spec.supports(ConnectorCapability.RANDOM_READ):
             raise ConnectorCapabilityError(self.spec.kind, "random_read")
 
-        path = self._resolve(item.external_id)
-
-        with path.open("rb") as handle:
-            while True:
-                block = handle.read(_CHUNK_BYTES)
-                if not block:
-                    break
-                yield block
+        try:
+            path = self._resolve(item.external_id)
+            with path.open("rb") as handle:
+                while True:
+                    block = handle.read(_CHUNK_BYTES)
+                    if not block:
+                        break
+                    yield block
+        except OSError as exc:
+            raise ParseError(item.uri, f"文件读取失败 ({type(exc).__name__}): {exc}") from exc
 
     # ----------------------------------------------------------------- #
     # internals

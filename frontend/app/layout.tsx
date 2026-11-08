@@ -9,8 +9,9 @@ export const metadata: Metadata = {
 };
 
 export default function RootLayout({ children }: { children: ReactNode }) {
+  // Extensions can inject root attributes before hydration; descendants remain checked.
   return (
-    <html lang="en">
+    <html lang="en" suppressHydrationWarning>
       <body><LocaleProvider>{children}</LocaleProvider></body>
     </html>
   );

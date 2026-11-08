@@ -414,6 +414,136 @@ async def test_real_extractor_rejects_paraphrased_evidence_before_partial_commit
     assert await runtime.memory.list() == []
 
 
+@pytest.mark.parametrize("provider", ["deepseek", "qianwen"])
+async def test_compatible_memory_extractor_accepts_empty_facts_and_plain_text_summary(provider: str) -> None:
+    from shovel.config.memory_config import MemoryModelSettings
+    from shovel.memory.agent_framework import AgentFrameworkMemoryExtractor
+
+    calls: list[dict[str, Any]] = []
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        calls.append(body)
+        assert not body.get("tools")
+        assert body["max_tokens"] == 2048
+        assert "max_completion_tokens" not in body
+        if provider == "deepseek":
+            assert body["thinking"] == {"type": "disabled"}
+        else:
+            assert body["enable_thinking"] is False
+        if len(calls) == 1:
+            assert body["response_format"] == {"type": "json_object"}
+            assert "JSON Schema" in body["messages"][0]["content"]
+            answer = '{"candidates": []}'
+        else:
+            assert "response_format" not in body
+            answer = "The user greeted the assistant."
+        return httpx.Response(
+            200, json={"created": 1, "choices": [{"message": {"role": "assistant", "content": answer}}]}
+        )
+
+    settings = MemoryModelSettings(
+        model_provider_type=provider,
+        model_name="memory-model",
+        security_key="test-memory-key",
+    )
+    extractor = AgentFrameworkMemoryExtractor(settings, lambda: httpx.MockTransport(respond))
+    try:
+        assert await extractor.extract("Hello.") == []
+        assert (
+            await extractor.summarize("", [{"role": "user", "content": "Hello."}], 2000)
+            == "The user greeted the assistant."
+        )
+    finally:
+        await extractor.close()
+    assert len(calls) == 2
+
+
+@pytest.mark.parametrize("provider", ["deepseek", "qianwen"])
+@pytest.mark.parametrize("invalid_output", ["blank", "truncated", "extra-field", "unrelated-evidence"])
+async def test_compatible_memory_extractor_rejects_invalid_output(provider: str, invalid_output: str) -> None:
+    from shovel.config.memory_config import MemoryModelSettings
+    from shovel.memory.agent_framework import AgentFrameworkMemoryExtractor
+
+    answers = {
+        "blank": " ",
+        "truncated": '{"candidates": [',
+        "extra-field": '{"candidates": [], "unexpected": true}',
+        "unrelated-evidence": json.dumps(
+            {
+                "candidates": [
+                    {
+                        "text": "User prefers coffee.",
+                        "kind": "semantic",
+                        "predicate": "prefers",
+                        "object": "coffee",
+                        "topic": "drink",
+                        "confidence": 1,
+                        "importance": 1,
+                        "evidence": "I prefer coffee.",
+                    }
+                ]
+            }
+        ),
+    }
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        assert body["response_format"] == {"type": "json_object"}
+        assert not body.get("tools")
+        return httpx.Response(
+            200,
+            json={
+                "created": 1,
+                "choices": [{"message": {"role": "assistant", "content": answers[invalid_output]}}],
+            },
+        )
+
+    settings = MemoryModelSettings(
+        model_provider_type=provider,
+        model_name="memory-model",
+        security_key="test-memory-key",
+    )
+    extractor = AgentFrameworkMemoryExtractor(settings, lambda: httpx.MockTransport(respond))
+    try:
+        with pytest.raises(ValueError):
+            await extractor.extract("I prefer green tea.")
+    finally:
+        await extractor.close()
+
+
+async def test_compatible_memory_extractor_budgets_schema_instructions_before_request() -> None:
+    from shovel.config.memory_config import MemoryModelSettings
+    from shovel.memory.agent_framework import (
+        EXTRACTION,
+        AgentFrameworkMemoryExtractor,
+        ExtractionOutput,
+        source_evidence,
+    )
+
+    source = "I prefer green tea."
+    schema = ExtractionOutput.model_json_schema()
+    schema["$defs"]["CandidateOutput"]["properties"]["evidence"]["enum"] = source_evidence(source)
+    payload = json.dumps({"user_text": source, "related_memories": []}, ensure_ascii=False)
+    limit = len(payload) + len(EXTRACTION) + len(json.dumps(schema, ensure_ascii=False)) + 1
+
+    def forbidden(_request: httpx.Request) -> httpx.Response:
+        raise AssertionError("An over-budget Memory request must not reach the provider.")
+
+    settings = MemoryModelSettings(
+        model_provider_type="deepseek",
+        model_name="memory-model",
+        security_key="test-memory-key",
+        max_input_chars=limit,
+    )
+    extractor = AgentFrameworkMemoryExtractor(settings, lambda: httpx.MockTransport(forbidden))
+    try:
+        with pytest.raises(ValueError, match="references exceed"):
+            await extractor.extract(source)
+    finally:
+        await extractor.close()
+
+
 async def test_profile_lookup_streams_and_persists_without_model_guessing(
     runtime: Runtime, api: httpx.AsyncClient
 ) -> None:
@@ -835,7 +965,7 @@ async def test_native_management_api_and_idempotent_update(runtime: Runtime, api
     assert (await api.post("/api/v1/memories", json={"text": "My password is unsafe"})).status_code == 422
 
 
-@pytest.mark.parametrize("provider", ["openai", "azure_openai", "ollama"])
+@pytest.mark.parametrize("provider", ["openai", "azure_openai", "ollama", "deepseek", "qianwen"])
 @pytest.mark.parametrize(
     "source,candidates,query",
     [
@@ -959,13 +1089,22 @@ async def test_maf_chat_to_native_memory_to_another_session(
     def extract(request: httpx.Request) -> httpx.Response:
         body = json.loads(request.content)
         assert not body.get("tools")
-        allowed_evidence = body["response_format"]["json_schema"]["schema"]["$defs"]["CandidateOutput"][
-            "properties"
-        ]["evidence"]["enum"]
+        if provider in ("deepseek", "qianwen"):
+            assert body["response_format"] == {"type": "json_object"}
+            instructions = body["messages"][0]["content"]
+            schema = json.loads(instructions.split("when there are no eligible facts:\n", 1)[1])
+        else:
+            assert body["response_format"]["type"] == "json_schema"
+            schema = body["response_format"]["json_schema"]["schema"]
+        allowed_evidence = schema["$defs"]["CandidateOutput"]["properties"]["evidence"]["enum"]
         assert source in allowed_evidence
         assert all(evidence in source for evidence in allowed_evidence)
-        key = "max_tokens" if provider == "ollama" else "max_completion_tokens"
+        key = "max_tokens" if provider in ("ollama", "deepseek", "qianwen") else "max_completion_tokens"
         assert body[key] == runtime.settings.model.max_output_tokens
+        if provider == "deepseek":
+            assert body["thinking"] == {"type": "disabled"}
+        if provider == "qianwen":
+            assert body["enable_thinking"] is False
         if provider == "azure_openai":
             assert request.headers["api-key"] == runtime.settings.model.security_key
             assert request.url.params["api-version"] == "2024-10-21"

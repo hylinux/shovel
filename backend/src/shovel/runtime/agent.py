@@ -71,7 +71,7 @@ def tool_schema_size(tools: list[Any]) -> tuple[int, int]:
 
 
 class ModelOptions(ChatOptions[None], total=False):
-    extra_body: dict[str, int]
+    extra_body: dict[str, int | dict[str, str]]
 
 
 _GREETING = re.compile(r"(?:hi|hello|hey|你好|您好|嗨)[\s!\uff01.\u3002]*", re.IGNORECASE)

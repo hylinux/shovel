@@ -106,6 +106,20 @@ class AgentFrameworkMemoryExtractor:
     def _options(self) -> ModelOptions:
         if self.settings.model_provider_type == ModelProviderType.OLLAMA:
             return {"extra_body": {"max_tokens": self.settings.max_output_tokens}}
+        if self.settings.model_provider_type == ModelProviderType.DEEPSEEK:
+            return {
+                "extra_body": {
+                    "max_tokens": self.settings.max_output_tokens,
+                    "thinking": {"type": "disabled"},
+                }
+            }
+        if self.settings.model_provider_type == ModelProviderType.QIANWEN:
+            return {
+                "extra_body": {
+                    "max_tokens": self.settings.max_output_tokens,
+                    "enable_thinking": False,
+                }
+            }
         return {"max_tokens": self.settings.max_output_tokens}
 
     async def extract(
@@ -119,17 +133,28 @@ class AgentFrameworkMemoryExtractor:
         options = self._options()
         schema = ExtractionOutput.model_json_schema()
         schema["$defs"]["CandidateOutput"]["properties"]["evidence"]["enum"] = source_evidence(text)
-        options["response_format"] = {
-            "type": "json_schema",
-            "json_schema": {
-                "name": "memory_candidates",
-                "schema": schema,
-            },
-        }
+        schema_json = json.dumps(schema, ensure_ascii=False)
+        instructions = EXTRACTION
+        schema_chars = len(schema_json)
+        if self.settings.model_provider_type in (ModelProviderType.DEEPSEEK, ModelProviderType.QIANWEN):
+            options["response_format"] = {"type": "json_object"}
+            instructions += (
+                '\nReturn only a JSON object matching this JSON Schema. Use {"candidates": []} '
+                f"when there are no eligible facts:\n{schema_json}"
+            )
+            schema_chars = 0
+        else:
+            options["response_format"] = {
+                "type": "json_schema",
+                "json_schema": {
+                    "name": "memory_candidates",
+                    "schema": schema,
+                },
+            }
         agent = Agent(
             client=self._client(),
             name="shovel-memory-extractor",
-            instructions=EXTRACTION,
+            instructions=instructions,
             default_options=options,
         )
         payload = json.dumps(
@@ -142,10 +167,7 @@ class AgentFrameworkMemoryExtractor:
             },
             ensure_ascii=False,
         )
-        if (
-            len(payload) + len(EXTRACTION) + len(json.dumps(schema, ensure_ascii=False))
-            > self.settings.max_input_chars
-        ):
+        if len(payload) + len(instructions) + schema_chars > self.settings.max_input_chars:
             raise ValueError("Memory extraction references exceed model.max_input_chars.")
         async with asyncio.timeout(self.settings.timeout_seconds):
             response = await agent.run(payload)

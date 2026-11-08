@@ -138,6 +138,13 @@ the browser's filesystem.
 | `[memory.llm]` | Memory extraction/summarization; falls back to `[model]` when not separately configured. |
 | `[memory.embedder]` and `[memory]` | Independent Memory embeddings and their index/dimension. |
 
+Memory extraction uses JSON Object output for `deepseek` and `qianwen`, with
+the expected schema in the instructions and local field/evidence validation.
+Their Memory extraction and summary requests disable thinking and send the
+configured `max_tokens` budget. Azure OpenAI, OpenAI and Ollama retain JSON Schema
+output; select a model/deployment that supports the corresponding output mode.
+No additional configuration switch is required when changing these providers.
+
 Knowledge embedding configuration does not automatically configure Memory
 semantic recall. Without a Memory embedder, SQLite facts remain available, but
 semantic Memory recall is explicitly unavailable.

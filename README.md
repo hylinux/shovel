@@ -711,6 +711,26 @@ uv run pytest backend\tests\test_knowledge_baseline.py -m live --no-cov
 These can call paid external services and send synthetic evidence to them.
 They are model-quality measurements, **not enterprise installed-live acceptance**.
 
+Image attachment live tests use the same explicit opt-in and selected configuration:
+
+```powershell
+$env:SHOVEL_RUN_LIVE_TESTS = "1"
+$env:SHOVEL_LIVE_CONFIG = 'C:\path\to\settings.toml'
+$env:SHOVEL_ATTACHMENT_LIVE_REPORT_DIR = 'C:\path\to\reports'
+uv run pytest backend\tests\test_session_attachments_live.py -m live --no-cov
+```
+
+These require a vision-capable chat model and send only synthetic high-detail
+images and test prompts, using isolated stores and workspace. REST and AG-UI
+each verify single-image recognition, multiple images, retained image history,
+and media-limit rejection without additional provider requests. The configured
+text budget is capped at the default 24,000 characters in the test runtime to
+exercise the original base64-budget regression; the configuration file is not
+modified. Reports contain synthetic answers, model identity, image counts and
+request sizes, not credentials or request bodies. The report directory is
+optional and defaults to pytest's temporary directory. Without opt-in, these
+tests are skipped and do not call the model.
+
 ### Packaging and evidence
 
 A source-only `uv build` does not build or bundle the workbench automatically.

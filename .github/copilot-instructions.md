@@ -262,6 +262,27 @@ are in `.github\workflows\ci.yml`.
   or indexing. On a lost response/stream, inspect persisted history before
   resending. Preserve the stream's `no-cache, no-transform` headers so the dev
   proxy does not buffer small SSE frames.
+- Chat uploads use `runtime\attachments.py`, not knowledge ingestion. Keep files
+  Session-scoped under the private `temp_path` namespace, sanitize images before
+  storage, and treat extracted content as untrusted model reference data, not
+  instructions or automatic Memory input. Pending uploads expire after 24 hours;
+  first send sets a seven-day expiry that reuse does not extend. Expired history
+  retains metadata and an unavailable marker, never invented file contents.
+  Enforce `model.max_input_images` and `model.max_input_image_bytes` independently
+  of the character budget. See `backend\tests\test_session_attachments.py`.
+- Composer drafts use `app\session-drafts.ts`, keyed by workspace and Session,
+  and remain in page memory, not browser storage. Preserve drafts and in-flight
+  uploads across navigation. A successful send clears only its unchanged
+  originating draft; failed/uncertain sends retain it. Session deletion aborts
+  uploads and fences late callbacks. See `frontend\tests\session-drafts.test.mjs`.
+- General settings profiles use `runtime\user_profile.py`: revision-checked
+  settings, sanitized avatar bytes, settings-managed Profile Memory and vector
+  outbox changes commit atomically. Startup/restart reconciles the projection
+  idempotently; chat extraction must not override settings-managed facts.
+  Current profile text reaches the next Agent request even with automatic Memory
+  off, but avatar bytes never enter model context. Edit these facts through
+  General settings, not ordinary Memory management. See
+  `backend\tests\test_user_profile.py`.
 - Timestamps are numeric UTC Unix **seconds**, not milliseconds; frontend
   `date()` converts them. Scan progress is a fraction from 0 to 1. Use the
   shared frontend API/error/URL-segment helpers rather than separate fetch
@@ -324,6 +345,12 @@ are in `.github\workflows\ci.yml`.
   can scan concurrently, but scans of the same resource remain serialized.
   Non-scan Operations are barriers: drain active scans before dispatching them.
   Preserve both resource exclusion and barriers when changing worker scheduling.
+- Scan discovery enumerates connectors outside SQLite write transactions.
+  Persist batches through `db\unit_of_work.py`'s `sqlite_write` (at most 100 items,
+  one for Web Search), then save progress outside the batch transaction. Do not
+  hold the writer reservation while awaiting source discovery: other scans,
+  Job heartbeats and Execution maintenance share the database. See
+  `backend\tests\test_scan_concurrency.py` and `Documents\scan_pipeline.md`.
 - Connector configuration is persisted; capabilities and implementations live
   in `services\connector_registry.py`. Connectors implement the Protocol and
   exchange plain data, without database sessions or ORM objects.

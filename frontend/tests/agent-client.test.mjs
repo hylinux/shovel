@@ -56,6 +56,30 @@ test("default Agent request enables Memory and retrieval without a session mode"
     { resource_ids: [], memory_enabled: true, search_mode: "auto" });
 });
 
+test("text-only composer requests omit empty attachment IDs for pre-attachment Hosts", async (t) => {
+  let captured;
+  t.mock.method(globalThis, "fetch", async (_url, options) => {
+    captured = JSON.parse(options.body);
+    if ("attachment_ids" in captured.forwardedProps) {
+      return Response.json({
+        error: { code: "validation_error", message: "Invalid request parameters." },
+        detail: [{ loc: ["attachment_ids"], msg: "Extra inputs are not permitted", type: "extra_forbidden" }],
+      }, { status: 422 });
+    }
+    return response(captured);
+  });
+  const request = {
+    ...input, resource_ids: [], memory_enabled: true, search_mode: "auto", working_task_id: null,
+    attachment_ids: [],
+  };
+  await runAgentMessage("/api/v1/agent", "session", request,
+    new AbortController().signal, () => {}, () => {});
+  assert.deepEqual(captured.forwardedProps, {
+    resource_ids: [], memory_enabled: true, search_mode: "auto", working_task_id: null,
+  });
+  assert.deepEqual(request.attachment_ids, []);
+});
+
 test("AG-UI forwards the explicitly selected working task without changing wire identity", async (t) => {
   let captured;
   t.mock.method(globalThis, "fetch", async (_url, options) => {

@@ -12,6 +12,7 @@ export type AgentMessageInput = {
   memory_enabled: boolean;
   search_mode: string;
   working_task_id?: string | null;
+  attachment_ids?: string[];
 };
 
 export async function runAgentMessage(
@@ -27,7 +28,8 @@ export async function runAgentMessage(
   const context = { run_id: runId, conversation_id: sessionId };
   let chunks = 0;
   let characters = 0;
-  const { content, ...forwardedProps } = input;
+  const { content, attachment_ids, ...properties } = input;
+  const forwardedProps = { ...properties, ...(attachment_ids?.length ? { attachment_ids } : {}) };
   const agent = new HttpAgent({
     url,
     threadId: sessionId,

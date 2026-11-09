@@ -540,7 +540,11 @@ stateDiagram-v2
 核心属性只按结构化身份去重，不采用模型建议的语义合并覆盖新值；
 例如旧的泛化职业不能吞掉新声明的资深 Java 职业。
 
-其余事实具有独立的 Memory FTS5 关键词路径，与下面的语义路径组合：
+事实具有独立的 Memory FTS5 关键词路径，与下面的语义路径组合。
+关键词过滤英语功能词/通用动词，以 ASCII 词边界避免 `use` 命中 `user`、
+`Go` 命中 `Google/Golang`；仍支持 `Go语言`、`使用SQLite数据库` 和中文短词。
+边界条件在候选条数限制前执行；FTS 保持 OR，并有界扩展公开类别词。
+这只用于 Memory，不改变知识库查询或持久化的 FTS 内容。
 
 1. 使用独立 `[memory.embedder]` 向量化当前问题。
 2. Zvec 按 workspace、user、Scope、agent/session 和模型版本过滤。
@@ -549,9 +553,19 @@ stateDiagram-v2
 5. 应用 `memory.min_similarity` 门槛。
 6. 按 ID 回到 SQLite 读取当前记录。
 7. 复核归属、类型、revision、模型版本、active 状态和有效期。
-8. 核心属性优先，其余通过复核的关键词/向量记录用 RRF 汇总相关性后排序；
-   统一按字符与条数预算选择，
-   更新访问统计。向量命中的旧核心属性不能绕过当前 SQLite 属性投影。
+8. 查询命中的当前属性和其他有效事实用 RRF 汇总相关性后排序，
+   无查询命中的 Profile 在剩余字符与条数预算内补充。不会让全部 Profile
+   无条件排在查询相关事实之前。向量或关键词命中的旧核心属性不能绕过
+   当前 SQLite 属性投影；即使条数上限小于四，属性候选仍有界读取四种属性，
+   然后按实际预算选择。
+9. `memory\relevance.py` 独立检查识别出的实体、关系、显式别名、
+   个人/团队及主体条件；融合排序不等于支持回答。冲突/缺失条件、
+   不明关系和不可信事件日期不作为答案证据，不跨项目借用事实。
+   仅 `supported` 和独立 `background` Profile 进入条数/字符预算选择，
+   内部保留 related/conflict/unknown 诊断。规则有界，不是通用蕴含证明，
+   不修改权限 Scope，不提供执行权，也不新增持久字段或猜测回填条件。
+10. 正常召回更新选中事实的访问统计。评估可使用 `record_access=false`
+   保持固定语料的访问计数，避免查询顺序影响后续对照。
 
 残留向量、过时 revision、旧模型向量和已删除记录不能单凭向量命中进入上下文。
 
@@ -569,7 +583,9 @@ score =
 ```
 
 向量相关性先经过门槛，关键词/向量排名以 `1/(60+position)` 汇总，
-乘以 `61/2` 并封顶 1 后作为非 Profile 的 relevance，再与其他因素共同排序。
+乘以 `61/2` 并封顶 1 后作为上式的 relevance。排序首先区分查询命中与
+补充 Profile，再按原始 RRF 相关性排序；上式只用于相关性相同的次级排序。
+重要性、时间、提取评分和访问次数不能压过更高的查询相关性。
 关键词候选不依赖向量模型版本；两条路径都必须满足 SQLite 的可见性和有效状态。
 时间项使用 `recorded_at`，不是 `last_accessed_at`；
 没有后台不断改写重要性的“遗忘曲线”任务。
@@ -580,11 +596,21 @@ score =
 `memory.context_max_chars`，元数据同样计入预算。
 放不下的条目会跳过，而不是只按事实正文长度计算。
 
-召回上下文只携带最后一条来源中的 `source_kind`、`conversation_id`、`message_id`，
-不把完整 evidence 历史重复发送给聊天模型。
-管理列表可以显示更完整的 provenance。
-semantic 召回同时携带 subject / predicate / object。主 Agent 再投影为
-ID、正文、类型和这些结构化属性，不让管理用时间戳与来源元数据挤占事实预算。
+领域召回与主 Agent 使用共享的 `context_entry` 紧凑投影：保留 ID、正文、
+类型、Scope、source、confidence、revision；semantic 保留 subject /
+predicate / object，事件保留明确时间、时间来源/精度，事实保留有效期。
+不为节省字符删除关系语义或时间限定，也不截断事实正文。
+完整 provenance 和 evidence 留在 SQLite/管理 API，通过 ID/revision
+追溯，不在每条模型上下文中重复会话/消息 ID。`recall_sources` 仍用于召回
+结果诊断，主 Agent 的模型投影不重复携带它。
+主 Agent 仍受本轮总预算和压缩模式的二次限制，不能把领域召回分数等同于
+最终回答正确性。评估可取得候选数、阈值过滤、失效命中和预算跳过的计数。
+共享投影保留 `answer_support`；主 Agent 按最终二次预算后的事实计算
+`memory_status=supported|no_supported_fact`。只有背景或无事实时，明确本轮
+没有匹配的记忆证据，不挪用其他实体/关系/时间，也不否定历史、sources
+或一般建议。冻结候选与真实最终回答评估见
+[Memory 基线](memory_baseline.md#2026-11-09-支持性准入与冻结语料回答评估)；
+该小样本结果不是生产质量保证。
 用户属性不是文档引用，资料中的账号、人名或路径不能替代当前用户身份。
 文档/摘要参考与长期用户 Memory 分成两条数据消息；长期 Memory 紧邻本轮问题，
 明确标注跨 Session 来源，避免大段文档把用户背景埋在同一份参考 JSON 中。

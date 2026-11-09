@@ -904,6 +904,184 @@ async def test_budget_and_sqlite_revalidation(runtime: Runtime) -> None:
     assert await service.retrieve("tea") == []
 
 
+@pytest.mark.parametrize("budget,limit", [(350, 10), (2000, 1), (2000, 20)])
+async def test_query_memory_precedes_background_profile_without_losing_audit_data(
+    runtime: Runtime, budget: int, limit: int
+) -> None:
+    repo, scope = runtime.memory.repository, runtime.memory.owner
+    provenance = Provenance("user_message", "s" * 32, "m" * 32, evidence="I prefer green tea.")
+    for predicate, value in (
+        ("has_name", "Mira"),
+        ("has_role", "reliability engineer"),
+        ("has_timezone", "Asia/Shanghai"),
+        ("has_language", "Simplified Chinese"),
+    ):
+        await repo.consolidate(
+            scope,
+            [MemoryCandidate(f"My {predicate} is {value}.", predicate=predicate, object=value)],
+            provenance,
+        )
+    tea = (await repo.consolidate(scope, [fact()], provenance))[0]
+    service = MemoryService(repo, None, runtime.memory.extractor, scope, max_chars=budget, max_items=limit)
+    diagnostics: dict[str, int] = {}
+    recalled = await service.retrieve("green tea", record_access=False, diagnostics=diagnostics)
+    assert recalled[0]["id"] == tea.id
+    assert recalled[0]["memory"] == tea.text
+    assert recalled[0]["revision"] == tea.revision
+    assert len(json.dumps(recalled, ensure_ascii=False)) <= budget
+    assert len(recalled) <= limit
+    assert "provenance" not in recalled[0]
+    assert recalled[0]["object"] == tea.object
+    assert recalled[0]["predicate"] == tea.predicate
+    assert (await repo.get(scope, tea.id)).access_count == 0
+    stored = next(item for item in await runtime.memory.list() if item["id"] == tea.id)
+    assert stored["object"] == tea.object
+    assert stored["provenance"] == tea.provenance
+    assert diagnostics["profile_candidates"] == 4
+    assert diagnostics["query_candidates"] == 1
+    if budget == 350:
+        assert diagnostics["budget_skipped"] == 4
+    await service.retrieve("green tea")
+    assert (await repo.get(scope, tea.id)).access_count == 1
+
+
+async def test_profile_query_checks_all_attributes_even_with_one_item_limit(runtime: Runtime) -> None:
+    repo, scope = runtime.memory.repository, runtime.memory.owner
+    timezone = (
+        await repo.consolidate(
+            scope,
+            [
+                MemoryCandidate(
+                    "My timezone is Asia/Shanghai.", predicate="has_timezone", object="Asia/Shanghai"
+                )
+            ],
+            Provenance("manual", asserted_at=now_ts() - 60),
+        )
+    )[0]
+    await repo.consolidate(
+        scope,
+        [MemoryCandidate("My name is Mira.", predicate="has_name", object="Mira")],
+        Provenance("manual"),
+    )
+    service = MemoryService(repo, None, runtime.memory.extractor, scope, max_items=1)
+    assert [item["id"] for item in await service.retrieve("timezone")] == [timezone.id]
+
+
+async def test_vector_relevance_beats_popularity_and_does_not_restore_stale_profile(runtime: Runtime) -> None:
+    repo, scope = runtime.memory.repository, runtime.memory.owner
+    old = (
+        await repo.consolidate(
+            scope,
+            [MemoryCandidate("My name is Mike.", predicate="has_name", object="Mike")],
+            Provenance("manual", asserted_at=now_ts() - 60),
+        )
+    )[0]
+    current = (
+        await repo.consolidate(
+            scope,
+            [MemoryCandidate("My name is Mira.", predicate="has_name", object="Mira")],
+            Provenance("manual"),
+        )
+    )[0]
+    relevant = (await repo.consolidate(scope, [fact()], Provenance("manual")))[0]
+    popular = (
+        await repo.consolidate(
+            scope, [replace(fact("Uses a calendar."), object="calendar")], Provenance("manual")
+        )
+    )[0]
+    async with runtime.sessions() as session:
+        for item in (old, current, relevant, popular):
+            row = await session.get(MemoryBelief, item.id)
+            assert row is not None
+            row.model_version = "v1"
+            row.access_count = 100000 if item.id == popular.id else 0
+            row.confidence = 1 if item.id == popular.id else 0.8
+        await session.commit()
+
+    class Index:
+        model_version = "v1"
+
+        async def search(self, *args: Any) -> list[VectorHit]:
+            return [
+                VectorHit(item.id, item.kind, item.revision, similarity)
+                for item, similarity in ((old, 0.99), (relevant, 0.95), (popular, 0.9), (current, 0.4))
+            ]
+
+    service = MemoryService(repo, Index(), runtime.memory.extractor, scope)
+    diagnostics: dict[str, int] = {}
+    recalled = await service.retrieve("unrelated", diagnostics=diagnostics)
+    assert [item["id"] for item in recalled] == [relevant.id, popular.id, current.id]
+    assert diagnostics["below_threshold"] == 1
+    assert diagnostics["invalid_vector_hits"] == 1
+    assert next(item for item in recalled if item["id"] == current.id)["object"] == "Mira"
+
+
+async def test_keyword_questions_ignore_function_words_but_keep_short_technical_terms(
+    runtime: Runtime,
+) -> None:
+    repo, scope = runtime.memory.repository, runtime.memory.owner
+    await repo.consolidate(scope, [fact("The user dislikes coffee.")], Provenance("manual"))
+    go = (
+        await repo.consolidate(
+            scope,
+            [MemoryCandidate("The user uses Go for the parser.", predicate="uses", object="Go")],
+            Provenance("manual"),
+        )
+    )[0]
+    assert await runtime.memory.search("What is my shoe size?") == []
+    assert await runtime.memory.search("What is my favorite pizza topping?") == []
+    assert [item["id"] for item in await runtime.memory.search("Go")] == [go.id]
+
+
+async def test_chat_uses_compact_memory_with_explicit_episode_time(
+    runtime: Runtime, api: httpx.AsyncClient
+) -> None:
+    occurred_at = 1791763200
+    episode = (
+        await runtime.memory.repository.consolidate(
+            runtime.memory.owner,
+            [
+                MemoryCandidate(
+                    "Completed the Cedar evaluation.",
+                    kind=MemoryType.EPISODIC,
+                    occurred_at=occurred_at,
+                    time_precision="day",
+                )
+            ],
+            Provenance("manual"),
+        )
+    )[0]
+    captured = []
+
+    def chat(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        evidence = [
+            json.loads(message["content"].split("\n", 1)[1])["memory"]
+            for message in body["messages"]
+            if isinstance(message["content"], str)
+            and message["content"].startswith("Host")
+            and '"memory"' in message["content"]
+        ]
+        assert len(evidence) == 1
+        captured.extend(evidence[0])
+        return httpx.Response(
+            200, json={"created": 1, "choices": [{"message": {"role": "assistant", "content": "Done."}}]}
+        )
+
+    runtime.chat.agent._client = httpx.AsyncClient(transport=httpx.MockTransport(chat))
+    identifier = (await api.post("/api/v1/conversations", json={})).json()["id"]
+    response = await api.post(
+        f"/api/v1/conversations/{identifier}/messages",
+        json={"content": "When did I complete the Cedar evaluation?"},
+    )
+    assert response.status_code == 200, response.text
+    assert captured[0]["id"] == episode.id
+    assert captured[0]["occurred_at"] == occurred_at
+    assert captured[0]["episode_time_precision"] == "day"
+    assert captured[0]["revision"] == episode.revision
+    assert "provenance" not in captured[0]
+
+
 async def test_keyword_recall_without_embeddings_obeys_scope_and_lifecycle(runtime: Runtime) -> None:
     repo, scope = runtime.memory.repository, runtime.memory.owner
     text = "The project uses SQLite and \u672c\u5730\u4f18\u5148."

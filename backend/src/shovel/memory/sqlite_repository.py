@@ -6,7 +6,7 @@ from collections.abc import Sequence
 from dataclasses import asdict, replace
 from typing import Any
 
-from sqlalchemy import and_, case, column, func, or_, select, text, true, update
+from sqlalchemy import and_, case, column, false, func, or_, select, text, true, update
 from sqlalchemy import table as sql_table
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -20,7 +20,6 @@ from shovel.db.model.memory import (
     NativeMemory,
 )
 from shovel.db.model.runtime import ChatMessage, MemoryEpoch, Operation
-from shovel.db.search_terms import keyword_terms
 from shovel.domain.enums import MemoryPredicate, MemorySource, MemoryValidityState, VectorState
 from shovel.memory.domain import (
     PROFILE_TOPICS,
@@ -36,6 +35,7 @@ from shovel.memory.domain import (
     conflicts,
     same_fact,
 )
+from shovel.memory.relevance import literal_match, literal_pattern, query_terms
 from shovel.protection.egress import EgressChannel, require_ordinary
 from shovel.runtime.errors import NotFound, RuntimeFailure
 
@@ -141,15 +141,32 @@ class SQLiteMemoryRepository:
         self.sessions = sessions
 
     async def keyword(self, scope: MemoryScope, query: str, *, limit: int) -> list[MemoryRecord]:
-        terms = keyword_terms(query)
+        terms = query_terms(query)
         long, short = [t for t in terms if len(t) >= 3], [t for t in terms if len(t) < 3]
         found: dict[str, tuple[MemoryRecord, float]] = {}
         async with self.sessions() as session:
             for kind, model in _TABLES.items():
+                body = (
+                    func.coalesce(MemoryBelief.note, MemoryBelief.object_)
+                    if kind == MemoryType.SEMANTIC
+                    else MemoryEpisode.summary
+                    if kind == MemoryType.EPISODIC
+                    else MemoryProcedure.instruction
+                )
                 base = select(model).where(
                     _visible(model, scope),
                     model.validity_state == MemoryValidityState.ACTIVE,
                     or_(model.valid_until.is_(None), model.valid_until > now_ts()),
+                    or_(
+                        *(
+                            body.regexp_match(pattern)
+                            if (pattern := literal_pattern(term))
+                            else body.icontains(term, autoescape=True)
+                            for term in terms
+                        )
+                    )
+                    if terms
+                    else false(),
                 )
                 if long:
                     expression = " OR ".join(f'"{term}"' for term in long)
@@ -164,13 +181,6 @@ class SQLiteMemoryRepository:
                     for row, score in fts_rows:
                         found[row.id] = (record(row, kind), float(score))
                 if short:
-                    body = (
-                        func.coalesce(MemoryBelief.note, MemoryBelief.object_)
-                        if kind == MemoryType.SEMANTIC
-                        else MemoryEpisode.summary
-                        if kind == MemoryType.EPISODIC
-                        else MemoryProcedure.instruction
-                    )
                     rows = await session.scalars(
                         base.where(or_(*(body.icontains(term, autoescape=True) for term in short)))
                         .order_by(model.recorded_at.desc(), model.id)
@@ -178,7 +188,11 @@ class SQLiteMemoryRepository:
                     )
                     for row in rows:
                         found.setdefault(row.id, (record(row, kind), 0.0))
-        return [item for item, _ in sorted(found.values(), key=lambda pair: (pair[1], pair[0].id))[:limit]]
+        return [
+            item
+            for item, _ in sorted(found.values(), key=lambda pair: (pair[1], pair[0].id))
+            if any(literal_match(term, item.text) for term in terms)
+        ][:limit]
 
     async def profile(self, scope: MemoryScope, *, limit: int) -> list[MemoryRecord]:
         table = MemoryBelief

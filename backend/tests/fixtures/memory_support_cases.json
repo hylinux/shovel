@@ -1,0 +1,28 @@
+{
+  "version": "memory-support-v1",
+  "facts": [
+    {"key": "aurora-db", "text": "The user uses SQLite as the database for project Aurora (also known as Dawn).", "predicate": "uses", "object": "SQLite", "topic": "project.aurora.database"},
+    {"key": "aurora-language", "text": "The user uses Go as the programming language for project Aurora.", "predicate": "uses", "object": "Go", "topic": "project.aurora.language"},
+    {"key": "aurora-evaluation", "text": "On 2026-09-15 the user completed the offline evaluation for project Aurora.", "kind": "episodic", "object": "Aurora", "occurred_on": "2026-09-15"}
+  ],
+  "queries": [
+    {"text": "Which drink do I prefer?", "expected": ["tea"]},
+    {"text": "我喜欢喝什么茶？", "expected": ["tea"]},
+    {"text": "Which application do I use for personal notes?", "expected": ["notes"]},
+    {"text": "Cedar 项目使用什么数据库？", "expected": ["database"]},
+    {"text": "Cedar 项目的离线评估何时完成？", "expected": ["episode"]},
+    {"text": "Which airline do I use for business travel?", "expected": []},
+    {"text": "Which database do I use for project Maple?", "expected": []},
+    {"text": "When did I finish the Birch offline evaluation?", "expected": []},
+    {"text": "What is my shoe size?", "expected": []},
+    {"text": "What is my favorite pizza topping?", "expected": []},
+    {"text": "Which database do I use for project Aurora?", "expected": ["aurora-db"]},
+    {"text": "Dawn 项目使用什么数据库？", "expected": ["aurora-db"]},
+    {"text": "Which programming language do I use for project Aurora?", "expected": ["aurora-language"]},
+    {"text": "Aurora 项目的离线评估何时完成？", "expected": ["aurora-evaluation"]},
+    {"text": "When did the offline evaluation for project Aurora begin?", "expected": []},
+    {"text": "Which database do I use for project Juniper?", "expected": []},
+    {"text": "When did I finish the Harbor offline evaluation?", "expected": []},
+    {"text": "我在 Juniper 项目使用哪种编程语言？", "expected": []}
+  ]
+}

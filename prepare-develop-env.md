@@ -80,6 +80,31 @@ uv sync --python 3.14-x86_64 --locked --all-extras --dev
 
 不要把 Windows venv 与 WSL venv 混用。
 
+### 锁文件与安装环境验证
+
+`pyproject.toml` 的默认依赖源为
+`https://packagefeedproxy.microsoft.io/pypi/simple/`，`uv.lock` 必须与它一致。
+`UV_DEFAULT_INDEX` 等环境覆盖也会影响锁文件校验；不要通过 `--frozen`、
+`--no-sync` 或仅修改 CI 的依赖源来绕过不一致。确需更换源时，应同时核对
+项目配置、锁定版本和完整测试，而不是只替换下载 URL。
+
+Windows 下从仓库根目录验证：
+
+```powershell
+uv lock --check
+uv sync --python 3.14-x86_64 --locked --all-extras --dev
+uv pip check
+uv run --locked python -c "import struct; from importlib.metadata import version; import zvec; assert struct.calcsize('P') == 8; print(version('shovel'))"
+uv run --locked pytest backend\tests\test_native_memory.py backend\tests\test_memory_tasks.py backend\tests\test_working_memory.py --no-cov
+```
+
+`uv pip check` 检查已安装依赖是否兼容，不能代替 `uv sync --locked` 验证环境
+与锁文件一致。`version('shovel')` 同时确认项目安装元数据存在；仅能从
+`backend\src` 导入源码，不代表安装已经完成。
+再次运行同一条 `uv sync` 应无需安装变更，且不修改 `uv.lock`。
+不要在同一个 `.venv` 中同时进行同步安装和测试，以免卸载/替换包的过程
+造成临时的元数据缺失。
+
 然后尝试运行:
 
 ```bash

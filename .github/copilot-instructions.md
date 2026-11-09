@@ -19,6 +19,8 @@ Run Python commands from the repository root:
 
 ```powershell
 uv sync --locked --all-extras --dev
+uv lock --check
+uv pip check
 uv run ruff check .
 uv run ruff format --check .
 uv run mypy backend\src
@@ -31,6 +33,13 @@ uv run pytest backend\tests\test_chunker.py::test_same_input_yields_identical_id
 # Deterministic platform integration demos; model responses and mail sending are test fixtures.
 uv run pytest backend\tests\test_platform_demos.py --no-cov
 ```
+
+For installation failures, verify installed project metadata as well as imports:
+`uv run --locked python -c "from importlib.metadata import version; print(version('shovel'))"`.
+Do not sync a shared `.venv` while tests are running. `uv pip check` checks
+dependency compatibility, not agreement with the lock; `--no-sync` does not
+repair an incomplete installation. See `prepare-develop-env.md` for the
+locked-installation verification sequence and registry-override checks.
 
 Pytest discovers `backend\tests`, adds `backend\src` to the import path, enables
 automatic asyncio handling, and includes coverage by default. Offline tests do

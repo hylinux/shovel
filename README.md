@@ -395,6 +395,10 @@ Core profile questions use a bounded, deterministic SQLite fact lookup rather
 than relying solely on vector similarity. Other recall can use the independent
 Memory index and an independent SQLite keyword index. Without embedding, profile
 and keyword recall remain available, but general semantic recall does not.
+Query-matched facts take priority over background profile context under the
+same item/character limits. A shared compact model projection preserves semantic
+relationships and event times; complete provenance remains in SQLite and the
+management API, traceable by fact ID and revision.
 If a new session appears to forget a fact, check extraction
 Operation status, saved facts/scope, expiry, and embedder availability before
 assuming the chat model configuration is the only cause.
@@ -424,6 +428,14 @@ See the [native Memory implementation](Documents/native_memory_architecture.md)
 for configuration, extraction, recall, recovery, and current limitations.
 The [Memory completion roadmap](Documents/memory_completion_roadmap.md) documents
 implemented phases 1–3 and the separate future experience-learning stages.
+The [real-model Memory baseline](Documents/memory_baseline.md) separates extraction,
+gold-corpus recall and end-to-end recall using isolated synthetic data, and records
+the measured threshold/context-budget losses rather than assuming saved facts are recalled.
+Recall now checks bounded entity/relation/applicability support after fusion, admits
+only supported facts plus background Profile, and explicitly marks missing Memory
+evidence after final context budgeting. The baseline also includes a frozen-corpus
+real Main Agent answer evaluation; its small synthetic results are not a production
+quality guarantee, and the default similarity threshold remains unchanged.
 
 ## Capability, Workflow, and Proactive Services
 

@@ -1,0 +1,70 @@
+{
+  "version": "memory-baseline-v1",
+  "cases": [
+    {
+      "id": "english-profile",
+      "source": "My name is Mira. I work as a reliability engineer.",
+      "expected": [
+        {"key": "name", "text": "The user's name is Mira.", "predicate": "has_name", "object": "Mira", "topic": "user.name"},
+        {"key": "occupation", "text": "The user is a reliability engineer.", "predicate": "has_role", "object": "reliability engineer", "topic": "user.occupation", "aliases": ["site reliability engineer", "SRE"]}
+      ],
+      "queries": [{"text": "What is my name and occupation?", "expected": ["name", "occupation"]}]
+    },
+    {
+      "id": "chinese-profile",
+      "source": "我的时区是 Asia/Shanghai。我使用简体中文交流。",
+      "expected": [
+        {"key": "timezone", "text": "The user's timezone is Asia/Shanghai.", "predicate": "has_timezone", "object": "Asia/Shanghai", "topic": "user.timezone"},
+        {"key": "language", "text": "用户使用简体中文交流。", "predicate": "has_language", "object": "简体中文", "topic": "user.language", "aliases": ["Simplified Chinese", "zh-CN"]}
+      ],
+      "queries": [{"text": "我使用什么语言，处于哪个时区？", "expected": ["timezone", "language"]}]
+    },
+    {
+      "id": "english-preference",
+      "source": "I prefer jasmine tea.",
+      "expected": [
+        {"key": "tea", "text": "The user prefers jasmine tea.", "predicate": "prefers", "object": "jasmine tea", "topic": "drink", "aliases": ["茉莉花茶", "茉莉茶"]}
+      ],
+      "queries": [
+        {"text": "Which drink do I prefer?", "expected": ["tea"]},
+        {"text": "我喜欢喝什么茶？", "expected": ["tea"]}
+      ]
+    },
+    {
+      "id": "chinese-tool",
+      "source": "我的个人笔记使用 Obsidian。",
+      "expected": [
+        {"key": "notes", "text": "用户使用 Obsidian 管理个人笔记。", "predicate": "uses", "object": "Obsidian", "topic": "personal.notes"}
+      ],
+      "queries": [{"text": "Which application do I use for personal notes?", "expected": ["notes"]}]
+    },
+    {
+      "id": "english-project",
+      "source": "I use PostgreSQL for project Cedar.",
+      "expected": [
+        {"key": "database", "text": "The user uses PostgreSQL for project Cedar.", "predicate": "uses", "object": "PostgreSQL", "topic": "project.cedar.database", "aliases": ["PostgreSQL for project Cedar", "PostgreSQL for Cedar", "Postgres"]}
+      ],
+      "queries": [{"text": "Cedar 项目使用什么数据库？", "expected": ["database"]}]
+    },
+    {
+      "id": "dated-episode",
+      "source": "2026-10-12 我完成了 Cedar 项目的离线评估。",
+      "expected": [
+        {"key": "episode", "text": "2026-10-12 用户完成了 Cedar 项目的离线评估。", "kind": "episodic", "object": "Cedar", "occurred_on": "2026-10-12"}
+      ],
+      "queries": [{"text": "Cedar 项目的离线评估何时完成？", "expected": ["episode"]}]
+    },
+    {"id": "question", "source": "Which database should I use for a new project?", "expected": [], "queries": []},
+    {"id": "speculation", "source": "I might try snowboarding someday, but I have not decided.", "expected": [], "queries": []},
+    {"id": "quoted-source", "source": "The document says I prefer coffee.", "expected": [], "queries": []},
+    {"id": "credential-filter", "source": "My api_key is TEST-ONLY-NOT-A-REAL-CREDENTIAL.", "expected": [], "queries": []}
+  ],
+  "distractors": [
+    {"key": "distractor-coffee", "text": "The user dislikes coffee.", "predicate": "dislikes", "object": "coffee", "topic": "drink"},
+    {"key": "distractor-notion", "text": "The user uses Notion for team meeting notes.", "predicate": "uses", "object": "Notion", "topic": "team.notes"},
+    {"key": "distractor-mysql", "text": "The user uses MySQL for project Birch.", "predicate": "uses", "object": "MySQL", "topic": "project.birch.database"},
+    {"key": "distractor-tea", "text": "The user dislikes black tea.", "predicate": "dislikes", "object": "black tea", "topic": "drink"},
+    {"key": "distractor-calendar", "text": "The user uses a paper calendar for gardening.", "predicate": "uses", "object": "paper calendar", "topic": "gardening"},
+    {"key": "distractor-editor", "text": "The user uses Vim to edit configuration files.", "predicate": "uses", "object": "Vim", "topic": "editor"}
+  ]
+}

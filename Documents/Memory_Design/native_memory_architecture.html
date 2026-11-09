@@ -4405,6 +4405,7 @@ globalThis["mermaid"] = globalThis.__esbuild_esm_mermaid_nm["mermaid"].default;
       <div class="crossnote markdown-preview  ">
       
 <h1 id="shovel-原生记忆系统原理-架构与详细实现">Shovel 原生记忆系统：原理、架构与详细实现 </h1>
+<p><strong>历史 HTML 导出：</strong>本文不与最新 Markdown 自动同步。当前设计理念与开发进度见 <a href="README.md">Memory 总览</a>，详细实现见 <a href="native_memory_architecture.md">最新 Markdown</a>。</p>
 <p>本文依据 2026-10-29 当前工作树中的实现整理，描述已经接入运行链路的行为，<br>
 不把架构设想、数据库预留模型或模型自身的能力当作已实现功能。<br>
 “原生记忆”指 Shovel 自己实现的提取、整理、持久化、召回和生命周期管理，<br>
@@ -5355,8 +5356,8 @@ API version、凭据等；遗漏的普通字段使用该配置模型自身默认
 应结合 Ollama <code>num_ctx</code>、实际消息长度和输出预算调整。<br>
 系统不会自动下载模型，也不保证任意小模型都能稳定遵守结构化 schema。<br>
 提取与摘要可以使用独立模型，但目前共用同一 <code>[memory.llm]</code>，不能分别指定两个。</p>
-<p>完整已有示例见 <a href="settings.example.toml">settings.example.toml</a>，<br>
-模型定义见 <a href="shovel-chat-fast.Modelfile">shovel-chat-fast.Modelfile</a>。<br>
+<p>完整已有示例见 <a href="../settings.example.toml">settings.example.toml</a>，<br>
+模型定义见 <a href="../shovel-chat-fast.Modelfile">shovel-chat-fast.Modelfile</a>。<br>
 Memory <code>dim</code> 必须匹配 Memory embedder 实际输出，与 RAG 的 <code>zvec.dim</code> 独立。</p>
 <h3 id="184-运行时与环境配置">18.4 运行时与环境配置 </h3>
 <p>运行时设置优先级是环境变量高于 TOML、高于默认值。<br>
@@ -5656,90 +5657,90 @@ SQLite/Zvec 也不是默认加密的秘密存储。</li>
 </thead>
 <tbody>
 <tr>
-<td><a href="../backend/src/shovel/memory/domain.py">领域定义</a></td>
+<td><a href="../../backend/src/shovel/memory/domain.py">领域定义</a></td>
 <td><code>MemoryScope</code>、<code>MemoryCandidate</code>、<code>admissible</code>、<code>conflicts</code></td>
 </tr>
 <tr>
-<td><a href="../backend/src/shovel/memory/ports.py">端口</a></td>
+<td><a href="../../backend/src/shovel/memory/ports.py">端口</a></td>
 <td><code>MemoryRepository</code>、<code>MemoryExtractor</code>、<code>MemoryVectorIndex</code></td>
 </tr>
 <tr>
-<td><a href="../backend/src/shovel/memory/service.py">领域服务</a></td>
+<td><a href="../../backend/src/shovel/memory/service.py">领域服务</a></td>
 <td><code>extract</code>、<code>related</code>、<code>retrieve</code>、<code>rank</code></td>
 </tr>
 <tr>
-<td><a href="../backend/src/shovel/memory/sqlite_repository.py">权威仓库</a></td>
+<td><a href="../../backend/src/shovel/memory/sqlite_repository.py">权威仓库</a></td>
 <td><code>_visible</code>、<code>consolidate</code>、<code>transition</code>、<code>pending</code>、<code>acknowledge</code></td>
 </tr>
 <tr>
-<td><a href="../backend/src/shovel/memory/agent_framework.py">MAF 提取与摘要</a></td>
+<td><a href="../../backend/src/shovel/memory/agent_framework.py">MAF 提取与摘要</a></td>
 <td><code>EXTRACTION</code>、输出 schema、<code>extract</code>、<code>summarize</code></td>
 </tr>
 <tr>
-<td><a href="../backend/src/shovel/memory/zvec_index.py">Zvec 索引</a></td>
+<td><a href="../../backend/src/shovel/memory/zvec_index.py">Zvec 索引</a></td>
 <td><code>initialize</code>、<code>start_rebuild</code>、<code>finish_rebuild</code>、<code>search</code>、<code>_io</code></td>
 </tr>
 <tr>
-<td><a href="../backend/src/shovel/runtime/memory.py">Runtime 门面</a></td>
+<td><a href="../../backend/src/shovel/runtime/memory.py">Runtime 门面</a></td>
 <td><code>extract</code>、<code>maintain</code>、<code>write</code>、<code>summarize</code>、<code>status</code></td>
 </tr>
 <tr>
-<td><a href="../backend/src/shovel/runtime/memory_tasks.py">后台任务</a></td>
+<td><a href="../../backend/src/shovel/runtime/memory_tasks.py">后台任务</a></td>
 <td><code>enqueue</code>、<code>invalidate</code>、<code>run_once</code>、<code>retry</code>、<code>_finish</code></td>
 </tr>
 <tr>
-<td><a href="../backend/src/shovel/runtime/agent.py">主 Agent 接入</a></td>
+<td><a href="../../backend/src/shovel/runtime/agent.py">主 Agent 接入</a></td>
 <td><code>ShovelContextProvider</code>、<code>ContextBudgetMiddleware</code>、<code>ShovelAgent.respond</code></td>
 </tr>
 <tr>
-<td><a href="../backend/src/shovel/runtime/chat.py">对话事务</a></td>
+<td><a href="../../backend/src/shovel/runtime/chat.py">对话事务</a></td>
 <td><code>_send</code>、<code>stream</code>、<code>maintain</code>、<code>recover</code></td>
 </tr>
 <tr>
-<td><a href="../backend/src/shovel/runtime/hosting.py">Host</a></td>
+<td><a href="../../backend/src/shovel/runtime/hosting.py">Host</a></td>
 <td><code>MemoryExtractionWorker</code></td>
 </tr>
 <tr>
-<td><a href="../backend/src/shovel/runtime/service.py">运行时初始化</a></td>
+<td><a href="../../backend/src/shovel/runtime/service.py">运行时初始化</a></td>
 <td><code>Runtime.__init__</code>、<code>create_runtime</code></td>
 </tr>
 <tr>
-<td><a href="../backend/src/shovel/runtime/performance.py">前后台调度</a></td>
+<td><a href="../../backend/src/shovel/runtime/performance.py">前后台调度</a></td>
 <td><code>RuntimePerformance</code>、<code>RuntimeWarmup</code></td>
 </tr>
 <tr>
-<td><a href="../backend/src/shovel/db/model/memory.py">实体表</a></td>
+<td><a href="../../backend/src/shovel/db/model/memory.py">实体表</a></td>
 <td><code>NativeMemory</code>、三类记忆、<code>SessionSummary</code>、索引元数据</td>
 </tr>
 <tr>
-<td><a href="../backend/src/shovel/db/model/runtime.py">任务与历史表</a></td>
+<td><a href="../../backend/src/shovel/db/model/runtime.py">任务与历史表</a></td>
 <td><code>Operation</code>、<code>ChatMessage</code>、<code>MemoryEpoch</code></td>
 </tr>
 <tr>
-<td><a href="../backend/src/shovel/db/migrations.py">迁移</a></td>
+<td><a href="../../backend/src/shovel/db/migrations.py">迁移</a></td>
 <td><code>native_memory</code> 升级步骤、<code>upgrade_database</code></td>
 </tr>
 <tr>
-<td><a href="../backend/src/shovel/runtime/api.py">API</a></td>
+<td><a href="../../backend/src/shovel/runtime/api.py">API</a></td>
 <td><code>memories</code>、<code>create_memory</code>、<code>update_memory</code>、<code>forget</code></td>
 </tr>
 <tr>
-<td><a href="../backend/src/shovel/runtime/schemas.py">输入约束</a></td>
+<td><a href="../../backend/src/shovel/runtime/schemas.py">输入约束</a></td>
 <td><code>MemoryInput</code>、<code>MessageInput</code></td>
 </tr>
 <tr>
-<td><a href="../backend/src/shovel/config/memory_config.py">Memory 配置</a></td>
+<td><a href="../../backend/src/shovel/config/memory_config.py">Memory 配置</a></td>
 <td><code>MemorySettings</code>、<code>MemoryModelSettings</code></td>
 </tr>
 <tr>
-<td><a href="../backend/src/shovel/db/base.py">向量身份与 schema</a></td>
+<td><a href="../../backend/src/shovel/db/base.py">向量身份与 schema</a></td>
 <td><code>memory_vector_id</code>；schema 见 <code>vector\schema.py</code></td>
 </tr>
 </tbody>
 </table>
-<p>相关文档：<a href="../README.md#native-memory">项目总览与 Native Memory 配置</a>、<br>
+<p>相关文档：<a href="../../README.md#native-memory">项目总览与 Native Memory 配置</a>、<br>
 <a href="db_base_memory_vector_id.md">Memory 向量身份</a>、<br>
-<a href="settings.example.toml">完整 Ollama 配置示例</a>。</p>
+<a href="../settings.example.toml">完整 Ollama 配置示例</a>。</p>
 
       </div>
       

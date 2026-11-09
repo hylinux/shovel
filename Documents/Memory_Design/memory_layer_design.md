@@ -1,5 +1,8 @@
 # 任务：为 Shovel 设计并实现原生 Memory Layer
 
+> 历史原始设计任务：保留需求与扩展目标，不是当前实现能力承诺。
+> 当前设计理念、开发进度与阅读导航见 [Memory 总览](README.md)。
+
 请为 Shovel AI Agent 平台设计并实现一套原生的长期记忆系统（Native Memory Layer）。
 
 ## 一、项目背景

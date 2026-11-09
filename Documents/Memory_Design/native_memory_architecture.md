@@ -1,7 +1,11 @@
 # Shovel 原生记忆系统：原理、架构与详细实现
 
-本文依据 2026-10-29 当前工作树中的实现整理，描述已经接入运行链路的行为，
-不把架构设想、数据库预留模型或模型自身的能力当作已实现功能。
+本文最初于 2026-10-29 整理，后续补充了治理、Working 和召回修复，
+描述已经接入运行链路的行为。当前状态与开发中改动见
+[Memory 设计与进度总览](README.md)；旧 HTML 是历史导出，不自动同步。
+设置驱动的 User Profile 已在 `ca66c7e` 引入；本详解中旧版核心属性投影
+不能用于推断受管资料仍可通过聊天覆盖，新规则以总览及该提交为准。
+本文不把架构设想、数据库预留模型或模型自身的能力当作已实现功能。
 “原生记忆”指 Shovel 自己实现的提取、整理、持久化、召回和生命周期管理，
 不是模型权重训练，也不是把聊天记录整体保存到向量库。
 
@@ -1048,8 +1052,8 @@ timeout_seconds = 300
 系统不会自动下载模型，也不保证任意小模型都能稳定遵守结构化 schema。
 提取与摘要可以使用独立模型，但目前共用同一 `[memory.llm]`，不能分别指定两个。
 
-完整已有示例见 [settings.example.toml](settings.example.toml)，
-模型定义见 [shovel-chat-fast.Modelfile](shovel-chat-fast.Modelfile)。
+完整已有示例见 [settings.example.toml](../settings.example.toml)，
+模型定义见 [shovel-chat-fast.Modelfile](../shovel-chat-fast.Modelfile)。
 Memory `dim` 必须匹配 Memory embedder 实际输出，与 RAG 的 `zvec.dim` 独立。
 
 ### 18.4 运行时与环境配置
@@ -1271,27 +1275,27 @@ Zvec 可重建不代表“随时删除正在使用的索引目录”是安全操
 
 | 源码 | 重点入口 |
 | --- | --- |
-| [领域定义](../backend/src/shovel/memory/domain.py) | `MemoryScope`、`MemoryCandidate`、`admissible`、`conflicts` |
-| [端口](../backend/src/shovel/memory/ports.py) | `MemoryRepository`、`MemoryExtractor`、`MemoryVectorIndex` |
-| [领域服务](../backend/src/shovel/memory/service.py) | `extract`、`related`、`retrieve`、`rank` |
-| [权威仓库](../backend/src/shovel/memory/sqlite_repository.py) | `_visible`、`consolidate`、`transition`、`pending`、`acknowledge` |
-| [MAF 提取与摘要](../backend/src/shovel/memory/agent_framework.py) | `EXTRACTION`、输出 schema、`extract`、`summarize` |
-| [Zvec 索引](../backend/src/shovel/memory/zvec_index.py) | `initialize`、`start_rebuild`、`finish_rebuild`、`search`、`_io` |
-| [Runtime 门面](../backend/src/shovel/runtime/memory.py) | `extract`、`maintain`、`write`、`summarize`、`status` |
-| [后台任务](../backend/src/shovel/runtime/memory_tasks.py) | `enqueue`、`invalidate`、`run_once`、`retry`、`_finish` |
-| [主 Agent 接入](../backend/src/shovel/runtime/agent.py) | `ShovelContextProvider`、`ContextBudgetMiddleware`、`ShovelAgent.respond` |
-| [对话事务](../backend/src/shovel/runtime/chat.py) | `_send`、`stream`、`maintain`、`recover` |
-| [Host](../backend/src/shovel/runtime/hosting.py) | `MemoryExtractionWorker` |
-| [运行时初始化](../backend/src/shovel/runtime/service.py) | `Runtime.__init__`、`create_runtime` |
-| [前后台调度](../backend/src/shovel/runtime/performance.py) | `RuntimePerformance`、`RuntimeWarmup` |
-| [实体表](../backend/src/shovel/db/model/memory.py) | `NativeMemory`、三类记忆、`SessionSummary`、索引元数据 |
-| [任务与历史表](../backend/src/shovel/db/model/runtime.py) | `Operation`、`ChatMessage`、`MemoryEpoch` |
-| [迁移](../backend/src/shovel/db/migrations.py) | `native_memory` 升级步骤、`upgrade_database` |
-| [API](../backend/src/shovel/runtime/api.py) | `memories`、`create_memory`、`update_memory`、`forget` |
-| [输入约束](../backend/src/shovel/runtime/schemas.py) | `MemoryInput`、`MessageInput` |
-| [Memory 配置](../backend/src/shovel/config/memory_config.py) | `MemorySettings`、`MemoryModelSettings` |
-| [向量身份与 schema](../backend/src/shovel/db/base.py) | `memory_vector_id`；schema 见 `vector\schema.py` |
+| [领域定义](../../backend/src/shovel/memory/domain.py) | `MemoryScope`、`MemoryCandidate`、`admissible`、`conflicts` |
+| [端口](../../backend/src/shovel/memory/ports.py) | `MemoryRepository`、`MemoryExtractor`、`MemoryVectorIndex` |
+| [领域服务](../../backend/src/shovel/memory/service.py) | `extract`、`related`、`retrieve`、`rank` |
+| [权威仓库](../../backend/src/shovel/memory/sqlite_repository.py) | `_visible`、`consolidate`、`transition`、`pending`、`acknowledge` |
+| [MAF 提取与摘要](../../backend/src/shovel/memory/agent_framework.py) | `EXTRACTION`、输出 schema、`extract`、`summarize` |
+| [Zvec 索引](../../backend/src/shovel/memory/zvec_index.py) | `initialize`、`start_rebuild`、`finish_rebuild`、`search`、`_io` |
+| [Runtime 门面](../../backend/src/shovel/runtime/memory.py) | `extract`、`maintain`、`write`、`summarize`、`status` |
+| [后台任务](../../backend/src/shovel/runtime/memory_tasks.py) | `enqueue`、`invalidate`、`run_once`、`retry`、`_finish` |
+| [主 Agent 接入](../../backend/src/shovel/runtime/agent.py) | `ShovelContextProvider`、`ContextBudgetMiddleware`、`ShovelAgent.respond` |
+| [对话事务](../../backend/src/shovel/runtime/chat.py) | `_send`、`stream`、`maintain`、`recover` |
+| [Host](../../backend/src/shovel/runtime/hosting.py) | `MemoryExtractionWorker` |
+| [运行时初始化](../../backend/src/shovel/runtime/service.py) | `Runtime.__init__`、`create_runtime` |
+| [前后台调度](../../backend/src/shovel/runtime/performance.py) | `RuntimePerformance`、`RuntimeWarmup` |
+| [实体表](../../backend/src/shovel/db/model/memory.py) | `NativeMemory`、三类记忆、`SessionSummary`、索引元数据 |
+| [任务与历史表](../../backend/src/shovel/db/model/runtime.py) | `Operation`、`ChatMessage`、`MemoryEpoch` |
+| [迁移](../../backend/src/shovel/db/migrations.py) | `native_memory` 升级步骤、`upgrade_database` |
+| [API](../../backend/src/shovel/runtime/api.py) | `memories`、`create_memory`、`update_memory`、`forget` |
+| [输入约束](../../backend/src/shovel/runtime/schemas.py) | `MemoryInput`、`MessageInput` |
+| [Memory 配置](../../backend/src/shovel/config/memory_config.py) | `MemorySettings`、`MemoryModelSettings` |
+| [向量身份与 schema](../../backend/src/shovel/db/base.py) | `memory_vector_id`；schema 见 `vector\schema.py` |
 
-相关文档：[项目总览与 Native Memory 配置](../README.md#native-memory)、
+相关文档：[项目总览与 Native Memory 配置](../../README.md#native-memory)、
 [Memory 向量身份](db_base_memory_vector_id.md)、
-[完整 Ollama 配置示例](settings.example.toml)。
+[完整 Ollama 配置示例](../settings.example.toml)。

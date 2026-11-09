@@ -424,11 +424,12 @@ WAL, vector files, backups, or underlying media.
 Automatic Procedural Memory learning and Graph Memory are not implemented.
 Versioned Skill Memory access is disabled in V1.
 
-See the [native Memory implementation](Documents/native_memory_architecture.md)
+Start with the [Memory design and progress overview](Documents/Memory_Design/README.md).
+See the [native Memory implementation](Documents/Memory_Design/native_memory_architecture.md)
 for configuration, extraction, recall, recovery, and current limitations.
-The [Memory completion roadmap](Documents/memory_completion_roadmap.md) documents
+The [Memory completion roadmap](Documents/Memory_Design/memory_completion_roadmap.md) documents
 implemented phases 1–3 and the separate future experience-learning stages.
-The [real-model Memory baseline](Documents/memory_baseline.md) separates extraction,
+The [real-model Memory baseline](Documents/Memory_Design/memory_baseline.md) separates extraction,
 gold-corpus recall and end-to-end recall using isolated synthetic data, and records
 the measured threshold/context-budget losses rather than assuming saved facts are recalled.
 Recall now checks bounded entity/relation/applicability support after fusion, admits
@@ -766,8 +767,9 @@ commit; release evidence must match its exact artifact and revision.
 | [Native installation and rollout](native/README.md) | WAM, complete-installation trust, signed live reports and administrator controls. |
 | [Scan pipeline](Documents/scan_pipeline.md) | Ingestion, durable cleanup and recovery. |
 | [Outlook integration](Documents/outlook_local.md) | Supported desktop environment and indexing limits. |
-| [Native Memory](Documents/native_memory_architecture.md) | Extraction, recall, lifecycle, transactions and recovery. |
-| [Memory vector identity](Documents/db_base_memory_vector_id.md) | Deterministic identity, authority checks and rebuild semantics. |
+| [Memory design and progress](Documents/Memory_Design/README.md) | Design principles, delivered features, evaluation evidence and remaining work. |
+| [Native Memory](Documents/Memory_Design/native_memory_architecture.md) | Extraction, recall, lifecycle, transactions and recovery. |
+| [Memory vector identity](Documents/Memory_Design/db_base_memory_vector_id.md) | Deterministic identity, authority checks and rebuild semantics. |
 | [Architecture design](shovel-architecture-design.md) | Broader architecture and module boundaries. |
 | [Product design](shovel-architecture-design-v2.md) | Long-term goals, not an implemented-feature checklist. |
 | [Learning roadmap](shovel-learning-roadmap.md) | Project-oriented learning stages. |

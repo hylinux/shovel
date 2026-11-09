@@ -1,5 +1,7 @@
 # `memory_vector_id` 设计说明
 
+专题入口：[Memory 设计理念与开发进度](README.md)。
+
 原生 Memory 以 SQLite 为权威存储，Zvec 仅保存可以重建的语义索引。
 确定性向量 ID 用于把索引命中、revision 和持久清理意图对应到同一条记忆。
 
@@ -63,4 +65,4 @@ embedding model version 和有效期。残留向量不能恢复已删除或失�
 - `backend/src/shovel/memory/zvec_index.py`：向量身份、过滤、flush、generation 和重建。
 - `backend/tests/test_native_memory.py`：真实 SQLite/Zvec 的隔离、删除、失败重试与重建竞争测试。
 
-配置、预算及运行边界见 [README 的 Native Memory 章节](../README.md#native-memory)。
+配置、预算及运行边界见 [README 的 Native Memory 章节](../../README.md#native-memory)。

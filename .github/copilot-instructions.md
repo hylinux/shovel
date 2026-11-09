@@ -356,14 +356,14 @@ are in `.github\workflows\ci.yml`.
   generations; do not allow late extraction or stale vectors to resurrect facts.
   Soft deletion preserves a tombstone; session deletion removes its summary and
   session-scoped Memory, not agent-scoped cross-session facts. Automatic
-  procedural learning is disabled. See `Documents\native_memory_architecture.md`
+  procedural learning is disabled. See `Documents\Memory_Design\native_memory_architecture.md`
   for lifecycle, reconstruction, tests and currently unused ORM scaffolding.
 - `[memory].review_required` keeps extracted candidates pending approval when
   enabled; preserve the default automatic activation otherwise. Rejected facts
   retain tombstones. Working Memory requires explicit `working_task_id`
   selection and revision-checked edits; do not implicitly carry tasks across
   Sessions or treat their plans as execution permissions. Session deletion
-  also removes its working tasks. See `Documents\memory_completion_roadmap.md`
+  also removes its working tasks. See `Documents\Memory_Design\memory_completion_roadmap.md`
   and `backend\tests\test_working_memory.py`.
 - Full-sweep deletion reconciliation requires complete discovery and the
   connector's `DELETE_DETECT` capability, and respects profile ownership.

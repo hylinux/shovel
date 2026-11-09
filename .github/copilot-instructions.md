@@ -11,6 +11,9 @@ Keep Windows and WSL environments separate.
 Local development and CI/release share the default index configured in
 `pyproject.toml` and the committed `uv.lock`. Changing the index requires explicit
 lock reconciliation; do not override the registry only in CI under `--locked`.
+MAF core is constrained below 1.23 to retain MCP 1.x compatibility. The official
+Ollama connector is a prerelease pinned in `uv.lock`; reconcile these dependencies
+together rather than upgrading an individual framework package.
 
 Run Python commands from the repository root:
 
@@ -158,6 +161,13 @@ are in `.github\workflows\ci.yml`.
   `[memory.llm]` defaults to `[model]`; `[memory.embedder]` and `memory.dim` are
   independent of knowledge embeddings. Without a Memory embedder, SQLite storage
   remains available but semantic recall is explicitly reported unavailable.
+  Profile lookup and SQLite keyword recall remain available without vectors.
+  `memory\working.py` separately owns explicitly selected Session/task context;
+  its revision-checked, expiring notes are not Execution/Workflow business state.
+- Knowledge and Memory share `pipeline\embedder.py`'s `HttpEmbedder` adapter,
+  which delegates generation to MAF's `OpenAIEmbeddingClient` or official
+  `OllamaEmbeddingClient`. Shovel retains batching, bounded transient retries,
+  vector validation and embedding fingerprints; SDK retries are disabled.
 - The frontend is a static-exportable React/Next.js App Router workbench.
   `app\api.ts` centralizes REST access, polling, actions, and API types;
   `app\request-recovery.ts` persists uncertain mutation receipts. Development
@@ -278,6 +288,21 @@ are in `.github\workflows\ci.yml`.
   instructions, serialized references, history and tool results; the final
   `ContextBudgetMiddleware` rejects overflow. Main instructions do not replace
   the isolated Memory extractor/summarizer prompts.
+- Azure OpenAI chat and embeddings share `runtime\azure_auth.py`'s
+  `AzureCliOpenAIClient`: an empty chat `security_key` or embedding `api_key`
+  selects lazy asynchronous Azure CLI authentication with automatic token renewal;
+  non-empty keys retain API-key authentication. CLI mode rejects
+  `AZURE_OPENAI_AD_TOKEN` and never launches interactive login or falls back to
+  a key. Use the resource root endpoint, deployment name and `api_version`;
+  chat uses versioned Chat Completions, not `/openai/v1`. See
+  `Documents\azure_openai_configuration.md`.
+- Embedding `dimensions` is optional and must match `zvec.dim` or `memory.dim`
+  when set; the Ollama adapter rejects it. Include it in `model_version` only
+  when explicitly configured, preserving existing fingerprints when omitted.
+  Model/dimension changes require regenerating the corresponding vectors.
+  OpenAI-compatible providers without a default endpoint require an explicit
+  embedding-capable `base_url` and model; do not silently substitute providers
+  or use a chat-only model.
 - Loopback Ollama generation shares `RuntimePerformance.models` admission across
   Main Agent, platform Skill/Agent, Memory and warmup. Reuse
   `runtime\model_admission.py`'s transport: its lease covers the HTTP response
@@ -324,6 +349,13 @@ are in `.github\workflows\ci.yml`.
   session-scoped Memory, not agent-scoped cross-session facts. Automatic
   procedural learning is disabled. See `Documents\native_memory_architecture.md`
   for lifecycle, reconstruction, tests and currently unused ORM scaffolding.
+- `[memory].review_required` keeps extracted candidates pending approval when
+  enabled; preserve the default automatic activation otherwise. Rejected facts
+  retain tombstones. Working Memory requires explicit `working_task_id`
+  selection and revision-checked edits; do not implicitly carry tasks across
+  Sessions or treat their plans as execution permissions. Session deletion
+  also removes its working tasks. See `Documents\memory_completion_roadmap.md`
+  and `backend\tests\test_working_memory.py`.
 - Full-sweep deletion reconciliation requires complete discovery and the
   connector's `DELETE_DETECT` capability, and respects profile ownership.
   Paused resources remain searchable; revoked/deleted resources are excluded.

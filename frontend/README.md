@@ -2,6 +2,12 @@
 
 A local-first, light workbench for local resources, background tasks, and knowledge chat. All runtime data comes from the backend; the interface contains no sample resources or generated answers.
 
+The geometric shovel logo uses the existing teal `#086e75` palette.
+`app/icon.svg` is the shared source for the browser icon, sidebar brand and
+Shovel message avatars. Static image imports keep these assets available in
+both development and the Python-served production export, without an image
+optimization server. See [the design archive](../Documents/branding/README.md).
+
 Choose **English** or **简体中文** in the **Language** tab in **Settings**.
 English is the default; your choice is saved in this browser and restored
 after reload. Switching languages preserves the current Session and unsaved

@@ -56,7 +56,7 @@ dd { margin: 0 0 8px; }
 .sidebar-resizer:hover::after, .sidebar-resizer:focus-visible::after, .sidebar-resizer[data-resizing="true"]::after { background: var(--accent); }
 .workbench:has(.sidebar-resizer[data-resizing="true"]), .workbench:has(.sidebar-resizer[data-resizing="true"]) * { cursor: col-resize; user-select: none; }
 .brand { display: inline-flex; align-items: center; gap: 10px; font-size: 24px; font-weight: 700; letter-spacing: -.04em; text-decoration: none; color: var(--foreground); padding: 0 10px; }
-.brand-mark { width: 29px; height: 29px; display: grid; place-items: center; border-radius: 6px; background: var(--accent); color: white; font-size: 19px; letter-spacing: 0; }
+.brand-mark { display: block; flex-shrink: 0; width: 29px; height: 29px; }
 .sidebar-caption { display: flex; align-items: center; gap: 12px; min-width: 0; color: var(--muted); margin: 6px 10px 12px; font-size: 12px; }
 .sidebar-caption-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .main-navigation { display: flex; flex-direction: column; gap: 2px; flex: 1; min-height: 0; overflow-y: auto; overscroll-behavior: contain; scrollbar-gutter: stable; }

@@ -128,7 +128,7 @@ function loadComponent(file, dependencies) {
     compilerOptions: { module: ts.ModuleKind.CommonJS, jsx: ts.JsxEmit.ReactJSX, target: ts.ScriptTarget.ES2022 },
   });
   const exports = {};
-  new Function("require", "exports", outputText)(id => dependencies[id] ?? require(id), exports);
+  new Function("require", "exports", outputText)(id => id === "./icon.svg" ? { default: "/icon.svg" } : dependencies[id] ?? require(id), exports);
   return exports;
 }
 
@@ -335,7 +335,14 @@ test("Chat refreshes working revisions after settling and extraction candidates 
   }
   nodes = render();
   const status = nodes.find(node => typeof node.type === "function" && node.type.name === "MemoryTaskStatus");
+  const heading = nodes.find(node => typeof node.type === "function" && node.type.name === "MessageHeading");
   for (language of ["en", "zh-CN"]) {
+    const headingHtml = renderToStaticMarkup(heading.type(heading.props));
+    assert.match(headingHtml, /<img[^>]*alt=""[^>]*src="\/icon\.svg"/);
+    assert.ok(headingHtml.includes(translate("Shovel", language)));
+    const userHeadingHtml = renderToStaticMarkup(heading.type({ user: true }));
+    assert.ok(userHeadingHtml.includes("<svg"));
+    assert.ok(!userHeadingHtml.includes("<img"));
     const html = renderToStaticMarkup(status.type(status.props));
     assert.ok(html.includes(translate("saved awaiting review", language)));
     assert.ok(!html.includes(translate("no durable facts found", language)));

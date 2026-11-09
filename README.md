@@ -1,4 +1,8 @@
+<img src="frontend/app/icon.svg" alt="Shovel logo" width="64" height="64">
+
 # Shovel
+
+[Logo design and brand assets](Documents/branding/README.md)
 
 **A local-first Agent workbench, a durable Capability platform, and a
 default-deny enterprise security foundation.**

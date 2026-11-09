@@ -4,6 +4,8 @@ import { useI18n } from "./locale-context";
 
 import { useEffect, useReducer, useRef, useState, type FormEvent, type KeyboardEvent, type PointerEvent } from "react";
 import Link from "next/link";
+import Image from "next/image";
+import shovelLogo from "./icon.svg";
 import { api, errorText, segment, useAction, useQuery, useSessionHistory, type Items, type MessagePage, type Resource, type Session, type Status } from "./api";
 import { resolveInitialSession, sessionCacheKey } from "./session-startup";
 import { Resources } from "./resources";
@@ -137,7 +139,7 @@ export default function Home() {
       <title>{t("Shovel — local knowledge workbench")}</title>
       <a className="skip-link" href="#main">{t("Skip to content")}</a>
       <aside id="sidebar" className="sidebar">
-        <Link href="/" className="brand" aria-label={t("Shovel home")}><span className="brand-mark" aria-hidden="true">{t("S")}</span>{t("Shovel")}</Link>
+        <Link href="/" className="brand" aria-label={t("Shovel home")}><Image src={shovelLogo} className="brand-mark" width={29} height={29} alt="" unoptimized />{t("Shovel")}</Link>
         <div className="sidebar-caption">
           <span className="sidebar-caption-label" title={t("Personal Agent Platform")}>{t("Personal Agent Platform")}</span>
           <div className="sidebar-connection" title={connectionLabel}><span className={`connection-dot ${status.data && !status.error ? "connected" : ""}`} aria-hidden="true" /><span className="connection-label">{connectionLabel}</span></div>

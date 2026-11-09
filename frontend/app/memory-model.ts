@@ -15,7 +15,7 @@ export type Memory = {
   episode_time_source?: string | null; source?: string; confidence?: number; importance?: number;
   episode_time_precision?: "day" | "instant" | "unknown";
   subject?: string; predicate?: string; object?: string; topic?: string;
-  provenance?: { evidence?: string; source_kind: string; conversation_id: string; message_id: string; asserted_at?: number | null }[];
+  provenance?: { evidence?: string; source_kind: string; conversation_id?: string; message_id?: string; asserted_at?: number | null; field?: string; profile_revision?: number }[];
 };
 export type WorkingMemory = {
   task_id: string; revision: number; goal: string; constraints: string[]; decisions: string[];

@@ -82,6 +82,7 @@ class Runtime:
         from shovel.runtime.operations import OperationService
         from shovel.runtime.performance import RuntimePerformance, RuntimeWarmup
         from shovel.runtime.retrieval import RetrievalService
+        from shovel.runtime.user_profile import UserProfileService
 
         self.settings = settings
         if installed_host() and settings.agent.enable_python_extensions:
@@ -205,6 +206,7 @@ class Runtime:
             ),
         )
         self.memory_tasks: MemoryTaskService = MemoryTaskService(self)
+        self.user_profile = UserProfileService(sessions, self.memory.owner)
         self.instructions: AgentInstructionsService = AgentInstructionsService(
             settings.agent.workspace, settings.model.max_input_chars
         )
@@ -294,6 +296,7 @@ async def create_runtime(
         runtime = Runtime(settings, sessions, resources)
         try:
             await runtime.memory.initialize()
+            await runtime.user_profile.synchronize()
             await runtime.enterprise.refresh_policy()
             await runtime.recovery.recover()
             await runtime.interactions.refresh()

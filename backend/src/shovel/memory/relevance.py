@@ -134,10 +134,13 @@ _DOMAINS: dict[str, tuple[str, tuple[str, ...]]] = {
     ),
 }
 _PROFILES = {
-    "has_name": r"\bname\b|名字|姓名",
+    "has_name": r"\b(?:name|nickname)\b|名字|姓名|昵称",
     "has_role": r"\b(?:occupation|profession|job|background)\b|职业|工作",
     "has_timezone": r"\btimezone\b|时区",
     "has_language": r"\blanguage\b|语言",
+    "has_gender": r"\bgender\b|性别",
+    "has_bio": r"\b(?:bio|biography)\b|自我介绍",
+    "has_avatar": r"\bavatar\b|头像",
 }
 
 

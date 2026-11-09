@@ -3,6 +3,7 @@ import { readFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import test from "node:test";
 import { renderToStaticMarkup } from "react-dom/server";
+import { createElement } from "react";
 import ts from "typescript";
 import * as model from "../app/memory-model.ts";
 import { translate, localizedDate } from "../app/i18n.ts";
@@ -10,6 +11,7 @@ import * as messageFormat from "../app/message-format.ts";
 import { SessionDrafts } from "../app/session-drafts.ts";
 
 const messageComponents = {
+  "./user-profile": { useUserProfile: () => ({ error: "", refresh() {} }), UserAvatar: () => createElement("svg") },
   "./message-content": { MessageContent: () => null, RichText: () => null },
   "./composer-tools": { ComposerTools: () => null },
   "./message-format": messageFormat,

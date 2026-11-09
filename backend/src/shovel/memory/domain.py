@@ -22,8 +22,19 @@ EXTRACTION_VERSION = "native-v2"
 PROFILE_TOPICS = {
     "has_name": "user.name",
     "has_role": "user.occupation",
+    "has_gender": "user.gender",
+    "has_bio": "user.bio",
+    "has_avatar": "user.avatar",
     "has_timezone": "user.timezone",
     "has_language": "user.language",
+}
+
+PROFILE_FIELDS = {
+    "has_name": "nickname",
+    "has_role": "occupation",
+    "has_gender": "gender",
+    "has_bio": "bio",
+    "has_avatar": "avatar_url",
 }
 
 

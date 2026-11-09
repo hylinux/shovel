@@ -7,6 +7,7 @@ import { type Status } from "./api";
 import { MCPManagement } from "./mcp";
 import { AgentInstructionsManagement } from "./instructions";
 import { MemoryManagement } from "./memories";
+import { UserProfileSettings } from "./user-profile";
 
 const warmupNames: Record<string, string> = {
   index: "Knowledge index",
@@ -20,7 +21,7 @@ const settingsTabs = [
   { id: "memory", label: "Manage long-term Memory" },
   { id: "mcp", label: "MCP Server Management" },
   { id: "instructions", label: "Agent instructions" },
-  { id: "language", label: "Language" },
+  { id: "language", label: "General settings" },
 ] as const;
 type SettingsTab = typeof settingsTabs[number]["id"];
 
@@ -53,7 +54,7 @@ export function Settings({ status, sessionId = "" }: { status?: Status; sessionI
         : tab.id === "memory" ? <MemoryManagement status={status} sessionId={sessionId} />
           : tab.id === "mcp" ? <MCPManagement />
             : tab.id === "instructions" ? <AgentInstructionsManagement running={Boolean(status?.chat_capacity && (status.chat_capacity.running || status.chat_capacity.waiting))} />
-              : <LanguageSettings />)}
+              : <><LanguageSettings /><UserProfileSettings /></>)}
     </div>)}
   </div>;
 }

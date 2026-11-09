@@ -83,6 +83,7 @@ class ChatService:
             self._restart_failed = True
             try:
                 await self.agent.close()
+                await self.runtime.user_profile.synchronize()
                 self.agent = ShovelAgent(self.runtime, configuration=configuration)
                 self._restart_failed = False
                 trace("agent.restart.completed")

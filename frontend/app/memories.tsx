@@ -107,12 +107,12 @@ function Memories({ enabled, indexEnabled, sessionId }: { enabled: boolean; inde
       <p className="preserve">{item.memory}</p>
       <p className="muted">{[item.kind, item.scope, item.state].map(value => t(value)).join(" · ")}</p>
       <MemoryEvidence item={item} />
-      <div className="button-row">
+      {item.provenance?.some(source => source.source_kind === "user_settings") ? <p className="muted">{t("Managed in General settings. Edit or clear the profile field there.")}</p> : <div className="button-row">
         {item.state === "active" && <button disabled={busy} onClick={() => { setLocalError(""); setEditor({ original: item, draft: memoryInput(item, sessionId) }); }}>{t("Edit")}</button>}
         {item.state === "candidate" && <button disabled={busy} onClick={() => setConfirm({ item, decision: "approve" })}>{t("Approve candidate…")}</button>}
         {(item.state === "candidate" || item.state === "active") && <button disabled={busy} onClick={() => setConfirm({ item, decision: "reject" })}>{t("Reject…")}</button>}
         {item.state !== "deleted" && <button disabled={busy} onClick={() => setConfirm({ item, decision: "forget" })}>{t("Forget…")}</button>}
-      </div>
+      </div>}
       {confirm?.item.id === item.id && <div className="confirmation">
         <p>{t(confirm.decision === "forget" ? "Forget this saved fact? Its vector will also be cleaned up." : confirm.decision === "approve" ? "Approve this candidate for active recall? Approval is not verification of truth." : "Reject this fact? The same rejected fact will not be automatically recreated.")}</p>
         <div className="button-row"><button className={confirm.decision === "approve" ? "primary" : "danger"} disabled={busy} onClick={decide}>{t(confirm.decision === "forget" ? "Confirm forget" : confirm.decision === "approve" ? "Confirm approve" : "Confirm reject")}</button><button disabled={busy} onClick={() => setConfirm(undefined)}>{t("Cancel")}</button></div>
@@ -137,7 +137,7 @@ export function MemoryEvidence({ item }: { item: Memory }) {
     </dl>
     {item.provenance?.length ? item.provenance.map((source, index) => <blockquote className="memory-source" key={index}>
       <p className="preserve">{source.evidence}</p><p className="muted">{t(source.source_kind)} · {date(source.asserted_at)}</p>
-      <p>{t("Session")}: <code>{source.conversation_id || "—"}</code> · {t("Message ID")}: <code>{source.message_id || "—"}</code></p>
+      {source.source_kind === "user_settings" ? <p>{t("Profile field")}: <code>{source.field}</code> · {t("Revision")}: {source.profile_revision}</p> : <p>{t("Session")}: <code>{source.conversation_id || "—"}</code> · {t("Message ID")}: <code>{source.message_id || "—"}</code></p>}
     </blockquote>) : <p className="muted">{t("No source evidence recorded.")}</p>}
   </details>;
 }

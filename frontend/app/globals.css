@@ -45,6 +45,13 @@ dl { margin: 10px 0; }
 dt { color: var(--muted); font-size: 12px; }
 dd { margin: 0 0 8px; }
 .muted { color: var(--muted); font-weight: 400; font-size: 13px; }
+.user-profile-editor { display: grid; gap: 16px; max-width: 720px; }
+.profile-avatar-row { display: flex; align-items: flex-start; gap: 16px; }
+.profile-avatar { display: grid; place-items: center; flex-shrink: 0; width: 64px; height: 64px; border-radius: 50%; overflow: hidden; background: var(--accent-soft); }
+.profile-avatar img { width: 64px; height: 64px; object-fit: cover; }
+.profile-avatar-row > div { min-width: 0; display: grid; gap: 8px; }
+.profile-avatar-row button { justify-self: start; }
+.message-avatar img { object-fit: cover; border-radius: 50%; }
 .preserve { white-space: pre-wrap; }
 .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0,0,0,0); white-space: nowrap; border: 0; }
 .skip-link { position: fixed; top: -100px; left: 20px; z-index: 100; background: white; padding: 12px; color: var(--accent); }

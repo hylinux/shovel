@@ -55,6 +55,7 @@ from .retrieval import (
 )
 from .runtime import ChatMessage, Conversation, MemoryEpoch, Operation
 from .security import ApprovalRequest
+from .user_profile import UserProfile
 
 __all__ = [
     "AgentScope",
@@ -117,4 +118,5 @@ __all__ = [
     "Schedule",
     "SchemaMigration",
     "StandingQuery",
+    "UserProfile",
 ]

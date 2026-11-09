@@ -28,6 +28,7 @@ function composer(run = async () => false) {
   const dependencies = {
     react,
     "./locale-context": { useI18n: () => ({ t: key => key }) },
+    "./user-profile": { useUserProfile: () => ({ error: "", refresh() {} }) },
     "./api": { segment: encodeURIComponent, useAgentAction: () => ({ busy: false, run }),
       useQuery: () => ({ data: { items: [] }, loading: false, error: "", refresh() {} }) },
     "./ui": { Empty: () => null, Feedback: () => null, Sources: () => null },

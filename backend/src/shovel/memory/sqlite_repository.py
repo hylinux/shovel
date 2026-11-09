@@ -20,8 +20,10 @@ from shovel.db.model.memory import (
     NativeMemory,
 )
 from shovel.db.model.runtime import ChatMessage, MemoryEpoch, Operation
+from shovel.db.model.user_profile import UserProfile
 from shovel.domain.enums import MemoryPredicate, MemorySource, MemoryValidityState, VectorState
 from shovel.memory.domain import (
+    PROFILE_FIELDS,
     PROFILE_TOPICS,
     ExtractionCancelled,
     IndexIntent,
@@ -123,7 +125,7 @@ def record(row: Row, kind: MemoryType) -> MemoryRecord:
     )
 
 
-def _intent(session: AsyncSession, row: Row, kind: MemoryType, action: str) -> None:
+def queue_index_intent(session: AsyncSession, row: Row, kind: MemoryType, action: str) -> None:
     session.add(
         MemoryIndexOutbox(
             workspace_id=row.workspace_id,
@@ -333,7 +335,21 @@ class SQLiteMemoryRepository:
                     or source.conversation_id != provenance.conversation_id
                 ):
                     raise ExtractionCancelled()
+            profile = await session.get(UserProfile, (scope.workspace_id, scope.user_id))
+            if profile is not None and replace_id is not None:
+                target, _ = await self._find(session, scope, replace_id)
+                if any(source.get("source_kind") == "user_settings" for source in target.provenance):
+                    raise RuntimeFailure("Edit this Profile field in General settings.", status=409)
             for candidate in candidates:
+                if (
+                    profile is not None
+                    and candidate.kind == MemoryType.SEMANTIC
+                    and candidate.subject == "user"
+                    and candidate.predicate in PROFILE_FIELDS
+                ):
+                    if replace_id is not None or provenance.source_kind != "user_message":
+                        raise RuntimeFailure("Edit this Profile field in General settings.", status=409)
+                    continue
                 table = _TABLES[candidate.kind]
                 agent = scope.agent_id if scope.kind in (ScopeKind.AGENT, ScopeKind.SESSION) else ""
                 conversation = scope.session_id if scope.kind == ScopeKind.SESSION else ""
@@ -357,7 +373,7 @@ class SQLiteMemoryRepository:
                     ):
                         existing.validity_state = MemoryValidityState.EXPIRED
                         existing.invalidated_at = now_ts()
-                        _intent(session, existing, candidate.kind, "delete")
+                        queue_index_intent(session, existing, candidate.kind, "delete")
                 rows = [
                     r
                     for r in rows
@@ -460,7 +476,7 @@ class SQLiteMemoryRepository:
                         previous.validity_state = MemoryValidityState.SUPERSEDED
                         previous.invalidated_at = now_ts()
                         previous.supersede_reason = "Explicit user correction"
-                        _intent(session, previous, candidate.kind, "delete")
+                        queue_index_intent(session, previous, candidate.kind, "delete")
                         replaced.append(previous)
                 if replace_id is not None and not any(r.id == replace_id for r in replaced):
                     raise RuntimeFailure("只能更新同一 Scope 中的 active Memory。", status=409)
@@ -470,7 +486,7 @@ class SQLiteMemoryRepository:
                 for previous in replaced:
                     previous.superseded_by = row.id
                 if not review_required:
-                    _intent(session, row, candidate.kind, "upsert")
+                    queue_index_intent(session, row, candidate.kind, "upsert")
                 results.append(record(row, candidate.kind))
             if operation is not None:
                 operation.state, operation.finished_at = "succeeded", now_ts()
@@ -504,6 +520,13 @@ class SQLiteMemoryRepository:
             ):
                 raise ExtractionCancelled()
             row, kind = await self._find(session, scope, identifier)
+            if (
+                isinstance(row, MemoryBelief)
+                and row.subject == "user"
+                and row.predicate in PROFILE_FIELDS
+                and await session.get(UserProfile, (scope.workspace_id, scope.user_id)) is not None
+            ):
+                raise RuntimeFailure("Edit this Profile field in General settings.", status=409)
             if row.validity_state not in (MemoryValidityState.ACTIVE, MemoryValidityState.CANDIDATE):
                 raise RuntimeFailure("只能审核 candidate 或 active Memory。", status=409)
             if decision == "approve":
@@ -560,13 +583,13 @@ class SQLiteMemoryRepository:
                         previous.invalidated_at = now_ts()
                         previous.superseded_by = row.id
                         previous.supersede_reason = "Human review of explicit correction"
-                        _intent(session, previous, kind, "delete")
+                        queue_index_intent(session, previous, kind, "delete")
                 row.validity_state = MemoryValidityState.ACTIVE
-                _intent(session, row, kind, "upsert")
+                queue_index_intent(session, row, kind, "upsert")
             elif decision == "reject":
                 row.validity_state = MemoryValidityState.REJECTED
                 row.invalidated_at = now_ts()
-                _intent(session, row, kind, "delete")
+                queue_index_intent(session, row, kind, "delete")
             else:
                 raise ValueError("Unsupported Memory review decision.")
             row.review_data = {**row.review_data, "decision": decision, "reviewed_at": now_ts()}
@@ -581,13 +604,15 @@ class SQLiteMemoryRepository:
         async with self.sessions() as session:
             await session.execute(text("BEGIN IMMEDIATE"))
             row, kind = await self._find(session, scope, identifier)
+            if any(source.get("source_kind") == "user_settings" for source in row.provenance):
+                raise RuntimeFailure("Edit this Profile field in General settings.", status=409)
             if hard and state != MemoryState.DELETED:
                 raise ValueError("Hard removal requires deleted state.")
             if state not in (MemoryState.DELETED, MemoryState.EXPIRED, MemoryState.REJECTED):
                 raise ValueError("Use consolidation for activation and supersession.")
             row.validity_state = MemoryValidityState(state.value)
             row.invalidated_at = now_ts()
-            _intent(session, row, kind, "delete")
+            queue_index_intent(session, row, kind, "delete")
             if hard:
                 await session.delete(row)
             await session.commit()
@@ -653,7 +678,7 @@ class SQLiteMemoryRepository:
                 for row in rows:
                     row.validity_state = MemoryValidityState.EXPIRED
                     row.invalidated_at = now_ts()
-                    _intent(session, row, kind, "delete")
+                    queue_index_intent(session, row, kind, "delete")
                     count += 1
             await session.commit()
         return count
@@ -684,7 +709,7 @@ class SQLiteMemoryRepository:
                 for row in rows:
                     row.vector_state = VectorState.PENDING
                     if (row.id, kind.value, row.rev, "upsert") not in keys:
-                        _intent(session, row, kind, "upsert")
+                        queue_index_intent(session, row, kind, "upsert")
             await session.commit()
 
     async def touch(self, scope: MemoryScope, identifiers: Sequence[str]) -> None:

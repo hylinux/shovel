@@ -59,6 +59,7 @@ from shovel.runtime.schemas import (
     WorkingMemoryInput,
 )
 from shovel.runtime.service import Runtime
+from shovel.runtime.user_profile import UserProfileInput
 from shovel.services import connector_registry
 from shovel.services.connector_base import ConnectorSpec
 from shovel.services.outlook import OutlookError
@@ -295,6 +296,24 @@ def configure_api(
     @router.get("/agent/instructions")
     async def agent_instructions(rt: RuntimeDependency) -> JSONResponse:
         return instructions_response(rt, await asyncio.to_thread(rt.instructions.read))
+
+    @router.get("/user/profile")
+    async def user_profile(rt: RuntimeDependency) -> JSONResponse:
+        return JSONResponse(await rt.user_profile.read(), headers={"Cache-Control": "no-store"})
+
+    @router.put("/user/profile")
+    async def save_user_profile(body: UserProfileInput, rt: RuntimeDependency) -> JSONResponse:
+        result = await rt.user_profile.save(body)
+        rt.memory_wake.set()
+        return JSONResponse(result, headers={"Cache-Control": "no-store"})
+
+    @router.get("/user/profile/avatar/{digest}")
+    async def user_avatar(digest: str, rt: RuntimeDependency) -> Response:
+        return Response(
+            await rt.user_profile.avatar(digest),
+            media_type="image/png",
+            headers={"Cache-Control": "no-store", "X-Content-Type-Options": "nosniff"},
+        )
 
     @router.put("/agent/instructions")
     async def save_agent_instructions(body: AgentInstructionsInput, rt: RuntimeDependency) -> JSONResponse:

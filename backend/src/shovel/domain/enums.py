@@ -491,6 +491,9 @@ class MemoryPredicate(StrEnum):
     USES = "uses"
     WORKS_AT = "works_at"  # single-valued
     HAS_NAME = "has_name"
+    HAS_GENDER = "has_gender"
+    HAS_BIO = "has_bio"
+    HAS_AVATAR = "has_avatar"
     HAS_ROLE = "has_role"  # single-valued
     HAS_TIMEZONE = "has_timezone"  # single-valued
     HAS_LANGUAGE = "has_language"  # single-valued
@@ -507,6 +510,9 @@ class MemoryPredicate(StrEnum):
         "uses" can have many -- Python AND SQLite AND Qdrant all coexist.
         """
         return self in {
+            MemoryPredicate.HAS_GENDER,
+            MemoryPredicate.HAS_BIO,
+            MemoryPredicate.HAS_AVATAR,
             MemoryPredicate.HAS_NAME,
             MemoryPredicate.HAS_ROLE,
             MemoryPredicate.HAS_TIMEZONE,

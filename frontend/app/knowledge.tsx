@@ -15,10 +15,12 @@ import { ComposerTools } from "./composer-tools";
 import { formattedMessage, type MessageFormat } from "./message-format";
 import { attachmentAccept, MessageAttachments, UploadList, useAttachments, type Attachment } from "./chat-attachments";
 import type { SessionDraft, SessionDrafts } from "./session-drafts";
+import { UserAvatar, useUserProfile } from "./user-profile";
 
 export function Knowledge({ status, sessionId, onSessionChanged, drafts }: { status?: Status; sessionId: string; onSessionChanged: () => void; drafts: SessionDrafts }) {
   const { t } = useI18n();
-  return <section className="session-content" aria-label={t("Chat session")}>{sessionId
+  const profile = useUserProfile();
+  return <section className="session-content" aria-label={t("Chat session")}><Feedback error={profile.error} retry={profile.refresh} />{sessionId
     ? status?.workspace_id ? <Chat key={JSON.stringify([status.workspace_id, sessionId])} sessionId={sessionId} status={status} onActivity={onSessionChanged} draft={drafts.get(status.workspace_id, sessionId)} />
       : <p role="status">{t("Loading session…")}</p>
     : <Empty title={t("A session grounded in your documents")}>{t("Choose New Session or open a session from the sidebar.")}</Empty>}
@@ -125,13 +127,14 @@ function Chat({ sessionId, status, onActivity, draft }: { sessionId: string; sta
   </form></>;
 }
 
-function MessageHeading({ user, failed = false }: { user: boolean; failed?: boolean }) {
+export function MessageHeading({ user, failed = false }: { user: boolean; failed?: boolean }) {
   const { t } = useI18n();
+  const { profile } = useUserProfile();
   return <h3 className="message-heading">
     <span className="message-avatar" aria-hidden="true">{user
-      ? <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="8" r="3.5" /><path d="M5 21v-2a7 7 0 0 1 14 0v2" /></svg>
+      ? <UserAvatar src={profile?.avatar_url} />
       : <Image src={shovelLogo} width={32} height={32} alt="" unoptimized />}</span>
-    <span>{user ? t("You") : t("Shovel")}</span>
+    <span>{user ? profile?.nickname || t("You") : t("Shovel")}</span>
     {failed && <span className="badge bad">{t("Failed")}</span>}
   </h3>;
 }

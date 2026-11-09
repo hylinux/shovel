@@ -8,7 +8,7 @@ Shovel message avatars. Static image imports keep these assets available in
 both development and the Python-served production export, without an image
 optimization server. See [the design archive](../Documents/branding/README.md).
 
-Choose **English** or **简体中文** in the **Language** tab in **Settings**.
+Choose **English** or **简体中文** in the **General settings** tab in **Settings**.
 English is the default; your choice is saved in this browser and restored
 after reload. Switching languages preserves the current Session and unsaved
 editor drafts. Navigation, forms, confirmations, status labels and accessibility
@@ -67,7 +67,7 @@ Background tasks, Search Documents), **Development** (Skills, Workflows),
 and session history). The first three groups are collapsed initially and expand
 independently; Chat stays expanded by default. Runtime connection status appears
 beside **Personal Agent Platform** below the Shovel logo; Settings remains at the
-bottom, and language selection lives only in **Settings → Language**.
+bottom, and language selection lives only in **Settings → General settings**.
 
 The desktop sidebar defaults to **325px**, bounded by a 200px minimum and a maximum
 of the smaller of 420px and 40% of the viewport width. Drag its right edge to resize,
@@ -79,7 +79,22 @@ navigation moves above the main content and spans the page width.
 - **Background tasks:** inspect scan stages, counters and document events, request cancellation, inspect/retry operations, and queue index cleanup. Resources, jobs, operations and visible events refresh about every two seconds without clearing forms. Requests are serialized per poller and cancelled on unmount. Periodic queries pause while the browser tab is hidden and refresh on return; in-flight reads may finish, and explicit actions/Agent streams are not interrupted. Resources poll only in Resources, Background tasks (for cleanup scope), and Search Documents, never in Chat or Settings.
 - **Search Documents:** an independent menu below Background tasks. Select resources, retrieval mode, Top N (1–30), and relevance/title sort direction. Sorting applies only to the returned Top N passages. Empty resource selection means all accessible resources. Search works without a chat model or Memory.
 - **Chat:** the session tree is expanded by default and stays visible while visiting other pages. New Session and existing sessions are indented children of Chat, without a separate Sessions heading. Enter Chat to open it; click Chat again to collapse or expand its children without interrupting the active chat. New Session creates and selects a persisted session; history is ordered by latest interaction in a bounded scroll area, with Load more sessions for older pages. Rename/delete controls live under the selected Session in the sidebar. The Session page contains message history, numbered source excerpts, and a multiline composer: Enter inserts a newline; Ctrl + Enter or Send Message submits. The official AG-UI `HttpAgent` SDK streams the MAF Agent's text and tool activity; message and Session history are refreshed after success or failure.
-- **Settings:** the bottom sidebar menu opens five keyboard-accessible tabs: Runtime configuration, Manage long-term Memory, MCP Server Management, Agent instructions, and Language. Switching tabs preserves mounted editors and drafts. Runtime configuration includes provider readiness and performance/warmup; provider changes require editing settings.toml and restarting the backend. Saved facts load from SQLite only on request. Memory shows its Zvec index status and pending operations, supports confirmed soft deletion, and can queue a rebuild in Background tasks. Session history, session summaries and long-term facts remain separate; session deletion removes its summary/session-scoped Memory, not cross-session facts.
+- **Settings:** the bottom sidebar menu opens five keyboard-accessible tabs: Runtime configuration, Manage long-term Memory, MCP Server Management, Agent instructions, and General settings. Switching tabs preserves mounted editors and drafts. Runtime configuration includes provider readiness and performance/warmup; provider changes require editing settings.toml and restarting the backend. Saved facts load from SQLite only on request. Memory shows its Zvec index status and pending operations, supports confirmed soft deletion, and can queue a rebuild in Background tasks. Session history, session summaries and long-term facts remain separate; session deletion removes its summary/session-scoped Memory, not cross-session facts.
+
+**General settings** also saves an optional nickname, avatar, gender, occupation
+and biography in the current workspace/user's SQLite profile. Avatars accept
+static PNG/JPEG/WebP up to 2 MB and 4 megapixels; the backend resizes them to at
+most 256 pixels and removes metadata. Replacing or removing an avatar atomically
+replaces its stored bytes; no orphan files remain.
+Profile changes atomically update settings-managed Profile Memory and its vector
+outbox. Startup and Agent restart reconcile the projection without duplicate
+facts. Edit or clear these facts in General settings, not Memory management;
+chat extraction cannot override them. The next Agent request reads the current
+profile, even with automatic Memory off, and prefers the saved nickname.
+Avatar bytes are never sent to models. Historical and pending user messages
+display the current nickname/avatar, without rewriting stored message content.
+Profile reads refresh across tabs while preserving unsaved editor drafts;
+conflicting saves require reloading rather than overwriting newer revisions.
 
 On desktop, Chat uses a compact, single-line heading and a viewport-height panel:
 messages scroll independently above the composer, without the former 660px

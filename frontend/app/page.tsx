@@ -18,6 +18,7 @@ import { ProactiveServices } from "./proactive";
 import { ApprovalCenter, ExecutionActivity } from "./platform-activity";
 import { CapabilityLibrary } from "./capabilities";
 import { SessionDrafts } from "./session-drafts";
+import { UserProfileProvider } from "./user-profile";
 
 const platformViews = ["Proactive Services", "Approval Center", "Activity", "Skills", "Workflows"] as const;
 type View = "Resources" | "Background tasks" | "Search Documents" | "Chat" | typeof platformViews[number] | "Settings";
@@ -138,6 +139,7 @@ export default function Home() {
   }
   const connectionLabel = status.data && !status.error ? t("Local runtime connected") : status.loading ? t("Connecting to runtime…") : t("Runtime unavailable");
   return (
+    <UserProfileProvider workspace={status.data?.workspace_id}>
     <div className="workbench">
       <title>{t("Shovel — local knowledge workbench")}</title>
       <a className="skip-link" href="#main">{t("Skip to content")}</a>
@@ -180,6 +182,7 @@ export default function Home() {
         {view !== "Chat" && <footer className="page-footer">{t("Shovel · Local documents, connected knowledge")}</footer>}
       </main>
     </div>
+    </UserProfileProvider>
   );
 }
 

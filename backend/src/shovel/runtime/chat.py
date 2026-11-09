@@ -51,6 +51,9 @@ class ChatService:
             return "restart_failed"
         return "loaded" if self.agent.extensions.mcp_revision is not None else "not_loaded"
 
+    def session_lock(self, identifier: str) -> asyncio.Lock:
+        return self._locks.setdefault(identifier, asyncio.Lock())
+
     async def restart_agent(
         self, *, instructions: AgentInstructionsInput | None = None
     ) -> AgentInstructionsView:
@@ -128,7 +131,7 @@ class ChatService:
         lock = self._locks.setdefault(identifier, asyncio.Lock())
         if lock.locked():
             raise RuntimeFailure("此对话正在生成回答,完成后才能修改或删除。", status=409)
-        async with lock, self.runtime.sessions() as session:
+        async with lock, self.runtime.attachments.lock, self.runtime.sessions() as session:
             conversation = await session.get(Conversation, identifier)
             if conversation is None:
                 raise NotFound("对话", identifier)
@@ -140,6 +143,8 @@ class ChatService:
                 conversation.title = title
                 conversation.updated_at = now_ts()
             await session.commit()
+        if title is None:
+            await self.runtime.attachments.delete_session(identifier)
 
     async def messages(
         self, identifier: str, *, limit: int = 100, before: int | None = None
@@ -280,7 +285,7 @@ class ChatService:
         started = perf_counter()
         trace("chat.started", memory_enabled=request.memory_enabled, input_chars=len(request.content))
         persistence_started = perf_counter()
-        async with self.runtime.sessions() as session:
+        async with self.runtime.attachments.lock, self.runtime.sessions() as session:
             conversation = await session.get(Conversation, identifier)
             if conversation is None:
                 raise NotFound("对话", identifier)
@@ -312,8 +317,14 @@ class ChatService:
                 sequence=sequence + 2,
             )
             session.add_all([user, answer])
+            await session.flush()
+            user.attachments = await self.runtime.attachments.commit(
+                session, identifier, request.attachment_ids, user.id
+            )
             if conversation.title == "新对话":
-                conversation.title = request.content[:60]
+                conversation.title = (
+                    request.content or (user.attachments[0]["name"] if user.attachments else "")
+                )[:60]
             conversation.updated_at = now_ts()
             if request.memory_enabled:
                 conversation.has_short_memory = True
@@ -326,10 +337,17 @@ class ChatService:
             elapsed_ms=round((perf_counter() - persistence_started) * 1000, 2),
         )
         try:
+            request._attachment_contents = await self.runtime.attachments.contents(
+                identifier, user.attachments
+            )
+            history_messages = []
+            for message in reversed(history):
+                contents = await self.runtime.attachments.contents(identifier, message.attachments)
+                history_messages.append(Message(message.role, [message.content, *contents]))
             result = await self.agent.respond(
                 identifier,
                 request,
-                [Message(message.role, [message.content]) for message in reversed(history)],
+                history_messages,
                 run_id=run_id,
                 on_event=on_event,
             )

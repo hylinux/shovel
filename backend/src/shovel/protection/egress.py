@@ -121,6 +121,7 @@ def require_personal_table_write(table: str | None, *, update: bool) -> None:
         return
     if table is None or table in {
         "chat_message",
+        "session_attachment",
         "conversation",
         "session_summary",
         "memory_working",

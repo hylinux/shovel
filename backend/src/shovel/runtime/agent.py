@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import re
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterable
 from dataclasses import dataclass, field, replace
 from time import perf_counter
 from typing import TYPE_CHECKING, Any
@@ -25,6 +25,7 @@ from agent_framework import (
     ChatOptions,
     ChatResponse,
     ChatResponseUpdate,
+    Content,
     ContextProvider,
     FunctionInvocationContext,
     FunctionMiddleware,
@@ -60,6 +61,69 @@ if TYPE_CHECKING:
     from shovel.runtime.service import Runtime
 
 EventSink = Callable[[BaseEvent], Awaitable[None]]
+
+
+@dataclass(frozen=True)
+class ContextSize:
+    chars: int = 0
+    images: int = 0
+    image_bytes: int = 0
+
+    def __add__(self, other: ContextSize) -> ContextSize:
+        return ContextSize(
+            self.chars + other.chars, self.images + other.images, self.image_bytes + other.image_bytes
+        )
+
+    def fits_media(self, images: int, image_bytes: int) -> bool:
+        return self.images <= images and self.image_bytes <= image_bytes
+
+    def require_media(self, images: int, image_bytes: int) -> None:
+        if not self.fits_media(images, image_bytes):
+            raise RuntimeFailure(
+                f"图片上下文超过媒体预算: {self.images}/{images} 张, "
+                f"{self.image_bytes}/{image_bytes} 字节;请减少图片或调整 "
+                "model.max_input_images / model.max_input_image_bytes。",
+                status=413,
+            )
+
+
+def content_size(contents: Iterable[Content], *, serialized: bool = False) -> ContextSize:
+    chars = images = image_bytes = 0
+    for content in contents:
+        if content.type == "text" and not serialized:
+            chars += len(content.text or "")
+            continue
+        data = content.to_dict()
+        if content.type == "data" and content.media_type in {
+            "image/jpeg",
+            "image/png",
+            "image/gif",
+            "image/webp",
+        }:
+            images += 1
+            prefix = f"data:{content.media_type};base64,"
+            uri = content.uri or ""
+            if uri.startswith(prefix):
+                encoded = uri[len(prefix) :]
+                if not encoded or len(encoded) % 4 or re.fullmatch(r"[A-Za-z0-9+/]*={0,2}", encoded) is None:
+                    raise RuntimeFailure("图片内容不是有效的 base64 数据。", status=400)
+                image_bytes += len(encoded) // 4 * 3 - (
+                    2 if encoded.endswith("==") else int(encoded.endswith("="))
+                )
+                # Only the binary payload uses the independent media quota; metadata still costs characters.
+                data["uri"] = prefix
+        chars += len(json.dumps(data, ensure_ascii=False))
+    return ContextSize(chars, images, image_bytes)
+
+
+def history_size(message: Message) -> ContextSize:
+    size = content_size(message.contents, serialized=True)
+    metadata = message.to_dict()
+    metadata["contents"] = [None] * len(message.contents)
+    return replace(
+        size,
+        chars=size.chars + len(json.dumps(metadata, ensure_ascii=False)) - 4 * len(message.contents),
+    )
 
 
 def tool_schema_size(tools: list[Any]) -> tuple[int, int]:
@@ -247,7 +311,9 @@ class ShovelContextProvider(ContextProvider):
         self.has_retrieval_matches = False
         self.standalone_greeting = standalone_greeting(request, history)
         self.personal_memory_question = personal_memory_question(request)
-        self.automatic_search = not (self.standalone_greeting or self.personal_memory_question)
+        self.automatic_search = bool(request.content.strip()) and not (
+            self.standalone_greeting or self.personal_memory_question
+        )
 
     async def search(self, query: str) -> dict[str, Any]:
         """Search accessible local knowledge within this request's resource scope."""
@@ -293,8 +359,15 @@ class ShovelContextProvider(ContextProvider):
         trace(
             "agent.context.started", history_messages=len(self.history), memory_enabled=request.memory_enabled
         )
+        settings = self.runtime.settings.model
+        attachment_size = content_size(request._attachment_contents, serialized=True)
+        attachment_size.require_media(settings.max_input_images, settings.max_input_image_bytes)
         budget = (
-            self.runtime.settings.model.max_input_chars - len(self.instructions) - len(request.content) - 512
+            self.runtime.settings.model.max_input_chars
+            - len(self.instructions)
+            - len(request.content)
+            - attachment_size.chars
+            - 512
         )
         if budget < 500:
             raise RuntimeFailure("问题超过此模型的上下文预算,请缩短问题或调整 model.max_input_chars。")
@@ -323,7 +396,7 @@ class ShovelContextProvider(ContextProvider):
         )
         memory_task = (
             asyncio.create_task(self.runtime.memory.search(request.content, conversation_id=self.identifier))
-            if request.memory_enabled
+            if request.memory_enabled and request.content.strip()
             else None
         )
         search_task = (
@@ -354,8 +427,7 @@ class ShovelContextProvider(ContextProvider):
             if len(working_evidence) + 150 > budget - 500:
                 raise RuntimeFailure("工作记忆超过本轮模型预算,请缩短任务备注或调整模型配置。", status=503)
             budget -= len(working_evidence) + 150
-        if request.memory_enabled:
-            assert memory_task is not None
+        if memory_task is not None:
             memories = memory_task.result()
             memory_budget = min(self.runtime.settings.memory.context_max_chars, budget // 4)
             if compact:
@@ -410,6 +482,8 @@ class ShovelContextProvider(ContextProvider):
             with trace_duration("agent.memory_status.completed"):
                 self.result.warnings.extend(await self.runtime.memory.warnings())
         history: list[Message] = []
+        retained_size = attachment_size
+        media_history_limited = False
         if compact:
             groups: list[list[Message]] = []
             for message in self.history:
@@ -419,19 +493,34 @@ class ShovelContextProvider(ContextProvider):
                     groups[-1].append(message)
             history_budget = min(budget, 4000)
             for group in reversed(groups):
-                used = sum(len(message.text) for message in group)
-                if used > history_budget:
+                size = sum((history_size(message) for message in group), ContextSize())
+                candidate_size = retained_size + size
+                if not candidate_size.fits_media(settings.max_input_images, settings.max_input_image_bytes):
+                    media_history_limited = True
+                    break
+                if size.chars > history_budget:
                     break
                 history.extend(reversed(group))
-                history_budget -= used
-                budget -= used
+                retained_size = candidate_size
+                history_budget -= size.chars
+                budget -= size.chars
         else:
             for message in reversed(self.history):
-                if len(message.text) > budget:
+                size = history_size(message)
+                candidate_size = retained_size + size
+                if not candidate_size.fits_media(settings.max_input_images, settings.max_input_image_bytes):
+                    media_history_limited = True
+                    break
+                if size.chars > budget:
                     break
                 history.append(message)
-                budget -= len(message.text)
+                retained_size = candidate_size
+                budget -= size.chars
+        if media_history_limited:
+            self.result.warnings.append("部分历史消息未纳入本轮上下文,因为图片数量或字节数超过媒体预算。")
         context.extend_messages(self, list(reversed(history)))
+        if request._attachment_contents:
+            context.extend_messages(self, [Message("user", request._attachment_contents)])
         if working_evidence:
             context.extend_messages(
                 self,
@@ -537,7 +626,9 @@ class ShovelContextProvider(ContextProvider):
             warnings=len(self.result.warnings),
         )
         if self.request.memory_enabled:
-            self.result.extract_long_term = not (self.standalone_greeting or self.personal_memory_question)
+            self.result.extract_long_term = bool(self.request.content.strip()) and not (
+                self.standalone_greeting or self.personal_memory_question
+            )
             if not self.result.extract_long_term:
                 trace(
                     "memory.long_term.skipped",
@@ -549,23 +640,27 @@ class ShovelContextProvider(ContextProvider):
 
 class ContextBudgetMiddleware(ChatMiddleware):
     def __init__(
-        self, limit: int, *, provider: str = "", model: str = "", include_tool_schema: bool = False
+        self,
+        limit: int,
+        *,
+        provider: str = "",
+        model: str = "",
+        include_tool_schema: bool = False,
+        max_input_images: int = 5,
+        max_input_image_bytes: int = 10 * 1024 * 1024,
     ) -> None:
         self.limit = limit
         self.provider, self.model = provider, model
         self.include_tool_schema = include_tool_schema
+        self.max_input_images, self.max_input_image_bytes = max_input_images, max_input_image_bytes
 
     async def process(self, context: ChatContext, call_next: Callable[[], Awaitable[None]]) -> None:
         require_ordinary(EgressChannel.MODEL, context.messages)
         started = perf_counter()
         call_id = uuid4().hex
-        message_chars = sum(
-            len(content.text or "")
-            if content.type == "text"
-            else len(json.dumps(content.to_dict(), ensure_ascii=False))
-            for message in context.messages
-            for content in message.contents
-        )
+        measured = content_size(content for message in context.messages for content in message.contents)
+        measured.require_media(self.max_input_images, self.max_input_image_bytes)
+        message_chars = measured.chars
         instructions_chars = len((context.options or {}).get("instructions") or "")
         tools = (context.options or {}).get("tools") or []
         schema_chars, known_tools = (
@@ -885,7 +980,11 @@ class ShovelAgent:
     ) -> AgentResult:
         started = perf_counter()
         await self.load_instructions()
-        profile = await self.profile_response(identifier, request, history, on_event)
+        profile = (
+            await self.profile_response(identifier, request, history, on_event)
+            if not request.attachment_ids
+            else None
+        )
         if profile is not None:
             return profile
         client = self.client()
@@ -949,6 +1048,8 @@ class ShovelAgent:
                     provider=self.runtime.settings.model.model_provider_type.value,
                     model=self.runtime.settings.model.model_name,
                     include_tool_schema=self.runtime.settings.performance.context_profile == "compact",
+                    max_input_images=self.runtime.settings.model.max_input_images,
+                    max_input_image_bytes=self.runtime.settings.model.max_input_image_bytes,
                 ),
                 *(
                     [OllamaEmptyResponseMiddleware(knowledge.result)]

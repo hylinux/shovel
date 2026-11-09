@@ -94,6 +94,9 @@ class ShovelContext:
 
         return profile_dir / "logs"
 
+    def get_default_temp_dir(self) -> Path:
+        return self.get_default_profile_dir() / "tmp"
+
     def get_default_config_file(self) -> Path:
         config_dir = self.get_default_config_dir()
 

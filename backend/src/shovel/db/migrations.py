@@ -469,6 +469,16 @@ def _upgrade(connection: Connection) -> None:
             )
         )
 
+    if 23 not in versions:
+        columns = {row[1] for row in connection.exec_driver_sql("PRAGMA table_info(chat_message)")}
+        if "attachments" not in columns:
+            connection.exec_driver_sql(
+                "ALTER TABLE chat_message ADD COLUMN attachments TEXT NOT NULL DEFAULT '[]'"
+            )
+        connection.execute(
+            insert(SchemaMigration).values(version=23, name="session_attachments", applied_at=now_ts())
+        )
+
 
 async def upgrade_database(engine: AsyncEngine) -> None:
     async with engine.begin() as connection:

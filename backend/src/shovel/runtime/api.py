@@ -5,7 +5,7 @@ from collections.abc import AsyncGenerator, AsyncIterator, Callable
 from contextlib import suppress
 from dataclasses import replace
 from typing import Annotated, Any
-from urllib.parse import urlsplit
+from urllib.parse import quote, urlsplit
 
 import structlog
 from ag_ui.core import BaseEvent, RunAgentInput
@@ -13,7 +13,7 @@ from ag_ui.encoder import EventEncoder
 from anyio import CancelScope
 from fastapi import APIRouter, Depends, FastAPI, Header, Query, Request
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.responses import JSONResponse, Response, StreamingResponse
 from pydantic import SecretStr, ValidationError
 from sqlalchemy import func, select
 from starlette.types import ASGIApp, Receive, Scope, Send
@@ -32,6 +32,7 @@ from shovel.exceptions.resource import (
     ResourceNotFoundError,
     UnknownConnectorError,
 )
+from shovel.protection.domain import ProtectionDeniedError
 from shovel.runtime.agent_instructions import AgentInstructionsView
 from shovel.runtime.diagnostics import DevelopmentRequestLogging, trace
 from shovel.runtime.errors import NotFound, RuntimeFailure
@@ -172,6 +173,7 @@ def message_view(message: ChatMessage) -> dict[str, Any]:
             "created_at",
             "sequence",
             "memory_operation_id",
+            "attachments",
         )
     }
 
@@ -312,6 +314,13 @@ def configure_api(
         return JSONResponse(
             {"error": {"code": type(exc).__name__, "message": exc.message, "hint": exc.hint}},
             status_code=status,
+        )
+
+    @app.exception_handler(ProtectionDeniedError)
+    async def protected_egress_error(_request: Request, _exc: ProtectionDeniedError) -> JSONResponse:
+        return JSONResponse(
+            {"error": {"code": "data_use_denied", "message": "Enterprise data egress denied."}},
+            status_code=403,
         )
 
     @app.exception_handler(RequestValidationError)
@@ -746,6 +755,53 @@ def configure_api(
     @router.post("/conversations/{identifier}/messages")
     async def message(identifier: str, body: MessageInput, rt: RuntimeDependency) -> dict[str, Any]:
         return message_view(await rt.chat.send(identifier, body))
+
+    @router.put("/conversations/{identifier}/attachments/{attachment_id}")
+    async def upload_attachment(
+        identifier: str,
+        attachment_id: str,
+        request: Request,
+        rt: RuntimeDependency,
+        filename: str = Query(min_length=1, max_length=180),
+    ) -> dict[str, Any]:
+        from shovel.runtime.attachments import MAX_FILE_BYTES
+
+        if request.headers.get("content-type", "").split(";", 1)[0].strip() != "application/octet-stream":
+            raise RuntimeFailure("Uploads require application/octet-stream.", status=415)
+        length = request.headers.get("content-length")
+        if length is not None:
+            try:
+                size = int(length)
+            except ValueError as exc:
+                raise RuntimeFailure("Invalid Content-Length.") from exc
+            if size < 0 or size > MAX_FILE_BYTES:
+                raise RuntimeFailure("Attachments are limited to 10 MiB.", status=413)
+        return await rt.attachments.upload(identifier, attachment_id, filename, request.stream())
+
+    @router.get("/conversations/{identifier}/attachments/{attachment_id}")
+    async def download_attachment(
+        identifier: str, attachment_id: str, rt: RuntimeDependency, download: bool = False
+    ) -> Response:
+        row, data = await rt.attachments.get(identifier, attachment_id)
+        disposition = "inline" if row.media_type == "image/jpeg" and not download else "attachment"
+        return Response(
+            data,
+            media_type=row.media_type,
+            headers={
+                "Content-Disposition": f"{disposition}; filename*=UTF-8''{quote(row.name, safe='')}",
+                "X-Content-Type-Options": "nosniff",
+                "Content-Security-Policy": "default-src 'none'; sandbox",
+                "Cache-Control": "no-store",
+            },
+        )
+
+    @router.delete("/conversations/{identifier}/attachments/{attachment_id}")
+    async def delete_attachment(
+        identifier: str, attachment_id: str, rt: RuntimeDependency
+    ) -> dict[str, bool]:
+        async with rt.chat.session_lock(identifier):
+            await rt.attachments.delete(identifier, attachment_id)
+        return {"deleted": True}
 
     @router.get("/conversations/{identifier}/working-memory")
     async def working_memories(identifier: str, rt: RuntimeDependency) -> dict[str, Any]:

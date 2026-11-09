@@ -86,11 +86,33 @@ class ChatMessage(Base):
     state: Mapped[str] = mapped_column(sa.Text, default="completed", nullable=False)
     citations: Mapped[list[dict[str, Any]]] = mapped_column(JSONList, default=list, nullable=False)
     warnings: Mapped[list[str]] = mapped_column(JSONList, default=list, nullable=False)
+    attachments: Mapped[list[dict[str, Any]]] = mapped_column(
+        JSONList, default=list, server_default="[]", nullable=False
+    )
     created_at: Mapped[int] = mapped_column(sa.Integer, default=now_ts, nullable=False)
     sequence: Mapped[int] = mapped_column(sa.Integer, nullable=False)
     memory_operation_id: Mapped[str | None] = mapped_column(sa.Text)
 
     __table_args__ = (sa.UniqueConstraint("conversation_id", "sequence", name="uq_chat_sequence"),)
+
+
+class SessionAttachment(Base):
+    __tablename__ = "session_attachment"
+
+    id: Mapped[str] = mapped_column(sa.Text, primary_key=True)
+    conversation_id: Mapped[str] = mapped_column(
+        sa.ForeignKey("conversation.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    message_id: Mapped[str | None] = mapped_column(
+        sa.ForeignKey("chat_message.id", ondelete="CASCADE"), index=True
+    )
+    name: Mapped[str] = mapped_column(sa.Text, nullable=False)
+    media_type: Mapped[str] = mapped_column(sa.Text, nullable=False)
+    size: Mapped[int] = mapped_column(sa.Integer, nullable=False)
+    digest: Mapped[str] = mapped_column(sa.Text, nullable=False)
+    model_context: Mapped[str] = mapped_column(sa.Text, nullable=False)
+    created_at: Mapped[int] = mapped_column(sa.Integer, default=now_ts, nullable=False)
+    expires_at: Mapped[int] = mapped_column(sa.Integer, nullable=False, index=True)
 
 
 class MemoryEpoch(Base):

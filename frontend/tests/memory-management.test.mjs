@@ -6,6 +6,18 @@ import { renderToStaticMarkup } from "react-dom/server";
 import ts from "typescript";
 import * as model from "../app/memory-model.ts";
 import { translate, localizedDate } from "../app/i18n.ts";
+import * as messageFormat from "../app/message-format.ts";
+import { SessionDrafts } from "../app/session-drafts.ts";
+
+const messageComponents = {
+  "./message-content": { MessageContent: () => null, RichText: () => null },
+  "./composer-tools": { ComposerTools: () => null },
+  "./message-format": messageFormat,
+  "./chat-attachments": {
+    MessageAttachments: () => null, UploadList: () => null,
+    useAttachments: () => ({ uploads: [], completed: [], uploading: false, invalid: false, error: "", clear() {} }),
+  },
+};
 
 const fact = { id: "fact", memory: "我偏好中文", kind: "semantic", scope: "session", session_id: "session/a",
   state: "active", revision: 2, confidence: 0.78, source: "inferred", subject: "user", predicate: "prefers", object: "中文",
@@ -298,7 +310,9 @@ test("Chat refreshes working revisions after settling and extraction candidates 
   const runs = [];
   const task = { ...model.newWorkingTask("task"), revision: 2, goal: "User notes" };
   const { Knowledge } = loadComponent("knowledge.tsx", {
+    ...messageComponents,
     react: {
+      useSyncExternalStore: (_subscribe, getSnapshot) => getSnapshot(),
       useState: initial => {
         const slot = index++;
         if (!(slot in state)) state[slot] = initial;
@@ -320,7 +334,7 @@ test("Chat refreshes working revisions after settling and extraction candidates 
     "./agent-client": { chatTrace() {} },
     "./memory-model": model, "./working-memory": { WorkingMemoryPanel: () => null },
   });
-  const chat = elements(Knowledge({ sessionId: "session/a", status: { model_configured: true, memory_configured: true }, onSessionChanged() {} }))
+  const chat = elements(Knowledge({ sessionId: "session/a", status: { workspace_id: "workspace", model_configured: true, memory_configured: true }, onSessionChanged() {}, drafts: new SessionDrafts() }))
     .find(node => typeof node.type === "function" && node.type.name === "Chat");
   const render = () => { index = 0; return elements(chat.type(chat.props)); };
   let nodes = render();
@@ -359,6 +373,7 @@ test("Unavailable selected working context blocks Chat without dropping identity
     const task = { ...model.newWorkingTask("chosen-task"), revision: 3, goal: "Chosen context" };
     let working = { data: { items: [task] }, loading: false, error: "" };
     const react = {
+      useSyncExternalStore: (_subscribe, getSnapshot) => getSnapshot(),
       useState: initial => {
         const slot = index++;
         const state = current;
@@ -368,6 +383,7 @@ test("Unavailable selected working context blocks Chat without dropping identity
       useRef: () => ({ current: null }), useEffect() {},
     };
     const dependencies = {
+      ...messageComponents,
       react, "./locale-context": { useI18n: () => locale(language) },
       "./api": {
         segment: encodeURIComponent,
@@ -384,7 +400,7 @@ test("Unavailable selected working context blocks Chat without dropping identity
       current = scopes.get(component); index = 0;
       return elements(component(props));
     }
-    const chat = render(Knowledge, { sessionId: "session", status: { model_configured: true, memory_configured: true }, onSessionChanged() {} })
+    const chat = render(Knowledge, { sessionId: "session", status: { workspace_id: "workspace", model_configured: true, memory_configured: true }, onSessionChanged() {}, drafts: new SessionDrafts() })
       .find(node => typeof node.type === "function" && node.type.name === "Chat");
     const nodes = () => render(chat.type, chat.props);
     const panel = () => {

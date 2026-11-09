@@ -85,6 +85,7 @@ def init() -> None:
         (cli_context.get_default_knowledge_dir, "knowledge directory"),
         (cli_context.get_default_memory_dir, "memory directory"),
         (cli_context.get_default_logs_dir, "log directory"),
+        (cli_context.get_default_temp_dir, "temporary attachment directory"),
     ]
 
     for resolve, label in directories:
@@ -117,6 +118,7 @@ def init() -> None:
     # 读取配置: 数据库 URL 与向量库参数都以配置文件为准,
     # 不再各处硬编码 ~/.shovel 下的路径
     settings = load_settings(config_file)
+    _ensure_dir(settings.temp_path.expanduser(), "configured temporary directory")
 
     for name in ("skills", "functions", "pipeline"):
         _ensure_dir(settings.agent.workspace / name, f"Agent {name} directory")

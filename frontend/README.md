@@ -88,6 +88,101 @@ the available scroll width with responsive padding; Shovel has a teal brand avat
 while user messages have a person icon and a shaded background. Pending and streamed
 replies use the same role styling, and source excerpts remain expandable.
 
+### Message formats and attachments
+
+The Markdown composer provides heading, emphasis, list, quote, link, table,
+code, formula and Mermaid insertion tools, plus an **Edit / Preview** switch.
+Its format selector also accepts plain text, JSON, CSV, HTML, LaTeX, Mermaid
+and code directly, wrapping the submitted text in an appropriate fenced block.
+The submitted message, including fences, is limited to 16,000 characters.
+Composer drafts (text, format, preview and attachment identities) stay in
+page memory, isolated by workspace and Session, when switching Sessions or
+visiting Settings. In-flight uploads continue; returning does not upload the
+same file again. Failed/uncertain sends retain their drafts, successful sends
+clear only the unchanged originating draft, and deleting a Session discards
+its draft and cancels outstanding uploads. Expired attachments block sending
+and must be removed/re-attached. Drafts are not written to browser storage;
+reloading or closing the page discards them.
+Both user messages and replies render Markdown/GFM tables, highlighted code and
+LaTeX. **View source / Preview** switches preserve the original message, and
+**Copy source** copies it without copying rendered markup. Streaming replies
+render Markdown incrementally; HTML/CSV/Mermaid block previews wait for completion.
+
+HTML is untrusted content, not an application: inline HTML is allowlist-sanitized;
+fenced HTML previews are sanitized inside sandboxed, opaque-origin frames with
+a restrictive CSP. Scripts, forms, navigation and remote resources are disabled.
+Mermaid uses strict mode, bounded input/edges, no user configuration, HTML,
+image/icon resources or interactive links, sanitized SVG and the same isolated
+frames. Resource syntax is rejected before Mermaid's host-DOM layout as well.
+KaTeX disables trusted
+commands and limits expansion. Invalid or oversized previews report an error or
+show source rather than executing content. CSV cells are text, not formulas.
+CSV previews are limited to 200 rows and 40 columns; messages over 100 KB display
+as source to bound parsing work.
+
+Only explicit HTTP(S) links without embedded credentials are clickable; they
+open a separate tab with no opener or referrer. Review the destination before
+following it. Remote images are not automatically fetched, avoiding tracking and
+unexpected requests. Uploaded images use Session-scoped local URLs, fit within
+message cards and can be opened in a separate tab. Source excerpts remain plain
+text and are not interpreted as message markup.
+
+**Attach files** selects files, and pasting an image from the clipboard uploads
+it immediately. Upload progress/errors are visible and sending waits for all
+selected uploads to succeed; failed uploads can be retried with the same upload
+identity or removed. Each message accepts up to five files of at most 10 MiB
+each. These are temporary attachments, not new indexed resources. Sending
+attachments shares their supported contents with the configured model, which
+may be remote; only upload content you are authorized to share.
+
+Uploads are stored under the backend's `temp_path` (default `~/.shovel/tmp`,
+also created by `shovel init`; override with `SHOVEL_TEMP_PATH`). Database and
+workspace identities select a private namespace; client filenames are never
+storage paths. Uploads remain local until sending. Pending uploads expire after
+24 hours; sending establishes a seven-day expiry, which reusing an attachment
+does not extend. Startup and the existing Runtime worker clean expired files;
+Session deletion removes its files immediately. Expired attachment metadata
+remains in history, but downloading returns 410 and the model receives an
+explicit unavailable marker instead of invented content. Removing an already
+sent file from an editor draft does not delete the history's copy.
+
+Supported uploads are PNG/JPEG/GIF/WebP, UTF-8 text/Markdown/JSON/CSV/TSV/HTML/XML,
+common source/configuration files, and DOCX/PPTX/XLSX. PDF, SVG, executable
+binaries and archives are deliberately not accepted. Images are decoded within
+a 16-million-pixel bound, sanitized, oriented, resized to at most 2048×2048 and
+converted to JPEG; metadata and animation are removed. Previews and downloads
+use those sanitized bytes, not the original image. Text/Office attachments
+contribute up to 8,000 characters per file to model context; they are untrusted
+reference data, not instructions. Image interpretation requires a vision-capable
+model and unsupported vision fails visibly. Attachments are also available in
+retained model history until expiry, subject to existing context limits, but
+are not automatically fed into Memory extraction.
+
+Model input has separate bounded budgets: `model.max_input_chars` continues
+to count text, instructions, serialized references/tool results and image
+metadata, while `model.max_input_images` (default 5) and
+`model.max_input_image_bytes` (default 10 MiB total image-file bytes before base64)
+bound inline images across the current input and retained history. Base64
+transport expansion is not text context. Current images exceeding media limits
+fail explicitly before model transport; older history may be omitted with a
+warning to stay within the remaining budgets. These are safety/admission limits,
+not provider-specific vision token estimates. Unsupported/non-image payloads
+do not bypass the character guard.
+
+Uploads and content preparation have bounded concurrency. Image/Office
+processing and filesystem work run off the Host event loop; slow upload streams
+do not hold the attachment commit lock or Session chat lock. Final quota checks,
+file installation and metadata commit remain serialized, including cancellation
+and Session deletion.
+
+Additional server quotas are twenty pending and one hundred active attachments
+per Session, 100 MiB of stored bytes per Session and 1 GiB per runtime namespace.
+Uploads are streamed with byte limits, validated by type, and support retrying
+the same UUID only with identical contents. Only validated raster images may be
+served inline; other files, including HTML, are forced downloads. Attachment
+access inherits the Host's loopback/same-origin checks and is Session-scoped.
+This is not a malware scanner or an enterprise-governed upload channel.
+
 Every Session uses the full **Agent** with Memory, document retrieval, tools and
 workspace extensions. The composer has no mode selector and sends no
 `interaction_mode` field. Existing permission and approval checks still apply.

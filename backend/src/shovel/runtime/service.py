@@ -208,6 +208,9 @@ class Runtime:
         self.instructions: AgentInstructionsService = AgentInstructionsService(
             settings.agent.workspace, settings.model.max_input_chars
         )
+        from shovel.runtime.attachments import AttachmentService
+
+        self.attachments = AttachmentService(self)
         self.chat: ChatService = ChatService(self)
         self.mcp: MCPConfigurationService = MCPConfigurationService(settings.agent.workspace)
         self.warmup: RuntimeWarmup = RuntimeWarmup(self)
@@ -296,6 +299,7 @@ async def create_runtime(
             await runtime.interactions.refresh()
             await runtime.operations.recover()
             await runtime.chat.recover()
+            await runtime.attachments.cleanup(force=True)
             trace(
                 "runtime.ready",
                 model_configured=settings.model.is_configured,

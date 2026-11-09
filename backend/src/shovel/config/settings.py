@@ -142,6 +142,7 @@ class AppSettings(BaseSettings):
     dev_frontend_port: int = Field(default=3000, ge=1, le=65535)
     http_port: int = 8080
     frontend_path: str = ""
+    temp_path: Path = Field(default_factory=lambda: Path.home() / ".shovel" / "tmp")
     log_level: str = "INFO"
 
     # default_factory: 推迟到实例化时才构造, 避免导入期副作用

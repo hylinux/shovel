@@ -113,6 +113,7 @@ test("AG-UI renders incremental text before the response body and durable run fi
       },
     }), { headers: { "content-type": "text/event-stream", "cache-control": "no-cache, no-transform" } });
   });
+
   t.after(() => { if (!closed) controller?.close(); });
   const run = runAgentMessage("/api/v1/agent", "session", input, new AbortController().signal,
     (text) => { assert.equal(text, "Early text"); firstText(); }, () => {}, "incremental-run").then(() => { finished = true; });
@@ -124,6 +125,21 @@ test("AG-UI renders incremental text before the response body and durable run fi
   controller.close();
   await run;
   assert.equal(finished, true);
+});
+
+test("AG-UI sends image-only messages with attachment references, never binary data or local paths", async (t) => {
+  let captured;
+  t.mock.method(globalThis, "fetch", async (_url, options) => {
+    captured = JSON.parse(options.body);
+    return response(captured);
+  });
+  const ids = ["550e8400-e29b-41d4-a716-446655440000"];
+  await runAgentMessage("/api/v1/agent", "session",
+    { ...input, content: "", attachment_ids: ids },
+    new AbortController().signal, () => {}, () => {});
+  assert.deepEqual(captured.forwardedProps.attachment_ids, ids);
+  assert.equal(captured.messages[0].content, "");
+  assert.equal("attachments" in captured.messages[0], false);
 });
 
 test("AG-UI requests respect cancellation before submission", async (t) => {

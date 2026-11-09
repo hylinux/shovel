@@ -7,6 +7,7 @@ import { runAgentMessage, type AgentMessageInput } from "./agent-client";
 import { mergeSessionHistory } from "./session-history";
 import { startQueryPolling } from "./query-polling";
 import { invalidateReads, sharedRead } from "./read-requests";
+import type { Attachment } from "./chat-attachments";
 
 export type Status = { service: string; workspace_id: string; embedding_configured: boolean; model_configured: boolean; model_name: string; memory_configured: boolean; memory?: { provider: string; index_state: string; pending_index_operations: number; last_error: string | null; review_required?: boolean }; warmup?: Record<string, { state: string; elapsed_ms?: number; error_type?: string }>; chat_capacity?: { limit: number; running: number; waiting: number } };
 export type UnixSeconds = number;
@@ -19,7 +20,7 @@ export type Job = { id: string; resource_id: string; resource_name: string; scan
 export type JobEvent = { id: number; logged_at: UnixSeconds; level: string; stage: string | null; code: string | null; message: string | null; doc_uri?: string | null };
 export type Session = { id: string; title: string; created_at: UnixSeconds; updated_at: UnixSeconds };
 export type Citation = { index?: number; chunk_id: string; resource_id: string; resource_name: string; doc_uri: string; title: string; text: string; score: number; email?: { sender?: string; to?: string; sent_at?: UnixSeconds | null; received_at?: UnixSeconds | null; folder_path?: string } };
-export type Message = { id: string; conversation_id: string; role: "user" | "assistant"; content: string; state: string; citations: Citation[]; warnings: string[]; created_at: UnixSeconds; memory_operation_id?: string | null };
+export type Message = { id: string; conversation_id: string; role: "user" | "assistant"; content: string; state: string; citations: Citation[]; warnings: string[]; attachments?: Attachment[]; created_at: UnixSeconds; memory_operation_id?: string | null };
 export type { Memory, MemoryInput, WorkingMemory } from "./memory-model";
 export type Items<T> = { items: T[] };
 export type Profile = { id: string; name: string; scan_mode: string; is_enabled: boolean; include: string[]; exclude: string[]; max_file_bytes: number; time_window_days: number | null; pipeline: Record<string, unknown> };
@@ -32,7 +33,7 @@ export function errorText(error: unknown): string {
 }
 
 export class ApiError extends Error {
-  constructor(message: string, public readonly status?: number) { super(message); }
+  constructor(message: string, public readonly status?: number, public readonly code?: string) { super(message); }
 }
 
 export async function api<T>(path: string, options: RequestInit = {}): Promise<T> {
@@ -58,7 +59,7 @@ export async function api<T>(path: string, options: RequestInit = {}): Promise<T
     const detail = Array.isArray(body?.detail)
       ? body.detail.map((item: { loc?: string[]; msg?: string }) => `${item.loc?.join(".") || "Input"}: ${item.msg || "Invalid value"}`).join("; ")
       : typeof body?.detail === "string" ? body.detail : null;
-    throw new ApiError([body?.error?.message || detail || `Request failed (${response.status}).`, body?.error?.hint].filter(Boolean).join(" "), response.status);
+    throw new ApiError([body?.error?.message || detail || `Request failed (${response.status}).`, body?.error?.hint].filter(Boolean).join(" "), response.status, typeof body?.error?.code === "string" ? body.error.code : undefined);
   }
   return body as T;
 }

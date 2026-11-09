@@ -2,6 +2,7 @@ import type { Metadata } from "next";
 import type { ReactNode } from "react";
 import "./tailwind.css";
 import "./globals.css";
+import "katex/dist/katex.min.css";
 import { LocaleProvider } from "./locale-context";
 
 export const metadata: Metadata = {

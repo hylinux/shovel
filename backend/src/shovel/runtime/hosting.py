@@ -81,6 +81,7 @@ class RuntimeWorker(BackgroundService):  # type: ignore[misc]  # Framework does 
             try:
                 while not stopping.is_set():
                     runtime.wake.clear()
+                    await runtime.attachments.cleanup()
                     for task in list(scans):
                         if task.done():
                             scans.pop(task)

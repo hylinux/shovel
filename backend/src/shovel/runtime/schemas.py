@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 from typing import Any, Literal
+from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, field_validator, model_validator
 
 from shovel.domain.enums import ScanMode, Sensitivity
 from shovel.memory.working import WorkingMemoryInput as WorkingMemoryInput
@@ -238,7 +239,9 @@ class ConversationInput(InputModel):
 
 
 class MessageInput(InputModel):
-    content: str = Field(min_length=1, max_length=16000)
+    content: str = Field(default="", max_length=16000)
+    attachment_ids: list[str] = Field(default_factory=list, max_length=5)
+    _attachment_contents: list[Any] = PrivateAttr(default_factory=list)
     resource_ids: list[str] = Field(default_factory=list, max_length=200)
     memory_enabled: bool = True
     search_mode: SearchMode = "auto"
@@ -246,6 +249,13 @@ class MessageInput(InputModel):
 
     @model_validator(mode="after")
     def working_requires_memory(self) -> MessageInput:
+        if not self.content.strip() and not self.attachment_ids:
+            raise ValueError("A message needs text or an attachment.")
+        if len(set(self.attachment_ids)) != len(self.attachment_ids):
+            raise ValueError("Attachment IDs must be unique.")
+        for identifier in self.attachment_ids:
+            if str(UUID(identifier)) != identifier:
+                raise ValueError("Attachment IDs must be canonical UUIDs.")
         if self.working_task_id is not None and not self.memory_enabled:
             raise ValueError("使用 Working Memory 的请求必须启用 Memory。")
         return self

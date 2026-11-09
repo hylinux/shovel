@@ -17,6 +17,7 @@ import { Feedback } from "./ui";
 import { ProactiveServices } from "./proactive";
 import { ApprovalCenter, ExecutionActivity } from "./platform-activity";
 import { CapabilityLibrary } from "./capabilities";
+import { SessionDrafts } from "./session-drafts";
 
 const platformViews = ["Proactive Services", "Approval Center", "Activity", "Skills", "Workflows"] as const;
 type View = "Resources" | "Background tasks" | "Search Documents" | "Chat" | typeof platformViews[number] | "Settings";
@@ -52,6 +53,7 @@ const descriptions: Record<View, string> = {
 export default function Home() {
   const { t } = useI18n();
   const [view, setView] = useState<View>("Chat");
+  const [drafts] = useState(() => new SessionDrafts());
   const [visited, setVisited] = useState<Set<string>>(new Set());
   const [sessionsOpen, setSessionsOpen] = useState(true);
   const [selectedSession, setSelectedSession] = useState("");
@@ -128,6 +130,7 @@ export default function Home() {
     }
   }
   function deleteSelectedSession() {
+    if (status.data?.workspace_id) drafts.delete(status.data.workspace_id, currentSession.current);
     persistSession("");
     currentSession.current = "";
     setSelectedSession("");
@@ -165,7 +168,7 @@ export default function Home() {
         {view === "Resources" && <Resources status={status.data} refresh={resources.refresh} onTasks={() => navigate("Background tasks")} />}
         {view === "Background tasks" && <Tasks resources={resources.data?.items || []} />}
         {view === "Search Documents" && <SearchDocuments resources={resources.data?.items || []} status={status.data} />}
-        {view === "Chat" && <><Feedback error={sessionError} retry={retryInitialSession} />{creatingSession && !selectedSession ? <p role="status">{t("Opening session…")}</p> : <Knowledge status={status.data} sessionId={selectedSession} onSessionChanged={refreshSessions} />}</>}
+        {view === "Chat" && <><Feedback error={sessionError} retry={retryInitialSession} />{creatingSession && !selectedSession ? <p role="status">{t("Opening session…")}</p> : <Knowledge status={status.data} sessionId={selectedSession} onSessionChanged={refreshSessions} drafts={drafts} />}</>}
         {view === "Settings" && <Settings status={status.data} sessionId={selectedSession} />}
         {platformViews.filter((item) => visited.has(item)).map((item) => <div key={item} className="platform-view" hidden={view !== item}>
           {item === "Proactive Services" && <ProactiveServices active={view === item} />}

@@ -3,11 +3,13 @@
 import { LanguageSelector, useI18n } from "./locale-context";
 
 import { useRef, useState, type KeyboardEvent } from "react";
-import { type Status } from "./api";
+import { useQuery, type Status } from "./api";
 import { MCPManagement } from "./mcp";
 import { AgentInstructionsManagement } from "./instructions";
 import { MemoryManagement } from "./memories";
 import { UserProfileSettings } from "./user-profile";
+import { RuntimeConfigurationEditor } from "./runtime-configuration";
+import { Feedback } from "./ui";
 
 const warmupNames: Record<string, string> = {
   index: "Knowledge index",
@@ -67,8 +69,10 @@ function LanguageSettings() {
   </section>;
 }
 
-function RuntimeConfiguration({ status }: { status?: Status }) {
+function RuntimeConfiguration({ status: initialStatus }: { status?: Status }) {
   const { t } = useI18n();
+  const monitor = useQuery<Status>("/status", 5000);
+  const status = monitor.data || initialStatus;
   const chatReady = status?.model_configured && status.memory_configured;
   const providers = [
     { name: "Chat model", section: "model", ready: status?.model_configured, value: status?.model_configured ? status.model_name : "Required for chat", description: "Generates replies through the main Agent.", optional: false },
@@ -79,13 +83,15 @@ function RuntimeConfiguration({ status }: { status?: Status }) {
     <section className="settings-card" id="settings-providers" aria-labelledby="settings-providers-heading" tabIndex={-1}>
       <header className="settings-card-header">
         <div><p className="settings-kicker">{t("Models & connections")}</p><h2 id="settings-providers-heading">{t("Runtime configuration")}</h2><p className="muted">{t("Your configured providers and session readiness.")}</p></div>
+        <button type="button" onClick={monitor.refresh}>{t("Refresh runtime status")}</button>
         <span className={`badge ${status ? chatReady ? "good" : "bad" : ""}`}>{status ? chatReady ? t("Configured for chat") : t("Chat setup incomplete") : t("Checking runtime")}</span>
       </header>
+      <Feedback error={monitor.error} retry={monitor.refresh} />
       {status ? <div className="provider-grid">{providers.map((provider) => <article className="provider-card" key={provider.section}>
         <div className="provider-card-heading"><h3>{t(provider.name)}</h3><span className={`badge ${provider.ready ? "good" : provider.optional ? "" : "bad"}`}>{provider.ready ? t("Configured") : provider.optional ? t("Optional") : t("Not configured")}</span></div>
         <code>[{provider.section}]</code><p className="provider-value">{provider.section === "model" && provider.ready ? provider.value : t(provider.value || "")}</p><p className="muted">{t(provider.description)}</p>
       </article>)}</div> : <p className="muted" role="status">{t("Waiting for runtime configuration…")}</p>}
-      <p className="settings-note">{t("To change providers, edit ")}<code>settings.toml</code>{t(" and restart the backend. Model credentials are not shown here.")}</p>
+      <p className="settings-note">{t("These monitors describe the active Host, not unsaved or pending file settings.")}</p>
     </section>
     <section className="settings-card" id="settings-performance" aria-labelledby="settings-performance-heading" tabIndex={-1}>
       <header className="settings-card-header"><div><p className="settings-kicker">{t("Response health")}</p><h2 id="settings-performance-heading">{t("Performance & warmup")}</h2><p className="muted">{t("See what is initialized before your next session.")}</p></div></header>
@@ -97,5 +103,6 @@ function RuntimeConfiguration({ status }: { status?: Status }) {
       </li>)}</ul><p className="muted">{t("Local model warmup uses a synthetic prompt, not session data. Disabled components initialize on demand; ready models may later be unloaded.")}</p></>}
       {!status?.warmup && !status?.chat_capacity && <p className="muted">{status ? t("Performance metrics are not available from this Host.") : t("Waiting for runtime status…")}</p>}
     </section>
+    <RuntimeConfigurationEditor />
   </>;
 }

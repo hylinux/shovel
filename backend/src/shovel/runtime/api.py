@@ -39,6 +39,7 @@ from shovel.runtime.errors import NotFound, RuntimeFailure
 from shovel.runtime.hosting import resolve_runtime
 from shovel.runtime.operation_reads import operation_view
 from shovel.runtime.platform_api import platform_router
+from shovel.runtime.runtime_config import RuntimeConfigApplyInput, RuntimeConfigInput
 from shovel.runtime.schemas import (
     AgentInstructionsInput,
     CleanupInput,
@@ -254,6 +255,27 @@ def configure_api(
         app.add_middleware(DevelopmentRequestLogging)
     app.state.runtime_provider = provider
     router = APIRouter(prefix="/api/v1")
+
+    @router.get("/runtime/configuration")
+    async def runtime_configuration(rt: RuntimeDependency) -> JSONResponse:
+        return JSONResponse(
+            await asyncio.to_thread(rt.configuration.read), headers={"Cache-Control": "no-store"}
+        )
+
+    @router.put("/runtime/configuration")
+    async def save_runtime_configuration(body: RuntimeConfigInput, rt: RuntimeDependency) -> JSONResponse:
+        return JSONResponse(
+            await asyncio.to_thread(rt.configuration.save, body), headers={"Cache-Control": "no-store"}
+        )
+
+    @router.post("/runtime/configuration/check")
+    async def check_runtime_configuration(
+        body: RuntimeConfigApplyInput, rt: RuntimeDependency
+    ) -> JSONResponse:
+        return JSONResponse(
+            await asyncio.to_thread(rt.configuration.check_application, body.revision),
+            headers={"Cache-Control": "no-store"},
+        )
 
     def mcp_response(rt: Runtime, result: dict[str, Any]) -> JSONResponse:
         loaded_revision = rt.chat.agent.extensions.mcp_revision

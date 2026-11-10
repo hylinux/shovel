@@ -343,6 +343,14 @@ progress::-moz-progress-bar { background: var(--accent); }
 .settings-details { margin-top: 16px; color: var(--muted); font-size: 13px; }
 .settings-details summary { color: var(--foreground); }
 .settings-details p { max-width: 80ch; }
+.runtime-config-form { display: grid; gap: 18px; margin-top: 20px; }
+.runtime-config-form fieldset { min-width: 0; border: 0; padding: 0; margin: 0; }
+.runtime-config-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 300px), 1fr)); gap: 18px; padding: 18px 0; }
+.runtime-config-field, .runtime-secret { display: grid; align-content: start; gap: 6px; min-width: 0; }
+.runtime-config-field label { color: var(--foreground); font-weight: 550; }
+.runtime-config-field label code { display: block; color: var(--muted); font-weight: 400; }
+.runtime-config-field code, .runtime-config-field small { overflow-wrap: anywhere; }
+.runtime-config-field input, .runtime-config-field select { width: 100%; min-width: 0; }
 .instructions-editor { display: grid; gap: 14px; margin-top: 20px; }
 .instructions-editor textarea { min-height: 300px; font-family: ui-monospace, "Cascadia Code", Consolas, monospace; font-size: 13px; line-height: 1.65; }
 .instructions-policy { margin-top: 8px; padding: 16px; border: 1px solid var(--border); border-radius: 7px; background: #f8fafb; }

@@ -190,11 +190,17 @@ class AppSettings(BaseSettings):
         data = read_toml_file(path)
         drop_removed_keys(data)
 
+        try:
+            return cls.from_file_data(data)
+        except ValidationError as e:
+            raise ConfigError(format_validation_error(path, e)) from e
+
+    @classmethod
+    def from_file_data(cls, data: dict[str, Any]) -> AppSettings:
+        """Validate file values without applying environment overrides."""
         token = _READ_ENVIRONMENT.set(False)
         try:
             return cls.model_validate(data)
-        except ValidationError as e:
-            raise ConfigError(format_validation_error(path, e)) from e
         finally:
             _READ_ENVIRONMENT.reset(token)
 

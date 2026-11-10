@@ -117,6 +117,41 @@ procedure**.
 
 ## Configuration and models
 
+**Settings → Runtime configuration** retains live provider, capacity and warmup
+monitors and adds a grouped editor for the current user's
+`.shovel\config\settings.toml`. The editor shows file values separately from the
+active process and environment-overridden values. It cannot select another
+configuration file or change `agent.workspace_path`, `database.url`,
+`zvec.knowledge_path` or `memory.index_path`. Other undisplayed settings,
+including the existing `document.root_dir`, are preserved. Saving rewrites
+TOML formatting and comments.
+
+Saves use a content revision and atomic replacement; conflicting edits require
+reloading and merging. Credentials have separate **Keep**, **Replace** and
+**Clear** actions and saved keys are never returned to the browser. Empty Azure
+keys retain non-interactive Azure CLI authentication. Environment variables
+still take precedence, including whole-section JSON overrides.
+
+All settings in this editor deliberately require a **full Host restart**;
+there is no partial hot rebind. Stop Shovel and rerun `shovel run dev` (both
+processes) or `shovel run prd`. Reopen the configured frontend address/port,
+then select **Check application**. Saving, or restarting only the Agent, does
+not apply these settings. The check compares the active process with the file
+plus current environment; it does not restart the Host or test provider
+connectivity. Changed environment overrides remain visibly identified even
+when the active process matches. Listener edits remain loopback-only;
+`agent_port` does not create an independent Agent listener.
+
+The chat editor offers the tested Azure OpenAI, DeepSeek, QianWen and Ollama
+scope independently for Main Agent and Memory LLM. Embedding offers Azure
+OpenAI, QianWen with an explicit embedding endpoint, and Ollama; DeepSeek chat
+support is **not** embedding support. Adapter availability is not live
+provider/model certification. Existing other providers are preserved rather
+than silently replaced. Vector identity/dimension/Memory-collection changes
+are rejected while the corresponding index directory contains files: arrange
+a controlled rebuild outside this editor first, without moving the fixed paths.
+Changing configuration never deletes, migrates or automatically rebuilds data.
+
 Edit the generated settings file for your machine. The
 [complete Ollama example](Documents/settings.example.toml) includes chat,
 knowledge embeddings, independent Memory embeddings, SQLite, Zvec, and

@@ -28,6 +28,18 @@ export type Profile = { id: string; name: string; scan_mode: string; is_enabled:
 export type MessagePage = { items: (Message & { sequence: number })[]; next_before: number | null };
 export type MCPConfiguration = { path: string; content: string; revision: string; exists: boolean; items: { name: string; transport: "stdio" | "http"; enabled: boolean }[]; validation_error: string | null; agent_loaded: boolean; agent_state: "loaded" | "not_loaded" | "restarting" | "restart_failed"; restart_required: boolean };
 export type AgentInstructions = { path: string; content: string; revision: string; exists: boolean; builtin_instructions: string; max_length: number; validation_error: string | null; applied: boolean; agent_state: MCPConfiguration["agent_state"]; restart_required: boolean };
+export type RuntimeConfigValue = string | number | boolean | null;
+export type RuntimeConfigField = {
+  key: string; section: string; type: "string" | "number" | "boolean"; nullable: boolean;
+  choices: RuntimeConfigValue[] | null; minimum: number | null; maximum: number | null;
+  integer: boolean; secret: boolean; value: RuntimeConfigValue; active_value: RuntimeConfigValue;
+  effective_value: RuntimeConfigValue; configured: boolean | null; active_configured: boolean | null;
+  effective_configured: boolean | null; environment: string[]; pending: boolean; readonly: boolean;
+};
+export type RuntimeConfiguration = {
+  path: string; revision: string; items: RuntimeConfigField[]; pending: string[];
+  applied: boolean; editable: boolean; application: "host_restart";
+};
 
 export function errorText(error: unknown): string {
   return error instanceof Error ? error.message : "Something went wrong. Please try again.";

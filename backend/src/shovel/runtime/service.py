@@ -82,9 +82,11 @@ class Runtime:
         from shovel.runtime.operations import OperationService
         from shovel.runtime.performance import RuntimePerformance, RuntimeWarmup
         from shovel.runtime.retrieval import RetrievalService
+        from shovel.runtime.runtime_config import RuntimeConfigurationService
         from shovel.runtime.user_profile import UserProfileService
 
         self.settings = settings
+        self.configuration = RuntimeConfigurationService(settings)
         if installed_host() and settings.agent.enable_python_extensions:
             raise RuntimeError("Trusted WAM Host requires Python extensions to remain disabled.")
         self.sessions = sessions

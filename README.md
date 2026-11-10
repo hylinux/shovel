@@ -152,6 +152,26 @@ are rejected while the corresponding index directory contains files: arrange
 a controlled rebuild outside this editor first, without moving the fixed paths.
 Changing configuration never deletes, migrates or automatically rebuilds data.
 
+Opt-in live acceptance for this editor reuses the selected model configuration
+but isolates SQLite, both vector indexes, temporary files and the workspace.
+It calls the real Main Agent, Memory LLM and both embedders, round-trips every
+editable field, and starts/stops separate real Host processes to verify changed
+ports, preserved Sessions, environment overrides and provider-failure recovery:
+
+```powershell
+$env:SHOVEL_RUN_LIVE_TESTS = "1"
+$env:SHOVEL_LIVE_CONFIG = "C:\path\to\settings.toml"
+$env:SHOVEL_RUNTIME_CONFIG_LIVE_REPORT_DIR = "C:\path\to\acceptance-reports"
+uv run pytest backend\tests\test_runtime_configuration_live.py --no-cov
+```
+
+These tests can incur provider charges and require existing non-interactive
+authentication. They do not change the selected configuration or user stores.
+Build `frontend\out` before running them. Reports omit keys, endpoints, source
+paths and model response bodies. Passing against one configuration does not
+certify other providers or API-key authentication when the selected Azure
+configuration uses CLI authentication.
+
 Edit the generated settings file for your machine. The
 [complete Ollama example](Documents/settings.example.toml) includes chat,
 knowledge embeddings, independent Memory embeddings, SQLite, Zvec, and

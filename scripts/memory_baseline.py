@@ -240,10 +240,16 @@ async def extract_cases(runtime: Runtime, dataset: Dataset) -> tuple[list[dict[s
                 "records": [
                     {
                         "kind": record.kind.value,
+                        "id": record.id,
+                        "revision": record.revision,
+                        "subject": record.subject,
                         "predicate": record.predicate,
                         "object": record.object,
+                        "topic": record.topic,
                         "text": record.text,
                         "occurred_at": record.occurred_at,
+                        "episode_time_source": record.episode_time_source,
+                        "episode_time_precision": record.episode_time_precision,
                     }
                     for record in records
                 ],
@@ -305,12 +311,9 @@ async def recall_cases(
                         "new-evaluation-session",
                         use_index=mode == "hybrid",
                         record_access=False,
+                        diagnostics=diagnostics,
                     )
                     identifiers = [str(item["id"]) for item in items[:top_k]]
-                    diagnostics = {
-                        "returned_items": len(items),
-                        "serialized_chars": len(json.dumps(items, ensure_ascii=False)),
-                    }
                 ranked = [identities.get(identifier, "unmatched") for identifier in identifiers]
                 rows.append(
                     {

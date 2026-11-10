@@ -1,0 +1,40 @@
+{
+  "version": "memory-support-p1-v1",
+  "facts": [
+    {"key": "atlas-db", "text": "The user uses MySQL for project Atlas (also known as Zenith).", "predicate": "uses", "object": "MySQL", "topic": "project.atlas_database"},
+    {"key": "heron-evaluation", "text": "The user completed the offline evaluation for the Heron project.", "kind": "episodic", "object": "Heron", "occurred_on": "2026-08-21"},
+    {"key": "quartz-db", "text": "The user uses SQLite for the Quartz repository.", "predicate": "uses", "object": "SQLite", "topic": "repository.quartz_database"},
+    {"key": "harbor-db", "text": "The user uses PostgreSQL for project Harbor_database.", "predicate": "uses", "object": "PostgreSQL", "topic": "project.harbor_database"},
+    {"key": "chinese-db", "text": "用户在“霁月”项目使用 SQLite 数据库。", "predicate": "uses", "object": "SQLite", "topic": ""},
+    {"key": "inconsistent-db", "text": "The user uses PostgreSQL for project Stratus.", "predicate": "uses", "object": "PostgreSQL", "topic": "project.sirocco_database"}
+  ],
+  "queries": [
+    {"text": "Which database do I use for project Atlas?", "expected": ["atlas-db"]},
+    {"text": "Which database does the Atlas project use?", "expected": ["atlas-db"]},
+    {"text": "Zenith 项目使用什么数据库？", "expected": ["atlas-db"]},
+    {"text": "When did the Heron evaluation finish?", "expected": ["heron-evaluation"]},
+    {"text": "Heron 评估何时完成？", "expected": ["heron-evaluation"]},
+    {"text": "Which database does the Quartz repository use?", "expected": ["quartz-db"]},
+    {"text": "Quartz 仓库使用什么数据库？", "expected": ["quartz-db"]},
+    {"text": "Which database do I use for project Harbor_database?", "expected": ["harbor-db"]},
+    {"text": "“霁月”项目使用什么数据库？", "expected": ["chinese-db"]},
+    {"text": "Which drink do I prefer?", "expected": ["tea"]},
+    {"text": "Which application do I use for personal notes?", "expected": ["notes"]},
+    {"text": "Cedar 项目使用什么数据库？", "expected": ["database"]},
+    {"text": "Cedar 项目的离线评估何时完成？", "expected": ["episode"]},
+    {"text": "Which database does the Junco project use?", "expected": []},
+    {"text": "Which airline do I use for project Atlas?", "expected": []},
+    {"text": "Atlas 项目以前使用什么数据库？", "expected": []},
+    {"text": "Which database don't I use for project Atlas?", "expected": []},
+    {"text": "Atlas 和 Heron 项目分别使用什么数据库？", "expected": []},
+    {"text": "When did the Heron evaluation begin?", "expected": []},
+    {"text": "When did the Junco evaluation finish?", "expected": []},
+    {"text": "Which database do I use for project Harbor?", "expected": []},
+    {"text": "Which database do I use for project Stratus?", "expected": []},
+    {"text": "Which database do I use for project Sirocco?", "expected": []},
+    {"text": "Which database do I use and prefer for project Atlas?", "expected": []},
+    {"text": "What version of the database does project Atlas use?", "expected": []},
+    {"text": "What is my shoe size?", "expected": []},
+    {"text": "When did the Heron evaluation start and finish?", "expected": []}
+  ]
+}

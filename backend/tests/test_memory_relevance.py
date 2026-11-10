@@ -17,12 +17,13 @@ from scripts.memory_support_evaluation import (
 from scripts.memory_support_evaluation import main as support_main
 
 from shovel.memory.domain import MemoryRecord, Provenance
-from shovel.memory.relevance import Query, Support, assess, literal_match
+from shovel.memory.relevance import Query, Support, assess, entities, literal_match
 from shovel.runtime.service import Runtime
 from test_hosted_runtime import api as api
 from test_hosted_runtime import runtime as runtime
 from test_hosted_runtime import settings_at
 from test_memory_baseline import saved
+from test_memory_p0_live import _free_text_answer_correct
 
 
 def record(**values: Any) -> MemoryRecord:
@@ -251,7 +252,137 @@ def test_current_passive_relation_and_product_version_are_not_historical_conditi
     )
 
 
-@pytest.mark.parametrize("filename", ["memory_support_cases.json", "memory_support_p0_cases.json"])
+@pytest.mark.parametrize(
+    "text,topic,query,expected",
+    [
+        (
+            "Uses SQLite for project Meridian.",
+            "project.meridian_database",
+            "project Meridian",
+            Support.SUPPORTED,
+        ),
+        ("Uses SQLite for the Meridian project.", "", "project Meridian", Support.SUPPORTED),
+        (
+            "Uses SQLite for the Meridian repository.",
+            "repository.meridian_database",
+            "the Meridian repository",
+            Support.SUPPORTED,
+        ),
+        (
+            "Uses SQLite for project Meridian_database.",
+            "project.meridian_database",
+            "project Meridian",
+            Support.CONFLICT,
+        ),
+        ("Uses SQLite.", "project.meridian_database", "project Meridian", Support.CONFLICT),
+        ("Uses SQLite for project Meridian.", "project.meridian_custom", "project Meridian", Support.UNKNOWN),
+        ("Uses SQLite for project Meridian.", "project.osprey_database", "project Meridian", Support.UNKNOWN),
+        (
+            "Uses SQLite for project Meridian and project Osprey.",
+            "project.meridian_database",
+            "project Meridian",
+            Support.UNKNOWN,
+        ),
+    ],
+)
+def test_topic_attribute_disambiguation_requires_exact_explicit_entity(
+    text: str, topic: str, query: str, expected: Support
+) -> None:
+    fact = record(text=text, predicate="uses", object="SQLite", topic=topic)
+    assert assess(Query.parse(f"Which database do I use for {query}?"), fact, semantic_match=True) == expected
+
+
+def test_suffix_event_names_do_not_relax_event_direction_or_time_evidence() -> None:
+    fact = record(
+        text="Completed the offline evaluation for the Osprey project.",
+        kind="episodic",
+        object="Osprey",
+        occurred_on="2026-07-14",
+    )
+    assert (
+        assess(Query.parse("When did the Osprey evaluation finish?"), fact, semantic_match=True)
+        == Support.SUPPORTED
+    )
+    assert (
+        assess(Query.parse("When did the Osprey evaluation begin?"), fact, semantic_match=True)
+        == Support.RELATED
+    )
+    assert (
+        assess(
+            Query.parse("When did the Osprey evaluation finish?"),
+            replace(fact, episode_time_source="legacy_unspecified"),
+            semantic_match=True,
+        )
+        == Support.UNKNOWN
+    )
+    assert (
+        assess(Query.parse("When did the Meridian evaluation finish?"), fact, semantic_match=True)
+        == Support.CONFLICT
+    )
+
+
+@pytest.mark.parametrize(
+    "text,expected",
+    [
+        ("the meridian repository", {"repository": {"meridian"}}),
+        ("Meridian team", {"team": {"meridian"}}),
+        ("Meridian client", {"customer": {"meridian"}}),
+        ("Who leads project Meridian?", {"project": {"meridian"}}),
+    ],
+)
+def test_suffix_names_preserve_entity_kind_without_consuming_prefix_names(
+    text: str, expected: dict[str, set[str]]
+) -> None:
+    assert entities(text) == expected
+
+
+def test_topic_language_suffix_requires_explicit_name_without_rewriting_literal_name() -> None:
+    assert entities("Uses Python for project Meridian.", "project.meridian_language") == {
+        "project": {"meridian"}
+    }
+    assert entities("Uses Python.", "project.meridian_language") == {"project": {"meridian_language"}}
+
+
+@pytest.mark.parametrize(
+    "answer,correct",
+    [
+        (
+            "无法确认项目的数据库。提供资料后\uff0c我可以帮你判断它们使用的是 MySQL、SQLite 等哪种数据库。",
+            True,
+        ),
+        ("I don't know. You use SQLite.", False),
+        ("Harbor could refer to several projects; I need a bit more context.", True),
+        ("I can't determine which database you use.", True),
+        ("Harbor could refer to several projects. You use PostgreSQL.", False),
+        ("无法确认。Solstice 项目使用的是 MySQL。", False),
+        ("No recorded fact; the database is PostgreSQL.", False),
+        ("No date is recorded. The evaluation finished on 2026-08-21.", False),
+    ],
+)
+def test_free_text_abstention_scoring_does_not_confuse_conditional_examples_with_claims(
+    answer: str, correct: bool
+) -> None:
+    assert _free_text_answer_correct(answer, None) == correct
+
+
+@pytest.mark.parametrize(
+    "answer,correct",
+    [
+        ("Completed on 2026-08-21.", True),
+        ("Completed on August 21, 2026.", True),
+        ("Completed on 21 August 2026.", True),
+        ("完成于2026年8月21日。", True),
+        ("Completed on August 22, 2026.", False),
+        ("Completed on 2026-08-210.", False),
+    ],
+)
+def test_free_text_event_scoring_accepts_explicit_equivalent_dates(answer: str, correct: bool) -> None:
+    assert _free_text_answer_correct(answer, "2026-08-21") == correct
+
+
+@pytest.mark.parametrize(
+    "filename", ["memory_support_cases.json", "memory_support_p0_cases.json", "memory_support_p1_cases.json"]
+)
 def test_existing_support_cases_keep_all_positive_evidence_and_reject_distractors(filename: str) -> None:
     original = Dataset.model_validate_json(DATASET.read_bytes())
     dataset = SupportDataset.model_validate_json(CASES.with_name(filename).read_bytes())
@@ -414,6 +545,13 @@ def test_answer_scoring_requires_correct_values_and_abstention() -> None:
     assert not answer_correct(
         Answer(status="unknown", answers=["SQLite"]), Question(text="absent", expected=[]), {"db": fact}
     )
+    overlapping = {
+        "first": GoldFact(key="first", text="First", object="first", aliases=["shared"]),
+        "second": GoldFact(key="second", text="Second", object="second", aliases=["shared"]),
+    }
+    question = Question(text="both", expected=["first", "second"])
+    assert not answer_correct(Answer(status="supported", answers=["shared", "wrong"]), question, overlapping)
+    assert answer_correct(Answer(status="supported", answers=["shared", "first"]), question, overlapping)
 
 
 def test_frozen_corpus_refuses_existing_unmarked_directories(tmp_path: Any) -> None:

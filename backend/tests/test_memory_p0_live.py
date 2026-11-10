@@ -4,6 +4,7 @@ import hashlib
 import json
 import os
 import re
+from datetime import date
 from pathlib import Path
 from typing import Any
 
@@ -30,6 +31,39 @@ pytestmark = [
 ]
 
 
+def _free_text_answer_correct(content: str, expected: str | None) -> bool:
+    if expected is not None:
+        if re.fullmatch(r"\d{4}-\d{2}-\d{2}", expected):
+            day = date.fromisoformat(expected)
+            month = day.strftime("%B")
+            return bool(
+                re.search(
+                    rf"\b{expected}\b|\b{month}\s+{day.day},?\s+{day.year}\b"
+                    rf"|\b{day.day}\s+{month}\s+{day.year}\b"
+                    rf"|{day.year}年{day.month}月{day.day}日",
+                    content,
+                    re.I,
+                )
+            )
+        return expected in content
+    return bool(
+        re.search(
+            r"没有|未找到|未记录|无法|不足|未提供|不清楚|不确定"
+            r"|\b(?:no|not|cannot|unknown|unable|insufficient)\b|(?:don|can)['\u2019]t"
+            r"|\bneed\s+(?:a\s+bit\s+)?more\s+context\b|\b(?:can|could)\s+refer\s+to\b",
+            content,
+            re.I,
+        )
+    ) and not re.search(
+        r"(?:\byou\s+(?:use|are\s+using)|\bdatabase\s+is"
+        r"|\b(?:project|repository)(?:\s+[\w.-]+)?\s+uses?"
+        r"|(?:项目|仓库)(?:使用(?:的是|了)?|数据库(?:是|为)))\s*"
+        r"(?:SQLite|MySQL|PostgreSQL)|2026-(?:09-10|08-21)",
+        content,
+        re.I,
+    )
+
+
 @pytest.mark.parametrize(
     "name,prompt,expected",
     [
@@ -46,12 +80,35 @@ pytestmark = [
 async def test_live_p0_free_text_answers_and_actual_memory_context(
     tmp_path: Path, name: str, prompt: str, expected: str | None
 ) -> None:
+    await _live_free_text(tmp_path, "p0", name, prompt, expected)
+
+
+@pytest.mark.parametrize(
+    "name,prompt,expected",
+    [
+        ("topic", "Which database do I use for project Atlas?", "MySQL"),
+        ("suffix", "Which database does the Quartz repository use?", "SQLite"),
+        ("event", "When did the Heron evaluation finish?", "2026-08-21"),
+        ("alias", "Which database do I use for project Zenith?", "MySQL"),
+        ("literal", "Which database do I use for project Harbor_database?", "PostgreSQL"),
+        ("conflict", "Which database do I use for project Stratus?", None),
+        ("literal-prefix", "Which database do I use for project Harbor?", None),
+        ("event-direction", "When did the Heron evaluation begin?", None),
+    ],
+)
+async def test_live_p1_free_text_answers_and_actual_memory_context(
+    tmp_path: Path, name: str, prompt: str, expected: str | None
+) -> None:
+    await _live_free_text(tmp_path, "p1", name, prompt, expected)
+
+
+async def _live_free_text(tmp_path: Path, phase: str, name: str, prompt: str, expected: str | None) -> None:
     config = os.environ.get("SHOVEL_LIVE_CONFIG")
     assert config, "Select an existing settings.toml with SHOVEL_LIVE_CONFIG."
     configured = AppSettings.load(Path(config))
     assert configured.model.is_configured and configured.memory.embedder is not None
     settings = isolated_settings(configured, tmp_path)
-    cases = CASES.with_name("memory_support_p0_cases.json")
+    cases = CASES.with_name(f"memory_support_{phase}_cases.json")
     dataset = SupportDataset.model_validate_json(cases.read_bytes())
     sources = source_fingerprints()
     report: dict[str, Any] = {
@@ -102,31 +159,14 @@ async def test_live_p0_free_text_answers_and_actual_memory_context(
                 "actual_request_support": bool(supported) == (expected is not None),
                 "actual_request_status": memory_payload["memory_status"]
                 == ("supported" if expected is not None else "no_supported_fact"),
-                "answer": (
-                    expected in answer.content
-                    if expected is not None
-                    else bool(
-                        re.search(
-                            r"没有|未找到|未记录|无法|不足|未提供|不清楚|不确定"
-                            r"|\b(?:no|not|cannot|unknown|unable|insufficient)\b|don['\u2019]t",
-                            answer.content,
-                            re.I,
-                        )
-                    )
-                    and not re.search(
-                        r"(?:uses?|using|database\s+is|使用(?:的是|了)?|数据库(?:是|为))\s*SQLite"
-                        r"|2026-09-10",
-                        answer.content,
-                        re.I,
-                    )
-                ),
+                "answer": _free_text_answer_correct(answer.content, expected),
             }
             report["checks"] = checks
             assert source_fingerprints() == sources, "Source changed during live measurement."
             assert all(checks.values()), report
         finally:
-            directory = Path(os.environ.get("SHOVEL_P0_LIVE_REPORT_DIR", str(tmp_path)))
+            directory = Path(os.environ.get(f"SHOVEL_{phase.upper()}_LIVE_REPORT_DIR", str(tmp_path)))
             directory.mkdir(parents=True, exist_ok=True)
-            (directory / f"p0-free-text-{name}.json").write_text(
+            (directory / f"{phase}-free-text-{name}.json").write_text(
                 json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
             )

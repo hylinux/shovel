@@ -15,10 +15,20 @@ from unittest.mock import AsyncMock, patch
 
 import httpx
 from pydantic import BaseModel, ConfigDict
-from scripts.memory_baseline import DATASET, Dataset, GoldFact, baseline_runtime, isolated_settings, seed
+from scripts.memory_baseline import (
+    DATASET,
+    Dataset,
+    GoldFact,
+    baseline_runtime,
+    extract_cases,
+    extraction_metrics,
+    isolated_settings,
+    seed,
+)
 
 from shovel.config.settings import AppSettings
-from shovel.memory.domain import MemoryRecord, MemoryScope, MemoryType, VectorHit
+from shovel.memory.domain import PROFILE_TOPICS, MemoryRecord, MemoryScope, MemoryType, VectorHit
+from shovel.memory.relevance import Query, assess, entities
 from shovel.runtime.schemas import MessageInput
 
 CASES = DATASET.with_name("memory_support_cases.json")
@@ -54,13 +64,13 @@ class Answer(BaseModel):
 def source_fingerprints() -> dict[str, str]:
     files = [
         SOURCE_ROOT / "backend" / "src" / "shovel" / "memory" / name
-        for name in ("service.py", "sqlite_repository.py", "relevance.py")
+        for name in ("service.py", "sqlite_repository.py", "relevance.py", "agent_framework.py", "domain.py")
     ]
     files.extend(
         SOURCE_ROOT / "backend" / "src" / "shovel" / "runtime" / name
-        for name in ("agent.py", "agent_instructions.py")
+        for name in ("agent.py", "agent_instructions.py", "user_profile.py")
     )
-    files.append(Path(__file__))
+    files.extend([Path(__file__), SOURCE_ROOT / "scripts" / "memory_baseline.py"])
     return {
         str(path.relative_to(SOURCE_ROOT)): hashlib.sha256(path.read_bytes()).hexdigest() for path in files
     }
@@ -79,8 +89,19 @@ def answer_correct(answer: Answer, question: Question, facts: dict[str, GoldFact
     return (
         answer.status == "supported"
         and len(answer.answers) == len(expected)
-        and all(any(value.casefold() in accepted for value in answer.answers) for accepted in values)
+        and _match_values([value.casefold() for value in answer.answers], values)
     )
+
+
+def _match_values(answers: list[str], accepted: list[set[str]]) -> bool:
+    if not answers:
+        return not accepted
+    for position, choices in enumerate(accepted):
+        if answers[0] in choices and _match_values(
+            answers[1:], accepted[:position] + accepted[position + 1 :]
+        ):
+            return True
+    return False
 
 
 class FrozenIndex:
@@ -120,7 +141,8 @@ class AnswerTransport(httpx.AsyncBaseTransport):
         self.context = [
             json.loads(message["content"].split("\n", 1)[1])
             for message in body["messages"]
-            if isinstance(message.get("content"), str) and message["content"].startswith("Host")
+            if isinstance(message.get("content"), str)
+            and message["content"].startswith(("Host ", "本轮未受信任的参考数据"))
         ]
         body["tool_choice"] = "none"
         headers = [(key, value) for key, value in request.headers.multi_items() if key != "content-length"]
@@ -147,8 +169,10 @@ def prepare_root(configured: AppSettings, root: Path, *, create: bool) -> AppSet
 
 
 async def evaluate(
-    configured: AppSettings, root: Path, *, create: bool, cases_path: Path = CASES
+    configured: AppSettings, root: Path, *, create: bool, cases_path: Path = CASES, extract: bool = False
 ) -> dict[str, Any]:
+    if extract and not create:
+        raise ValueError("Extraction is only allowed when creating a new frozen corpus.")
     source_hashes = await asyncio.to_thread(source_fingerprints)
     dataset_bytes = await asyncio.to_thread(cases_path.read_bytes)
     original_bytes = await asyncio.to_thread(DATASET.read_bytes)
@@ -171,13 +195,21 @@ async def evaluate(
     async with baseline_runtime(settings) as runtime:
         assert runtime.memory.index is not None
         if create:
-            identities = await seed(runtime, facts)
+            extraction = None
+            if extract:
+                extracted, identities = await extract_cases(runtime, original)
+                extraction = {"metrics": extraction_metrics(extracted), "cases": extracted}
+                identities.update(await seed(runtime, [*original.distractors, *dataset.facts]))
+            else:
+                identities = await seed(runtime, facts)
             await runtime.memory.rebuild()
             snapshot: dict[str, Any] = {
                 "format": "shovel-frozen-memory-v1",
                 "dataset_sha256": dataset_hash,
                 "embedding_model_version": runtime.memory.index.model_version,
                 "identities": identities,
+                "original_facts": "extracted" if extract else "gold",
+                "extraction": extraction,
                 "hits": {
                     question.text: [
                         asdict(hit)
@@ -227,21 +259,59 @@ async def evaluate(
                     [],
                 )
                 answer = Answer.model_validate_json(response.content)
-                ranked = [identities[str(item["id"])] for item in items]
+                ranked = [identities.get(str(item["id"]), "unmatched") for item in items]
+                model_ids = [
+                    str(item["id"])
+                    for payload in transport.context
+                    for item in payload.get("memory", [])
+                    if item.get("answer_support") == "supported"
+                ]
+                keyword_ids = {
+                    item.id
+                    for item in await runtime.memory.repository.keyword(
+                        runtime.memory.owner, question.text, limit=settings.memory.max_items * 4
+                    )
+                }
+                native_hits = {hit["id"]: hit for hit in snapshot["hits"][question.text]}
+                intent = Query.parse(question.text)
                 rows.append(
                     {
                         "query": question.text,
                         "expected": question.expected,
                         "ranked": ranked,
                         "candidate_ranked": [
-                            identities[hit["id"]] for hit in snapshot["hits"][question.text]
+                            identities.get(hit["id"], "unmatched") for hit in snapshot["hits"][question.text]
                         ],
                         "supported_ranked": [
-                            identities[str(item["id"])]
+                            identities.get(str(item["id"]), "unmatched")
                             for item in items
                             if item.get("answer_support") == "supported"
                         ],
                         "diagnostics": diagnostics,
+                        "model_supported_ranked": [identities.get(key, "unmatched") for key in model_ids],
+                        "evidence_trace": [
+                            {
+                                "key": identities.get(record.id, "unmatched"),
+                                "id": record.id,
+                                "revision": record.revision,
+                                "keyword_candidate": record.id in keyword_ids,
+                                "native_similarity": native_hits.get(record.id, {}).get("similarity"),
+                                "support": assess(
+                                    intent, record, semantic_match=record.id in native_hits
+                                ).value,
+                                "query_entities": {
+                                    kind: sorted(names) for kind, names in intent.entities.items()
+                                },
+                                "record_entities": {
+                                    kind: sorted(names)
+                                    for kind, names in entities(record.text, record.topic).items()
+                                },
+                                "topic": record.topic,
+                                "domain_selected": record.id in {str(item["id"]) for item in items},
+                                "model_selected": record.id in model_ids,
+                            }
+                            for record in records
+                        ],
                         "model_memory_context": transport.context,
                         "answer": answer.model_dump(),
                         "answer_correct": answer_correct(answer, question, by_key),
@@ -251,7 +321,10 @@ async def evaluate(
         positive = [row for row in rows if row["expected"]]
         negative = [row for row in rows if not row["expected"]]
         profile_ids = {
-            record.id for record in await runtime.memory.repository.profile(runtime.memory.owner, limit=4)
+            record.id
+            for record in await runtime.memory.repository.profile(
+                runtime.memory.owner, limit=len(PROFILE_TOPICS)
+            )
         }
         profile_keys = {identities[identifier] for identifier in profile_ids}
         supported_count = sum(len(row["supported_ranked"]) for row in rows)
@@ -268,6 +341,8 @@ async def evaluate(
             raise RuntimeError("Evaluation source code changed during measurement.")
         return {
             "dataset_version": dataset.version,
+            "original_facts": snapshot.get("original_facts", "gold"),
+            "extraction": snapshot.get("extraction"),
             "dataset_sha256": dataset_hash,
             "records_sha256": digest,
             "frozen_hits_sha256": hashlib.sha256(
@@ -292,6 +367,17 @@ async def evaluate(
                 )
                 / len(positive),
                 "positive_answer_accuracy": sum(row["answer_correct"] for row in positive) / len(positive),
+                "model_positive_recall_at_5": sum(
+                    len(set(row["expected"]) & set(row["model_supported_ranked"][:5])) / len(row["expected"])
+                    for row in positive
+                )
+                / len(positive),
+                "model_answer_support_precision": (
+                    sum(len(set(row["expected"]) & set(row["model_supported_ranked"])) for row in rows)
+                    / sum(len(row["model_supported_ranked"]) for row in rows)
+                    if any(row["model_supported_ranked"] for row in rows)
+                    else None
+                ),
                 "correct_abstention_rate": sum(row["answer_correct"] for row in negative) / len(negative),
                 "false_abstention_rate": sum(row["answer"]["status"] == "unknown" for row in positive)
                 / len(positive),
@@ -308,12 +394,17 @@ def main() -> None:
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--cases", type=Path, default=CASES)
     parser.add_argument("--create", action="store_true")
+    parser.add_argument("--extract", action="store_true")
     args = parser.parse_args()
     if os.environ.get("SHOVEL_RUN_LIVE_TESTS") != "1":
         parser.error("Set SHOVEL_RUN_LIVE_TESTS=1 to authorize real-provider evaluation.")
     report = asyncio.run(
         evaluate(
-            AppSettings.load(args.config), args.corpus.resolve(), create=args.create, cases_path=args.cases
+            AppSettings.load(args.config),
+            args.corpus.resolve(),
+            create=args.create,
+            cases_path=args.cases,
+            extract=args.extract,
         )
     )
     args.output.parent.mkdir(parents=True, exist_ok=True)

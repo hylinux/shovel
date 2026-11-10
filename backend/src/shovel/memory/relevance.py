@@ -110,6 +110,11 @@ _KINDS = {
     "客户": "customer",
 }
 _ENTITY_KIND = r"projects?|repositories|repository|repos?|teams?|customers?|clients?"
+_SUFFIX_ENTITY = re.compile(
+    rf"(?:\bthe\s+(?P<lower>{_NAME})|(?<![a-z0-9_.-])(?P<capital>(?-i:[A-Z])[a-z0-9_.-]{{0,63}}))"
+    r"\s+(?P<kind>project|repository|repo|team|customer|client)\b",
+    re.IGNORECASE,
+)
 _SEPARATOR = r"(?:,\s*(?:(?:and|or)\s+)?|\s+(?:and|or)\s+|\s*[、和与及]\s*)"
 _NAMES = rf"{_NAME}(?:{_SEPARATOR}{_NAME})+"
 _ENTITY_LIST = re.compile(
@@ -215,6 +220,22 @@ def literal_match(term: str, text: str) -> bool:
     return normalize(term) in normalize(text)
 
 
+def _topic_entities(topic: str, explicit: dict[str, set[str]]) -> dict[str, set[str]]:
+    result: dict[str, set[str]] = {}
+    for kind, value in re.findall(
+        r"(?:^|[.:/])(project|repository|team|customer)[.:/]([a-z0-9_-]+)", topic, re.I
+    ):
+        kind, value = kind.casefold(), value.casefold()
+        names = explicit.get(kind, set())
+        if len(names) == 1:
+            name = next(iter(names))
+            # A topic attribute suffix is not another entity, but only explicit text can disambiguate it.
+            if any(value == f"{name}_{attribute}" for attribute in (*_DOMAINS, "language")):
+                value = name
+        result.setdefault(kind, set()).add(value)
+    return result
+
+
 def entities(text: str, topic: str = "", *, include_aliases: bool = True) -> dict[str, set[str]]:
     result: dict[str, set[str]] = {}
     for match in _ENTITY.finditer(text):
@@ -222,20 +243,23 @@ def entities(text: str, topic: str = "", *, include_aliases: bool = True) -> dic
         value = normalize(match["name"] or match["before"] or match["quoted"]).rstrip(".")
         if value not in _FUNCTION_WORDS:
             result.setdefault(_KINDS.get(kind.casefold(), kind.casefold()), set()).add(value)
+    for match in _SUFFIX_ENTITY.finditer(text):
+        value = normalize(match["lower"] or match["capital"]).rstrip(".")
+        if value not in _FUNCTION_WORDS:
+            kind = match["kind"].casefold()
+            result.setdefault(_KINDS.get(kind, kind), set()).add(value)
     for match in _ENTITY_LIST.finditer(text):
         kind = (match["kind"] or match["suffix"]).casefold()
         names = re.split(_SEPARATOR, match["after"] or match["before"], flags=re.I)
         result.setdefault(_KINDS.get(kind, kind), set()).update(
             normalize(name).rstrip(".") for name in names if normalize(name) not in _FUNCTION_WORDS
         )
-    for kind, value in re.findall(
-        r"(?:^|[.:/])(project|repository|team|customer)[.:/]([a-z0-9_-]+)", topic, re.I
-    ):
-        result.setdefault(kind.casefold(), set()).add(value.casefold())
     for pattern in (_NAMED_EVALUATION, _MIXED_EVALUATION):
         for value in pattern.findall(text):
             if value.casefold() not in _FUNCTION_WORDS:
                 result.setdefault("project", set()).add(value.casefold())
+    for kind, topic_names in _topic_entities(topic, result).items():
+        result.setdefault(kind, set()).update(topic_names)
     if include_aliases and len(result) == 1 and len(next(iter(result.values()))) == 1:
         next(iter(result.values())).update(normalize(alias) for alias in _ALIAS.findall(text))
     return result
@@ -355,7 +379,7 @@ def assess(query: Query, record: MemoryRecord, *, semantic_match: bool) -> Suppo
         return Support.UNKNOWN
     actual_entities = entities(record.text, record.topic)
     text_entities = entities(record.text)
-    topic_entities = entities("", record.topic)
+    topic_entities = _topic_entities(record.topic, entities(record.text, include_aliases=False))
     for kind, requested in query.entities.items():
         actual = actual_entities.get(kind)
         if not actual:

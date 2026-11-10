@@ -14,8 +14,10 @@
 `backend\tests\test_memory_baseline.py`。
 
 另有 `scripts\memory_support_evaluation.py`，在逐字冻结的合成事实和真实向量
-候选上测量支持性准入及真实 Main Agent 回答；它不重新提取事实。
-其范围、运行方法及配对结果见本文最后一节，不与下述提取基线混算。
+候选上测量支持性准入及真实 Main Agent 回答。默认使用金标准事实；
+`--create --extract` 可在首次创建时真实提取原始消息，再冻结记录与候选，
+后续复用不重新提取或 embedding。
+其范围、运行方法及配对结果见下文，不与提取基线混算。
 
 `memory-baseline-v1` 包含 10 条中英文用户消息、8 个金标准事实、
 7 个召回问题和 6 个相近主题的干扰事实。覆盖核心 Profile、饮品偏好、
@@ -368,6 +370,125 @@ Session/Memory，不修改用户配置。评估显式禁止访问计数写入，
 Ruff 检查/格式检查通过；`mypy backend\src scripts\memory_support_evaluation.py
 scripts\memory_baseline.py` 检查 **239 个源文件通过**。显式 opt-in 的
 冻结真实回答评估另行完成，未运行生产认证交互或修改生产数据。
+
+## 2026-11-10 P1：实际提取记录的冻结对照
+
+P0 的新提取结果仍有召回损失。保留两轮隔离 SQLite 记录后，逐条定位到两个
+可复现的实体条件问题，而非索引缺失或相似度不足：
+
+- `the Cedar project` 这类英文后置名称未被识别；可信事件日期存在，仍无法绑定项目。
+- 正文 `project Cedar` 与 topic `project.cedar_database` 被解释成两个项目，
+  即使谓词、对象和实际业务实体相同也会保守拒绝。点分隔的 `.database` 原本可用。
+
+修复只在读取时支持英文后置名称，并在正文明确给出唯一同类实体时，消歧已知
+topic 属性后缀（如 `_database`、`_language`）。后置形式接受大写首字母专名或
+`the <name> project/repository/...`；仍是有界语法，不是通用实体识别。
+没有正文实体、不明后缀、正文/topic 实体矛盾时不猜测；真正的
+`Harbor_database` 不缩成 `Harbor`。没有重写持久记录、ID/revision 或旧版本哈希。
+否定、历史、多实体/关系、事件方向与日期可信度的 P0 限制不变。
+
+### 同记录、同候选、同评估器的真实回答
+
+新增 `memory-support-p1-v1`：27 问，13 正例和 14 个保守拒答问题。
+原始 10 条消息调用实际提取器，8 个事实全部一对一匹配（F1 100%，结构化错误 0）；
+原有干扰项和新增的 6 个诊断事实人工播种。随后冻结完整记录、元数据和真实向量
+候选，不在修复后重新提取或重建向量。本语料用于根因回归，**不是盲测保留集**。
+
+案例文件为 `backend\tests\fixtures\memory_support_p1_cases.json`，与配对报告保持同一版本和字节：
+
+| 案例组 | 数量 | 主要覆盖 |
+|---|---:|---|
+| 正例 | 13 | 英文后置名称、正文约束的属性后缀、显式别名、跨语言、完整下划线名称、原始提取事实 |
+| 保守拒答 | 14 | 未知实体、正文/topic 矛盾、不同关系、否定/历史、多实体/复合关系、错误事件方向 |
+
+离线用 `test_memory_relevance.py` 同时核对旧 18 问、P0 24 问与 P1 27 问；
+正式自由文本测试入口保留在 `test_memory_p0_live.py`，其中新增独立 P1 参数组，
+不更名旧入口或改写旧案例/历史报告。
+
+| 指标 | 修复前 | 修复后 |
+|---|---|---|
+| 原始向量候选 Recall@5 | 100% | 100% |
+| 领域正例 Recall@5 | 38.46%（5/13） | 100%（13/13） |
+| 实际模型请求正例 Recall@5 | 38.46% | 100% |
+| 支持事实精确率：领域 / 实际请求 | 100% / 100% | 100% / 100% |
+| 真实 JSON 回答正确率：正例 | 38.46% | 100% |
+| 正确拒答率 | 100%（14/14） | 100%（14/14） |
+| 正例误拒答率 | 61.54% | 0% |
+| 反例无关非 Profile 上下文率 | 0% | 0% |
+
+阈值仍为 0.55，领域字符预算仍为 2000。配对报告的十个源码指纹中，
+只有 `memory\relevance.py` 不同；提取器、User Profile、上下文服务与评估器未变。
+两报告以下哈希逐字相等：
+
+| 冻结对象 | SHA256 |
+|---|---|
+| 原始消息 + P1 案例字节 | `70a1b255ad20f4079d6d362b8bfcc0cd8317148a29c330362249bef5e9a2fd8f` |
+| 完整记录与元数据 | `22c2fbdd1260731bd6fa0c2fcec883882010488e21362197f5749c2f095b419e` |
+| 原生候选列表 | `a3a0db6d9d4190ecd6f444ca353f35f4463863af7067c3bab92b390fcdf7335b` |
+
+报告保存每条事实的 ID/revision、keyword 候选、native 相似度、实体解析、
+独立支持性标签、领域选择、实际请求选择与最终答案。提取基线另外保留正文、
+topic、三元组、事件来源/精度及领域诊断计数，以区分提取、门槛、支持性和预算损失。
+JSON 评分改为对象/别名的一对一匹配，避免一个共享别名重复满足不同目标。
+
+本地配对报告为 `.tools\memory-support-p1-before-20261110.json`、
+`.tools\memory-support-p1-after-20261110-final.json`；冻结语料目录为
+`.tools\memory-support-p1-20261110-corpus`，报告不包含用户生产存储或配置内容。
+
+新环境复现时首次显式创建隔离语料，之后删除 `--create --extract` 复用：
+
+```powershell
+$env:SHOVEL_RUN_LIVE_TESTS = "1"
+uv run --locked python -m scripts.memory_support_evaluation `
+  --config "C:\path\to\settings.toml" `
+  --cases "backend\tests\fixtures\memory_support_p1_cases.json" `
+  --corpus ".tools\memory-support-p1-corpus" `
+  --output ".tools\memory-support-p1.json" --create --extract
+```
+
+新提取措辞与元数据可变，新创建的语料哈希不保证等于上述已有报告；应比较自己
+同一冻结语料上的前后结果。`--extract` 只允许首次创建，不能对已冻结语料补提取。
+本对照使用真实 `gpt-5.2-chat` 回答和 1024 维 `text-embedding-3-large` 候选；
+不是流式 AG-UI、真实业务收益或企业生产验收。
+
+### 当前版本回归与重新提取
+
+在最终实现上复用 P0 的同一 24 问冻结语料，正例领域/请求召回、真实回答正确率、
+支持精确率及正确拒答均为 100%，误拒答与无关上下文为 0。
+报告：`.tools\memory-support-p1-p0-regression-20261110-final.json`。
+初次服务端返回 HTTP 500，测量直接失败，没有当作拒答或质量通过；随后完整重跑。
+
+新提取的原始基线另跑两轮：每轮 8/8 事实匹配，提取 F1 100%、负例误提取率 0、
+结构化错误 0。金标准与实际提取语料的 Hybrid Recall@5 **两轮均为 100%**；
+阈值后的纯向量 Recall@5 仍分别为 35.71% / 50%，说明关键词/实体通道仍有作用，
+并非所有通道都满分。报告：`.tools\memory-p1-extraction-20261110-final.json`。
+P0 的 85.71% / 71.43% 保留为历史；两批重新提取不是冻结措辞的因果对照，
+应以上述同记录、同候选的 P1 实验归因，而非把新提取差值全部归因于规则。
+
+当前版本的 4 个 Profile live 测试通过，覆盖 Memory 开/关下的
+设置、更新、重启、清空和不可信 bio；报告位于
+`.tools\memory-p1-profile-20261110-final`。它们不代替 P2 的全部跨组件组合验收。
+
+自由文本采用正式 ChatService、真实向量与实际请求捕获，不强制 JSON。
+评分接受等价的明确英文/中文事件日期，以及明确拒答或澄清；条件性举例不等于
+断言用户事实。保留了初期失败报告：分别暴露示例数据库被误判为断言、
+`August 21, 2026` 与 ISO 同日期被误判，以及澄清请求未被识别的问题，
+均补上离线评分回归，而非把它们算作 Memory 召回失败。
+此有限规则仍需人工核对，不是通用蕴含评分器；一般知识建议的正确性、
+所有措辞的幻觉率和 AG-UI 流式持久交付不在本轮质量声明中。
+
+最终 **16 个自由文本用例通过**（8 P0 + 8 P1），报告分别位于
+`.tools\memory-p1-p0-freetext-20261110-complete`、
+`.tools\memory-p1-freetext-20261110-complete`。逐份核对实际请求、检查结果、
+源码与测试文件哈希；加上单独已通过的 4 个 Profile 和 1 个两轮提取测试，
+本轮共有 21 个不同 live 用例通过，不重复累加重跑。
+
+实现期间 Memory/Profile/Working/后台任务/Host/指令组合回归
+310 passed、21 live skipped；最终解析与评估定向回归 99 passed、1 live skipped，
+两者重叠，不相加。最终变更文件 Ruff 检查/格式检查通过，
+`mypy backend\src scripts\memory_baseline.py scripts\memory_support_evaluation.py`
+检查 242 个源文件通过；`uv lock --check`、`uv pip check` 通过。
+配置文件运行前后哈希不变，生产存储未参与测量。
 
 ## 2026-11-10 P0 真实模型补验
 

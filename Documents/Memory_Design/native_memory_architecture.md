@@ -9,6 +9,8 @@
 同日 P1 定位并修复英文后置名称与 topic 属性后缀歧义，补充实际提取后的
 冻结对照和请求级证据，见 [P1 基线结果](memory_baseline.md#2026-11-10-p1实际提取记录的冻结对照)。
 固定语料与重新提取的端到端召回结果不同，不把历史模型分数当作新版质量保证。
+P2 补充跨组件生命周期组合与有界开发诊断，验证索引滞后、迟到提取及
+受管资料更新/清空不会恢复旧事实，见 [P2 基线结果](memory_baseline.md#2026-11-10-p2生命周期组合与分阶段诊断)。
 本文不把架构设想、数据库预留模型或模型自身的能力当作已实现功能。
 “原生记忆”指 Shovel 自己实现的提取、整理、持久化、召回和生命周期管理，
 不是模型权重训练，也不是把聊天记录整体保存到向量库。
@@ -819,6 +821,25 @@ assistant 标记 completed
 显式重试还检查 Scope、generation、源消息是否仍存在。
 对旧的失败提取，若数据库中已有较新的成功提取，当前实现保守拒绝重放，
 防止旧断言再次覆盖较新事实；该检查并非精细到每个 topic 的因果重放系统。
+
+### 13.5 有界分阶段诊断
+
+以下 `trace` 仅在 `development_logging()` 范围内启用，不新增持久诊断库、
+HTTP 接口或运行权限；原有索引故障 warning/error 仍保留安全的异常类型。
+
+| 事件 | 判断用途与字段边界 |
+|---|---|
+| `memory.extraction.committed` | `source_eligible`、`proposed_candidates`、`admitted_candidates`、`committed_records`、`pending_review` 区分源过滤、模型提议、本地准入与提交。提交数是返回记录数，可能包含幂等复用，不等于新插入数 |
+| `memory.index.completed` | `attempted`、`upserted`、`deleted`、`failed`、`pending_batch`、`expired` 及耗时；只有 sink 成功且 Outbox 已确认才计成功。`pending_batch` 是一次有界查询的数量，不保证是总积压 |
+| `memory.index.failed` | 初始化/维护无法完成时仅记异常类型；不是成功回执 |
+| `memory.recall.completed` | 复用领域层阈值、无效向量、支持性及预算计数，另带 `vector_enabled`、`vector_fallback`。索引失败后的关键词降级也输出完成事件；没有配置索引不等于发生故障降级 |
+| `agent.context.ready` | `recalled_memories` 与 `memory_budget_skipped` 区分领域召回和最终 Agent 预算；`memories`/`memory_status` 仍表示实际保留的上下文 |
+| `memory.operation.completed` | 使用数据库实际状态及尝试次数；可重试失败显示 `queued`，耗尽重试才显示 `failed`，已原子提交的回执优先 |
+
+索引没有待处理项/过期项时不反复输出成功事件。
+诊断只含固定事件、ID、枚举、数量和时间，不包含事实、消息、文档正文、路径或凭据。
+这些阶段不能互相代替：回答已提交不等于提取已完成，提取成功不等于索引已确认，
+领域召回有事实不等于最终请求保留事实，模型开始生成也不等于 AG-UI 已确认持久回答。
 
 ## 14. Outbox 与向量最终一致性
 

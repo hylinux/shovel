@@ -597,3 +597,80 @@ try {
 `mypy backend\src scripts\memory_baseline.py scripts\memory_support_evaluation.py`
 检查 **242 个源文件通过**。另按每个报告逐项验证实际模型请求中的 supported ID
 恰好等于 gold、状态正确，并核对当前源码/测试哈希，没有以仅看汇总分数代替核验。
+
+## 2026-11-10 P2：生命周期组合与分阶段诊断
+
+本轮不是另一套固定问答 Recall 分数，而是通过正式 REST/ChatService、
+后台 Operation、SQLite 与原生 Zvec 验证跨组件生命周期。
+入口为 `backend\tests\test_memory_lifecycle.py`，版本 `memory-lifecycle-p2-v1`；
+离线与 live 共用流程，live 使用显式选择的现有配置及隔离数据库/工作区/索引，
+不更改生产配置或存储。
+
+### 组合案例与判定
+
+| 组合 | 必须观察到的事实 |
+|---|---|
+| 回答提交 → 提取 → 跨 Session | 回答完成时提取回执仍 queued，尚无事实；提取成功后先有 SQLite/Outbox，刷新后新 Session 的真实请求与回答使用 green tea |
+| 提取/更正中断状态 → 完整重开 | 持久 Operation 置 running 后关闭 Runtime，重新打开同一隔离存储；原回执恢复排队并成功，不另建任务身份 |
+| 显式更正 → 索引滞后 → 召回 | green tea 被 mint tea 替代；旧向量确实仍存在时，只允许当前事实进入请求，维护后旧向量删除 |
+| 遗忘 → 迟到模型结果 → 重开 | jasmine tea 的实际提取完成后暂停提交；遗忘使在途任务取消。释放迟到结果后不提交新事实，旧 mint tea 向量仍存在时回答必须无支持，刷新/重开后仍不恢复 |
+| 设置资料更新/清空 × 审核 | 原姓名 Juniper 已索引；聊天提取暂停后改为 Cypress 或清空。受管姓名不能被聊天恢复，普通 green tea 按自动/待审核规则提交；审核、重开及重复同步后保持一致 |
+| 召回后问题再次提取 | 每次新 Session 问题的后台回执必须成功且提交零条事实，不能把参考材料转成新的自述事实 |
+
+Profile 有四项离线组合（更新/清空 × 自动激活/待审核）；
+live 执行两项待审核组合，加完整生命周期一项，共 **3 项真实模型测试**。
+使用配置中的 `gpt-5.2-chat`（回答和提取）、`text-embedding-3-large`（1024 维）。
+阈值 `0.55`、领域预算 `2000`、权限、来源/Scope 与受管资料所有权不变。
+真实回答经过有限自由文本值/拒答检查，另检查实际发送的 Memory/General Profile
+参考数据、supported 条目、状态、事实修订及原生向量 ID，不只检查模型文本。
+
+### 诊断与离线回归
+
+新增诊断回归区分提议/准入/提交、索引失败保留 Outbox、关键词降级、
+支持性未知、领域预算和最终 Agent 预算裁剪；重试日志分别验证
+`queued`、`queued`、`failed`，并检查正文、秘密样例和临时路径不泄露。
+事件/字段定义见 [架构 13.5](native_memory_architecture.md#135-有界分阶段诊断)。
+不改变召回、重试、审批或持久化语义，不新增 Schema 或学习来源。
+
+跨 Memory、支持性、Profile、Working、基线、Agent instructions、Host 和开发诊断
+的离线回归 **352 passed、4 live skipped**；三个 P2 live 已另行执行通过。
+强化“原生旧向量实际存在”的前置断言后，定向离线 **7 passed、3 live skipped**，
+并重新执行三项 live。Ruff 检查/格式检查与 mypy 的 242 个源文件检查通过；
+`uv lock --check`、`uv pip check` 通过。
+
+### 复现与报告
+
+```powershell
+uv run --locked pytest backend\tests\test_memory_lifecycle.py `
+  backend\tests\test_memory_tasks.py --no-cov
+$env:SHOVEL_RUN_LIVE_TESTS = "1"
+$env:SHOVEL_LIVE_CONFIG = "C:\path\to\settings.toml"
+$env:SHOVEL_P2_LIVE_REPORT_DIR = ".tools\memory-p2-live-local"
+try {
+  uv run --locked pytest backend\tests\test_memory_lifecycle.py -m live --no-cov
+} finally {
+  Remove-Item Env:\SHOVEL_RUN_LIVE_TESTS
+  Remove-Item Env:\SHOVEL_LIVE_CONFIG
+  Remove-Item Env:\SHOVEL_P2_LIVE_REPORT_DIR
+}
+```
+
+最终报告在 `.tools\memory-p2-live-20261110-verified\`：
+`memory-p2-lifecycle.json`、
+`memory-p2-profile-clear-False-review-True.json`、
+`memory-p2-profile-clear-True-review-True.json`。
+保存 suite/model/非敏感 Memory 配置、源码与测试 SHA-256、阶段状态、
+实际参考数据与回答；仅完整通过时 `complete=true`，失败仍保存已采集阶段。
+初轮 `.tools\memory-p2-live-20261110\` 的三项通过报告独立保留，
+不把测试强化前的哈希写成最终版本。报告只含合成材料，不提交个人配置或生产数据。
+
+### 证据边界
+
+中断恢复通过确定性设置持久 running 状态、释放完整 Runtime/原生句柄后重开实现，
+不是杀进程、断电或底层文件系统崩溃测试。迟到竞态是实际模型提取完成后、
+提交前的门控调度，不穷尽所有并发交错。
+live 走非流式 ChatService，不宣称覆盖 AG-UI 丢流/重连；
+模型回答正确不能替代 HTTP/流持久确认。
+本轮没有重新测量 P0/P1 全部质量分数，没有独立质量盲测、
+长期摘要漂移、真实任务收益/成本对照或企业生产验收；
+P3 经历来源和自动程序性学习仍未实现。

@@ -151,19 +151,28 @@ class MemoryService:
     async def search(self, query: str, *, conversation_id: str = "") -> list[dict[str, Any]]:
         require_ordinary(EgressChannel.PROCESS, query)
         started = perf_counter()
+        diagnostics: dict[str, int] = {}
+        fallback = False
         try:
-            result = await self.application.retrieve(query, conversation_id)
+            result = await self.application.retrieve(query, conversation_id, diagnostics=diagnostics)
             self._index_error = None
-            trace(
-                "memory.recall.completed",
-                count=len(result),
-                elapsed_ms=round((perf_counter() - started) * 1000, 2),
-            )
-            return result
         except _INDEX_ERRORS as exc:
             self._index_error = type(exc).__name__
             self._log.warning("memory.retrieval.unavailable", error_type=self._index_error)
-            return await self.application.retrieve(query, conversation_id, use_index=False)
+            fallback = True
+            diagnostics.clear()
+            result = await self.application.retrieve(
+                query, conversation_id, use_index=False, diagnostics=diagnostics
+            )
+        trace(
+            "memory.recall.completed",
+            count=len(result),
+            vector_enabled=self.application.index is not None,
+            vector_fallback=fallback,
+            elapsed_ms=round((perf_counter() - started) * 1000, 2),
+            **diagnostics,
+        )
+        return result
 
     async def list(
         self,
@@ -243,6 +252,8 @@ class MemoryService:
         conversation_id: str,
     ) -> None:
         self._active = asyncio.current_task()
+        started = perf_counter()
+        diagnostics: dict[str, int] = {}
         try:
             try:
                 related = await self.application.related(source)
@@ -256,6 +267,7 @@ class MemoryService:
                 operation_id=operation_id,
                 generation=generation,
                 related=related,
+                diagnostics=diagnostics,
             )
             trace(
                 "memory.extraction.committed",
@@ -263,6 +275,8 @@ class MemoryService:
                 count=len(saved),
                 semantic_count=sum(item.kind.value == "semantic" for item in saved),
                 episodic_count=sum(item.kind.value == "episodic" for item in saved),
+                elapsed_ms=round((perf_counter() - started) * 1000, 2),
+                **diagnostics,
             )
         finally:
             self._active = None
@@ -272,6 +286,7 @@ class MemoryService:
             await self.index.embedder.embed(["Shovel memory warmup"])
 
     async def maintain(self) -> bool:
+        started = perf_counter()
         expired = await self.repository.expire_due(self.owner)
         expired += await self.working.expire_due()
         if self.index is None:
@@ -280,6 +295,7 @@ class MemoryService:
             try:
                 await self.index.initialize()
                 intents = await self.repository.pending(self.owner)
+                upserted = deleted = failed = 0
                 for intent in intents:
                     try:
                         # Index maintenance may cover all agents in this owned workspace partition.
@@ -296,28 +312,46 @@ class MemoryService:
                                 )
                                 else None
                             )
-                        if (
+                        upsert = (
                             intent.action == "upsert"
                             and item is not None
                             and item.revision == intent.revision
                             and item.state == MemoryState.ACTIVE
                             and (item.expires_at is None or item.expires_at > now_ts())
-                        ):
+                        )
+                        if upsert:
+                            assert item is not None
                             await self.index.upsert(item)
                         else:
                             await self.index.delete(intent.memory_id, intent.kind, intent.revision)
                         await self.repository.acknowledge(intent, self.index.model_version)
+                        upserted += int(upsert)
+                        deleted += int(not upsert)
                     except _INDEX_ERRORS as exc:
                         self._index_error = type(exc).__name__
                         await self.repository.fail(intent, self._index_error)
                         self._log.warning("memory.index.retry", error_type=self._index_error)
-                if not await self.repository.pending(self.owner, force=True):
+                        failed += 1
+                remaining = await self.repository.pending(self.owner, force=True)
+                if not remaining:
                     await self.index.finish_rebuild()
                     self._index_error = None
+                if intents or expired:
+                    trace(
+                        "memory.index.completed",
+                        attempted=len(intents),
+                        upserted=upserted,
+                        deleted=deleted,
+                        failed=failed,
+                        pending_batch=len(remaining),
+                        expired=expired,
+                        elapsed_ms=round((perf_counter() - started) * 1000, 2),
+                    )
                 return bool(intents)
             except _INDEX_ERRORS as exc:
                 self._index_error = type(exc).__name__
                 self._log.error("memory.index.unavailable", error_type=self._index_error)
+                trace("memory.index.failed", error_type=self._index_error)
                 return False
 
     async def rebuild(self) -> None:

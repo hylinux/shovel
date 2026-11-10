@@ -11,6 +11,7 @@ from shovel.db.model.memory import MemoryBelief, SessionSummary
 from shovel.db.model.runtime import ChatMessage, Conversation, Operation
 from shovel.memory.domain import MemoryCandidate
 from shovel.runtime.agent import AgentResult
+from shovel.runtime.diagnostics import development_logging
 from shovel.runtime.schemas import MessageInput
 from shovel.runtime.service import Runtime
 from test_hosted_runtime import api as api
@@ -161,24 +162,31 @@ async def test_restart_recovers_uncommitted_native_extraction(
 
 
 async def test_extraction_failure_retries_without_lying_about_success(
-    runtime: Runtime, monkeypatch: pytest.MonkeyPatch
+    runtime: Runtime, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     async def invalid(_text: str) -> list[MemoryCandidate]:
         raise ValueError("private-invalid-json")
 
     monkeypatch.setattr(runtime.memory.extractor, "extract", invalid)
     identifier = await enqueue(runtime)
-    for _ in range(3):
-        async with runtime.sessions() as session:
-            operation = await session.get(Operation, identifier)
-            assert operation is not None
-            operation.result = {}
-            await session.commit()
-        assert await runtime.memory_tasks.run_once()
+    with development_logging():
+        for _ in range(3):
+            async with runtime.sessions() as session:
+                operation = await session.get(Operation, identifier)
+                assert operation is not None
+                operation.result = {}
+                await session.commit()
+            assert await runtime.memory_tasks.run_once()
     operation = await runtime.operations.get(identifier)
     assert operation.state == "failed" and operation.attempts == 3
     assert "private-invalid-json" not in (operation.error or "")
     assert await runtime.memory.list() == []
+    output = capsys.readouterr().out
+    events = [line for line in output.splitlines() if "memory.operation.completed" in line]
+    assert len(events) == 3
+    assert all("state=queued" in line for line in events[:2])
+    assert "state=failed" in events[-1] and "attempts=3" in events[-1]
+    assert "private-invalid-json" not in output and "green tea" not in output
 
 
 async def test_forget_does_not_invalidate_other_workspace_tasks(runtime: Runtime) -> None:

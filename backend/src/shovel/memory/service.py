@@ -116,14 +116,16 @@ class MemoryService:
         operation_id: str | None = None,
         generation: int | None = None,
         related: Sequence[MemoryRecord] = (),
+        diagnostics: dict[str, int] | None = None,
     ) -> list[MemoryRecord]:
+        eligible = eligible_source(source)
         candidates = (
             (
                 await self.extractor.extract(source, related)
                 if related
                 else await self.extractor.extract(source)
             )
-            if eligible_source(source)
+            if eligible
             else []
         )
         accepted = []
@@ -187,7 +189,7 @@ class MemoryService:
             for c in accepted
         ):
             raise ValueError("Extractor returned an unsupported predicate.")
-        return await self.repository.consolidate(
+        saved = await self.repository.consolidate(
             self.scope,
             accepted,
             provenance,
@@ -195,6 +197,15 @@ class MemoryService:
             generation=generation,
             review_required=self.review_required,
         )
+        if diagnostics is not None:
+            diagnostics.update(
+                source_eligible=int(eligible),
+                proposed_candidates=len(candidates),
+                admitted_candidates=len(accepted),
+                committed_records=len(saved),
+                pending_review=sum(record.state == MemoryState.CANDIDATE for record in saved),
+            )
+        return saved
 
     async def related(self, source: str) -> list[MemoryRecord]:
         if self.index is None or not eligible_source(source):

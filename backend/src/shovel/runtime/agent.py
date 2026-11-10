@@ -384,6 +384,7 @@ class ShovelContextProvider(ContextProvider):
         if budget < 500:
             raise RuntimeFailure("问题超过此模型的上下文预算,请缩短问题或调整 model.max_input_chars。")
         memory_context: list[dict[str, Any]] = []
+        recalled_memories = 0
         compact = self.runtime.settings.performance.context_profile == "compact"
         tool_chars = 0
         if compact:
@@ -441,6 +442,7 @@ class ShovelContextProvider(ContextProvider):
             budget -= len(working_evidence) + 150
         if memory_task is not None:
             memories = memory_task.result()
+            recalled_memories = len(memories)
             memory_budget = min(self.runtime.settings.memory.context_max_chars, budget // 4)
             if compact:
                 memory_budget = min(memory_budget, 1000)
@@ -595,6 +597,8 @@ class ShovelContextProvider(ContextProvider):
             history_messages=len(history),
             sources=len(self.result.sources),
             memories=len(memory_context),
+            recalled_memories=recalled_memories,
+            memory_budget_skipped=recalled_memories - len(memory_context),
             remaining_chars=budget,
             elapsed_ms=round((perf_counter() - started) * 1000, 2),
             instructions_chars=len(self.instructions),

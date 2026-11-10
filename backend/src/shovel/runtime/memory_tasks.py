@@ -268,22 +268,29 @@ class MemoryTaskService:
             finally:
                 self._active = None
             with CancelScope(shield=True):
-                await self._finish(operation.id, state, error)
-            trace("memory.operation.completed", operation_id=operation.id, state=state)
+                state = await self._finish(operation.id, state, error)
+            trace(
+                "memory.operation.completed",
+                operation_id=operation.id,
+                kind=operation.kind,
+                state=state,
+                attempts=operation.attempts,
+            )
             if cancelled:
                 raise asyncio.CancelledError
             return True
 
-    async def _finish(self, identifier: str, state: str, error: str | None) -> None:
+    async def _finish(self, identifier: str, state: str, error: str | None) -> str:
         async with self.runtime.sessions() as session:
             row = await session.get(Operation, identifier)
             assert row is not None
             # Extraction/consolidation may already have committed the receipt with the facts.
             if row.state != "running":
-                return
+                return row.state
             if state == "failed" and row.attempts < 3:
                 state = "queued"
                 row.result = {"retry_at": now_ts() + 2**row.attempts}
             row.state, row.error = state, error
             row.finished_at = None if state == "queued" else now_ts()
             await session.commit()
+            return state

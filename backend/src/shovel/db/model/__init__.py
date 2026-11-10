@@ -36,6 +36,7 @@ from .knowledge import (
 from .memory import (
     MemoryBelief,
     MemoryEpisode,
+    MemoryExperience,
     MemoryLink,
     MemoryProcedure,
     MemoryRevision,
@@ -99,6 +100,7 @@ __all__ = [
     "MemoryBelief",
     "MemoryEpisode",
     "MemoryEpoch",
+    "MemoryExperience",
     "MemoryLink",
     "MemoryProcedure",
     "MemoryRevision",

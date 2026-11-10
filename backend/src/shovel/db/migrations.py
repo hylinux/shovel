@@ -485,6 +485,14 @@ def _upgrade(connection: Connection) -> None:
             insert(SchemaMigration).values(version=24, name="user_profile", applied_at=now_ts())
         )
 
+    if 25 not in versions:
+        Base.metadata.create_all(connection, tables=[Base.metadata.tables["memory_experience"]])
+        connection.execute(
+            insert(SchemaMigration).values(
+                version=25, name="reviewed_experience_candidates", applied_at=now_ts()
+            )
+        )
+
 
 async def upgrade_database(engine: AsyncEngine) -> None:
     async with engine.begin() as connection:

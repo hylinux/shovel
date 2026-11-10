@@ -8,6 +8,11 @@ from shovel.domain.safe_data import ensure_no_credentials
 from shovel.execution.domain import ExecutionBudget, bounded_json
 
 type Action = Literal[
+    "experience.collect",
+    "experience.list",
+    "experience.show",
+    "experience.review",
+    "experience.forget",
     "capability.list",
     "capability.show",
     "capability.search",

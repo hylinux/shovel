@@ -16,6 +16,7 @@ from shovel.config.settings import load_settings
 from shovel.domain.identity import new_id
 from shovel.enterprise.domain import ConnectionDraft
 from shovel.identity.domain import IdentityDraft
+from shovel.memory.experience import ExperienceReview, ExperienceSubmission
 from shovel.platform.domain import PlatformCommand
 from shovel.runtime.errors import RuntimeFailure
 from shovel.runtime.platform_client import platform_command
@@ -125,6 +126,67 @@ interaction = typer.Typer(no_args_is_help=True)
 connection = typer.Typer(no_args_is_help=True)
 identity = typer.Typer(no_args_is_help=True)
 authentication = typer.Typer(no_args_is_help=True)
+experience = typer.Typer(no_args_is_help=True)
+
+
+@experience.command("collect")
+@command_handler()
+def collect_experience(
+    execution_id: str,
+    submission_file: Path,
+    revision: Annotated[int, typer.Option(min=1)],
+) -> None:
+    try:
+        submission = ExperienceSubmission.model_validate_json(submission_file.read_text(encoding="utf-8"))
+    except OSError, UnicodeError, ValidationError:
+        raise RuntimeFailure(
+            "Experience submission must be a bounded, credential-free JSON document."
+        ) from None
+    _run(
+        PlatformCommand(
+            action="experience.collect",
+            execution_id=execution_id,
+            expected_revision=revision,
+            input=submission.model_dump(mode="json"),
+        )
+    )
+
+
+@experience.command("list")
+@command_handler()
+def list_experiences() -> None:
+    _run(PlatformCommand(action="experience.list"))
+
+
+@experience.command("show")
+@command_handler()
+def show_experience(identifier: str) -> None:
+    _run(PlatformCommand(action="experience.show", identifier=identifier))
+
+
+@experience.command("review")
+@command_handler()
+def review_experience(
+    identifier: str,
+    revision: Annotated[int, typer.Option(min=1)],
+    decision: Annotated[str, typer.Option(help="retain or reject; retaining does not activate Memory.")],
+    note: Annotated[str, typer.Option()],
+) -> None:
+    review = ExperienceReview.model_validate({"decision": decision, "note": note})
+    _run(
+        PlatformCommand(
+            action="experience.review",
+            identifier=identifier,
+            expected_revision=revision,
+            input=review.model_dump(mode="json"),
+        )
+    )
+
+
+@experience.command("forget")
+@command_handler()
+def forget_experience(identifier: str, revision: Annotated[int, typer.Option(min=1)]) -> None:
+    _run(PlatformCommand(action="experience.forget", identifier=identifier, expected_revision=revision))
 
 
 def _identity_input(path: Path) -> dict[str, Any]:

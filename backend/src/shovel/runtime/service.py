@@ -23,6 +23,7 @@ from shovel.db.effect_repository import SQLiteEffectRepository
 from shovel.db.enterprise_repository import SQLiteConnectionRepository
 from shovel.db.execution_control_repository import SQLiteExecutionControlRepository
 from shovel.db.execution_repository import SQLiteExecutionRepository
+from shovel.db.experience_repository import SQLiteExperienceRepository
 from shovel.db.identity_repository import SQLiteIdentityRepository
 from shovel.db.interaction_repository import SQLiteInteractionRepository
 from shovel.db.migrations import upgrade_database
@@ -45,6 +46,7 @@ from shovel.identity.service import (
 )
 from shovel.identity.waits import AuthenticationRequests
 from shovel.interaction.service import InteractionService, NotificationService
+from shovel.memory.experience import ExperienceService
 from shovel.pipeline.sink import ZvecChunkSink, open_chunk_sink
 from shovel.platform.authorization import ApprovalAuthorization, ExplicitActions, InputAuthorization
 from shovel.platform.policy import ConfiguredSecurityPolicy
@@ -176,6 +178,15 @@ class Runtime:
         self.invocations.admission = self.enterprise.admit
         security.connection_authorizer = self.enterprise.authorize_connection
         security.execution_authorizer = self.enterprise.revalidate_execution
+        self.memory: MemoryService = MemoryService(
+            settings,
+            sessions,
+            model_transport=lambda: self.performance.model_transport(
+                settings.memory.llm if settings.memory.llm.is_configured else settings.model,
+                "memory",
+                self.stopping,
+            ),
+        )
         self.platform = PlatformApplication(
             scope,
             self.execution_engine,
@@ -195,18 +206,12 @@ class Runtime:
             identities=IdentityService(SQLiteIdentityRepository(sessions)),
             authentication=authentication,
             authentication_requests=AuthenticationRequests(authentication_repository),
+            experiences=ExperienceService(
+                SQLiteExperienceRepository(sessions, scope, self.memory.owner), self.invocations.repository
+            ),
         )
         self.operations: OperationService = OperationService(self)
         self.retrieval: RetrievalService = RetrievalService(self)
-        self.memory: MemoryService = MemoryService(
-            settings,
-            sessions,
-            model_transport=lambda: self.performance.model_transport(
-                settings.memory.llm if settings.memory.llm.is_configured else settings.model,
-                "memory",
-                self.stopping,
-            ),
-        )
         self.memory_tasks: MemoryTaskService = MemoryTaskService(self)
         self.user_profile = UserProfileService(sessions, self.memory.owner)
         self.instructions: AgentInstructionsService = AgentInstructionsService(

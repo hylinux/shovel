@@ -31,6 +31,7 @@ from shovel.identity.profiles import IdentityService
 from shovel.identity.service import AuthenticationService
 from shovel.identity.waits import AuthenticationRequests
 from shovel.interaction.service import InteractionService
+from shovel.memory.experience import ExperienceReview, ExperienceService, ExperienceSubmission
 from shovel.platform.authorization import ExplicitActions, PublishAuthorization
 from shovel.platform.domain import PlatformCommand
 from shovel.platform.ports import PlatformQueries
@@ -86,6 +87,7 @@ class PlatformApplication:
         identities: IdentityService | None = None,
         authentication: AuthenticationService | None = None,
         authentication_requests: AuthenticationRequests | None = None,
+        experiences: ExperienceService | None = None,
     ) -> None:
         self.scope, self.engine, self.proactive = scope, engine, proactive
         self.approvals, self.inputs, self.interactions = approvals, inputs, interactions
@@ -97,6 +99,7 @@ class PlatformApplication:
         self.connections = connections
         self.identities, self.authentication = identities, authentication
         self.authentication_requests = authentication_requests
+        self.experiences = experiences
 
     async def permissions(self, *, human: bool) -> tuple[Permission, ...]:
         policy = await self.engine.invocations.security.authorization.provider.load(self.scope)
@@ -268,6 +271,33 @@ class PlatformApplication:
     async def _execute(self, command: PlatformCommand, *, human: bool) -> dict[str, Any]:
         action, scope = command.action, self.scope
         identifier = command.identifier
+        if action.startswith("experience."):
+            if not human:
+                raise SecurityDenied("Experience intake and review require an explicit human command.")
+            if command.request_key is not None:
+                raise RuntimeFailure(
+                    "Experience uses source identity and revision checks; omit request_key.",
+                    status=422,
+                )
+            experiences = _required(self.experiences, "Experience service")
+            if action == "experience.list":
+                return {"items": await experiences.repository.list(scope)}
+            if action == "experience.collect":
+                return await experiences.collect(
+                    scope,
+                    _required(command.execution_id, "execution_id"),
+                    _required(command.expected_revision, "expected_revision"),
+                    ExperienceSubmission.model_validate(command.input),
+                )
+            identifier = _required(identifier, "identifier")
+            if action == "experience.show":
+                return await experiences.repository.get(scope, identifier)
+            revision = _required(command.expected_revision, "expected_revision")
+            if action == "experience.review":
+                return await experiences.repository.review(
+                    scope, identifier, revision, ExperienceReview.model_validate(command.input)
+                )
+            return await experiences.repository.forget(scope, identifier, revision)
         if action.startswith(("enterprise.identity.", "authentication.")):
             if not human:
                 raise SecurityDenied("Enterprise identity actions require an explicit human command.")

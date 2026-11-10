@@ -105,6 +105,33 @@ class MemoryOwnership:
     )
 
 
+class MemoryExperience(Base):
+    """Pending/reviewed observations, deliberately outside NativeMemory and its indexes."""
+
+    __tablename__ = "memory_experience"
+
+    id: Mapped[str] = mapped_column(sa.Text, primary_key=True, default=lambda: new_id("exp"))
+    workspace_id: Mapped[str] = mapped_column(sa.Text, nullable=False)
+    user_id: Mapped[str] = mapped_column(sa.Text, nullable=False)
+    source_execution_id: Mapped[str] = mapped_column(sa.Text, nullable=False)
+    source_digest: Mapped[str] = mapped_column(sa.Text, nullable=False)
+    submission_digest: Mapped[str] = mapped_column(sa.Text, nullable=False)
+    generation: Mapped[int] = mapped_column(sa.Integer, nullable=False)
+    state: Mapped[str] = mapped_column(sa.Text, nullable=False, default="candidate")
+    revision: Mapped[int] = mapped_column(sa.Integer, nullable=False, default=1)
+    data: Mapped[dict[str, Any]] = mapped_column(JSONDict, nullable=False, default=dict)
+    review_data: Mapped[dict[str, Any]] = mapped_column(JSONDict, nullable=False, default=dict)
+    created_at: Mapped[int] = mapped_column(sa.Integer, nullable=False, default=now_ts)
+    updated_at: Mapped[int] = mapped_column(sa.Integer, nullable=False, default=now_ts)
+
+    __table_args__ = (
+        sa.UniqueConstraint("workspace_id", "user_id", "source_execution_id", name="uq_experience_source"),
+        CheckConstraint("state IN ('candidate','reviewed','rejected','deleted')", name="experience_state"),
+        CheckConstraint("revision >= 1", name="experience_revision"),
+        Index("idx_experience_owner", "workspace_id", "user_id", "created_at"),
+    )
+
+
 class NativeMemory(Base, ValidityMixin, SalienceMixin, MemoryOwnership):
     __abstract__ = True
 

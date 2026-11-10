@@ -92,6 +92,9 @@ app.add_typer(platform.workflow, name="workflow", help="Validate, publish and ru
 app.add_typer(platform.proactive, name="proactive", help="Manage Proactive Services.")
 app.add_typer(platform.approval, name="approval", help="Review structured Execution approvals.")
 app.add_typer(platform.execution, name="execution", help="Inspect and control durable Executions.")
+app.add_typer(
+    platform.experience, name="experience", help="Collect and review output-checked experience candidates."
+)
 app.add_typer(platform.interaction, name="interaction", help="Inspect and explicitly answer input requests.")
 app.add_typer(platform.connection, name="connection", help="Manage disabled enterprise connection drafts.")
 app.add_typer(

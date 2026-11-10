@@ -125,6 +125,7 @@ def require_personal_table_write(table: str | None, *, update: bool) -> None:
         "conversation",
         "session_summary",
         "memory_working",
+        "memory_experience",
         "memory_episode",
         "memory_belief",
         "memory_procedure",

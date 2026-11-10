@@ -41,6 +41,16 @@ def platform_router(dependency: Any) -> APIRouter:
             PlatformCommand(action="capability.list", kind=kind, query=query), human=True
         )
 
+    @router.get("/experiences")
+    async def experiences(rt: Runtime = runtime_dependency) -> dict[str, Any]:
+        return await rt.platform.execute(PlatformCommand(action="experience.list"), human=True)
+
+    @router.get("/experiences/{identifier}")
+    async def experience(identifier: str, rt: Runtime = runtime_dependency) -> dict[str, Any]:
+        return await rt.platform.execute(
+            PlatformCommand(action="experience.show", identifier=identifier), human=True
+        )
+
     @router.get("/enterprise/connections/options")
     async def connection_options(rt: Runtime = runtime_dependency) -> dict[str, Any]:
         return await rt.platform.execute(

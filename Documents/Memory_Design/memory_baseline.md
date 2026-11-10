@@ -368,3 +368,111 @@ Session/Memory，不修改用户配置。评估显式禁止访问计数写入，
 Ruff 检查/格式检查通过；`mypy backend\src scripts\memory_support_evaluation.py
 scripts\memory_baseline.py` 检查 **239 个源文件通过**。显式 opt-in 的
 冻结真实回答评估另行完成，未运行生产认证交互或修改生产数据。
+
+## 2026-11-10 P0 真实模型补验
+
+在 `92f55bb` 加本次工作区 P0 实现上，显式 opt-in 复用已授权的现有配置，
+使用 `gpt-5.2-chat` 和 `text-embedding-3-large`（1024 维）。
+全部 SQLite、向量、workspace、临时文件与 Session 隔离；不读取生产记忆，
+不更改配置。运行前后配置文件哈希一致，报告不包含配置内容、密钥或个人路径。
+阈值 `0.55`、领域预算 `2000` 不变。
+
+### 冻结候选与真实最终回答
+
+保留原始 `memory-support-v1` 文件与历史报告不变，使用新目录建立当前版本
+18 问基线；另加 `memory-support-p0-v1`（24 问）独立覆盖否定、历史时态/年份、
+并列实体、复合关系、事件开始/完成，以及正例、显式别名、跨语言和 dislikes。
+P0 中 16 个保守拒答案例包含当前不支持逐子句拼接的多目标查询；这表示当前
+准入能力有限，不表示数据库中绝对没有任何相关子事实。
+
+| 当前版本指标 | 原 18 问：9 正/9 无答案 | P0 24 问：8 正/16 保守拒答 |
+|---|---:|---:|
+| 原始 native 候选 Recall@5 | 100% | 100% |
+| supported 条目支持精确率 | 100% | 100% |
+| 正例上下文 Recall@5 | 100% | 100% |
+| 正例真实最终回答正确率 | 100% | 100% |
+| 正确拒答率 | 100% | 100% |
+| 正例误拒答率 | 0% | 0% |
+| 无答案问题非 Profile 上下文率 | 0% | 0% |
+
+报告保存候选列表、准入诊断、实际 Host Memory JSON、真实答案与源码指纹，
+分别为 `.tools\memory-support-current-20261110.json`、
+`.tools\memory-support-p0-20261110.json`；各自冻结语料目录也保留。
+本次不是与旧实现逐字冻结配对的提升实验，不能据此计算改进幅度。
+
+复现 P0 测量（首次需使用新的空目录，后续去掉 `--create` 复用）：
+
+```powershell
+$env:SHOVEL_RUN_LIVE_TESTS = "1"
+try {
+  uv run --locked python -m scripts.memory_support_evaluation `
+    --config "C:\path\to\settings.toml" `
+    --cases "backend\tests\fixtures\memory_support_p0_cases.json" `
+    --corpus ".tools\memory-support-p0-new-corpus" `
+    --output ".tools\memory-support-p0-new.json" --create
+} finally {
+  Remove-Item Env:\SHOVEL_RUN_LIVE_TESTS
+}
+```
+
+`--cases` 不改变默认旧语料；案例字节仍参与 manifest 哈希，不能换案例后复用
+同一冻结目录。离线测试检查两套 gold 支持性及自定义案例仍受 live opt-in 限制。
+
+### 自由文本、持久聊天与 Profile
+
+新增 `backend\tests\test_memory_p0_live.py`：通过正式 `ChatService.send`，
+使用真实模型、正常自然语言回答和隔离 Session；工具调用关闭，不强制 JSON。
+8 个案例（3 正例、5 保守拒答）全部通过，检查真实最终回答以及实际请求中的
+`memory_status`、supported 条目，覆盖正例、别名、日期、否定、历史、
+多实体、复合关系及事件方向。没有 Memory 条目时也读取参考数据消息中的状态。
+
+首轮采集器只找 Host 消息，导致 5 个无 Memory 场景采集失败，而非模型错误；
+修复采集后完整重跑 8 个案例通过。自由文本使用确定性值/拒答语言检查并人工
+复核保存的全部答案，不使用模型裁判，不把这种有限评分当作通用蕴含证明。
+初轮回答中出现“可提供资料后识别 SQLite 等产品”的一般示例，不属于项目事实
+断言，不能仅按出现产品名就统计为幻觉。此类评测仍不覆盖 AG-UI 网络交付。
+
+现有 `test_user_profile_live.py` 4 个测试也通过：Memory 开/关两种情况下，
+初始资料、修改、Agent 重启、清空共 8 次回答，以及 2 次不可信 bio 指令测试。
+全部实际模型回答保持当前资料、不恢复旧值，也未执行 bio 中的注入指令。
+最终完成 **13 个 live pytest 用例**（8 P0 + 4 Profile + 1 提取基线）。
+
+```powershell
+$env:SHOVEL_RUN_LIVE_TESTS = "1"
+$env:SHOVEL_LIVE_CONFIG = "C:\path\to\settings.toml"
+try {
+  uv run --locked pytest backend\tests\test_memory_p0_live.py `
+    backend\tests\test_user_profile_live.py backend\tests\test_memory_baseline.py -m live --no-cov
+} finally {
+  Remove-Item Env:\SHOVEL_RUN_LIVE_TESTS
+  Remove-Item Env:\SHOVEL_LIVE_CONFIG
+}
+```
+
+保留最终报告 `.tools\memory-p0-free-text-20261110-verified\`、
+`.tools\memory-profile-live-20261110\`；首轮采集失败报告独立保留，不冒充通过。
+
+### 重新提取基线：仍有召回损失
+
+独立运行原有 `memory-baseline-v1` 两轮，报告
+`.tools\memory-extraction-current-20261110.json`，不是上面固定记录的回答评分。
+
+| 指标 | 第 1 轮 | 第 2 轮 |
+|---|---:|---:|
+| 提取 Precision / Recall / F1 | 100% | 100% |
+| 结构化输出错误 | 0 | 0 |
+| 固定金标准 Hybrid Recall@5 | 100% | 100% |
+| 重新提取后 Hybrid Recall@5 | 85.71% | 71.43% |
+
+端到端均值为 **78.57%**，不能写成“P0 后整体 Recall 100%”。评分能匹配
+三元组/日期，不证明正文/topic 满足所有查询适用条件。例如本轮提取事件正文为
+`User completed the offline evaluation for the Cedar project.`，与当前有界实体
+语法不同；另有数据库事实未准入，需要后续用完整条件诊断继续定位。
+这些运行重新提取了语料，不与历史报告作逐字冻结的因果对照。
+本轮只完成测量与记录，没有靠放宽条件、下降阈值或删掉失败问题改善分数。
+
+补验代码最终离线检查：**70 passed、9 live skipped**（该离线命令未设置 opt-in，
+对应真实用例已另行执行，不是遗漏）；Ruff 检查/格式检查通过，
+`mypy backend\src scripts\memory_baseline.py scripts\memory_support_evaluation.py`
+检查 **242 个源文件通过**。另按每个报告逐项验证实际模型请求中的 supported ID
+恰好等于 gold、状态正确，并核对当前源码/测试哈希，没有以仅看汇总分数代替核验。

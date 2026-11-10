@@ -1,0 +1,34 @@
+{
+  "version": "memory-support-p0-v1",
+  "facts": [
+    {"key": "solstice-db", "text": "The user uses SQLite as the database for project Solstice (also known as Equinox).", "predicate": "uses", "object": "SQLite", "topic": "project.solstice.database"},
+    {"key": "solstice-language", "text": "The user uses Go as the programming language for project Solstice.", "predicate": "uses", "object": "Go", "topic": "project.solstice.language"},
+    {"key": "solstice-evaluation", "text": "On 2026-09-10 the user completed the offline evaluation for project Solstice.", "kind": "episodic", "object": "Solstice", "occurred_on": "2026-09-10"}
+  ],
+  "queries": [
+    {"text": "Which database do I use for project Solstice?", "expected": ["solstice-db"]},
+    {"text": "Solstice 项目使用什么数据库？", "expected": ["solstice-db"]},
+    {"text": "Equinox 项目使用什么数据库？", "expected": ["solstice-db"]},
+    {"text": "Which database do I use for project Equinox?", "expected": ["solstice-db"]},
+    {"text": "Which programming language do I use for project Solstice?", "expected": ["solstice-language"]},
+    {"text": "When did the Solstice evaluation finish?", "expected": ["solstice-evaluation"]},
+    {"text": "Solstice 评估何时完成？", "expected": ["solstice-evaluation"]},
+    {"text": "Which drink do I dislike?", "expected": ["distractor-coffee", "distractor-tea"]},
+    {"text": "Which database do I not use for project Solstice?", "expected": []},
+    {"text": "Which database don't I use for project Solstice?", "expected": []},
+    {"text": "Solstice 项目没有使用哪个数据库？", "expected": []},
+    {"text": "Solstice 项目未使用什么数据库？", "expected": []},
+    {"text": "Which database did I use for project Solstice?", "expected": []},
+    {"text": "Which database was project Solstice using?", "expected": []},
+    {"text": "Solstice 项目以前使用什么数据库？", "expected": []},
+    {"text": "Which database do I use for project Solstice in 2024?", "expected": []},
+    {"text": "Which database do I use for projects Solstice and Tundra?", "expected": []},
+    {"text": "Solstice 和 Tundra 项目分别使用什么数据库？", "expected": []},
+    {"text": "Which database and programming language do I use for project Solstice?", "expected": []},
+    {"text": "Solstice 项目使用什么数据库和编程语言？", "expected": []},
+    {"text": "Which database do I use for project Solstice and who leads it?", "expected": []},
+    {"text": "When did the Solstice evaluation start and finish?", "expected": []},
+    {"text": "Solstice 评估何时开始和完成？", "expected": []},
+    {"text": "Which database do I use for project Tundra?", "expected": []}
+  ]
+}

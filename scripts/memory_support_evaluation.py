@@ -146,9 +146,11 @@ def prepare_root(configured: AppSettings, root: Path, *, create: bool) -> AppSet
     return settings
 
 
-async def evaluate(configured: AppSettings, root: Path, *, create: bool) -> dict[str, Any]:
+async def evaluate(
+    configured: AppSettings, root: Path, *, create: bool, cases_path: Path = CASES
+) -> dict[str, Any]:
     source_hashes = await asyncio.to_thread(source_fingerprints)
-    dataset_bytes = await asyncio.to_thread(CASES.read_bytes)
+    dataset_bytes = await asyncio.to_thread(cases_path.read_bytes)
     original_bytes = await asyncio.to_thread(DATASET.read_bytes)
     dataset = SupportDataset.model_validate_json(dataset_bytes)
     original = Dataset.model_validate_json(original_bytes)
@@ -304,11 +306,16 @@ def main() -> None:
     parser.add_argument("--config", type=Path, required=True)
     parser.add_argument("--corpus", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--cases", type=Path, default=CASES)
     parser.add_argument("--create", action="store_true")
     args = parser.parse_args()
     if os.environ.get("SHOVEL_RUN_LIVE_TESTS") != "1":
         parser.error("Set SHOVEL_RUN_LIVE_TESTS=1 to authorize real-provider evaluation.")
-    report = asyncio.run(evaluate(AppSettings.load(args.config), args.corpus.resolve(), create=args.create))
+    report = asyncio.run(
+        evaluate(
+            AppSettings.load(args.config), args.corpus.resolve(), create=args.create, cases_path=args.cases
+        )
+    )
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     print(json.dumps(report["metrics"]))

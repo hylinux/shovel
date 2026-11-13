@@ -39,6 +39,16 @@ class MCPConfigurationService:
                     "name": name,
                     "transport": "stdio" if server.command else "http",
                     "enabled": not server.disabled,
+                    "auth_type": (
+                        server.auth.type
+                        if server.auth is not None
+                        else "stdio_credentials"
+                        if server.env_credentials
+                        else "legacy"
+                        if server.headers or server.env
+                        else "none"
+                    ),
+                    "credential_refs": server.credential_references(),
                 }
                 for name, server in config.mcpServers.items()
             ]

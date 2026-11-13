@@ -254,6 +254,10 @@ async def test_real_mcp_transports_execute_and_close_on_owner_task(
             await extensions.load(OpenAIChatCompletionClient(model="test", async_client=sdk))
             agent = Agent(OpenAIChatCompletionClient(model="test", async_client=sdk), tools=extensions.tools)
             assert (await agent.run("Echo test.")).text == "MCP completed."
+            if transport == "stdio" and authentication:
+                extensions.mcp_connections["test"].is_current = lambda: False
+                with pytest.raises(RuntimeFailure, match="restart"):
+                    await extensions.tools[0].call_tool("echo", value="must-not-dispatch")
         finally:
             await asyncio.create_task(extensions.close())
         if transport == "http" and authentication:

@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import Any, Literal
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, SecretStr, field_validator, model_validator
 
 from shovel.domain.enums import ScanMode, Sensitivity
 from shovel.memory.working import WorkingMemoryInput as WorkingMemoryInput
@@ -102,6 +102,12 @@ class MCPAuthInput(BaseModel):
 
 class MCPAuthCancelInput(MCPAuthInput):
     authorization_id: str = Field(min_length=1, max_length=128, pattern=r"^[A-Za-z0-9_-]+$")
+
+
+class MCPCredentialInput(MCPAuthInput):
+    model_config = ConfigDict(extra="forbid", hide_input_in_errors=True)
+    reference: str = Field(min_length=1, max_length=512)
+    value: SecretStr = Field(min_length=1, max_length=65536)
 
 
 class AgentInstructionsInput(BaseModel):

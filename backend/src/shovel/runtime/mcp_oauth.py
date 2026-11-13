@@ -24,6 +24,8 @@ from pydantic import AnyHttpUrl, BaseModel, ValidationError
 from shovel.runtime.agent_extensions import MCPServerSettings, MCPSettings, _environment
 from shovel.runtime.errors import RuntimeFailure
 from shovel.runtime.mcp_auth import (
+    APIKeyAuth,
+    BearerAuth,
     MCPCredentials,
     MCPHTTPStatus,
     MCPOAuthStorage,
@@ -114,6 +116,7 @@ class MCPOAuthService:
         self._control = asyncio.Lock()
         self._closed = False
         self._changing = False
+        self.credential_generations: dict[str, int] = {}
 
     async def _configuration(self, name: str, revision: str | None = None) -> tuple[str, MCPServerSettings]:
         if self._closed or self._changing:
@@ -152,10 +155,7 @@ class MCPOAuthService:
         assert isinstance(server.auth, (OAuthUserAuth, OAuthApplicationAuth))
         url = _environment(server.url)
         authenticated_url(url)
-        binding = server.credential_binding()
-        binding["url"] = url
-        binding["env"] = {}
-        binding["headers"] = {key: _environment(value) for key, value in server.headers.items()}
+        binding = server.resolved_credential_binding()
         credentials = MCPCredentials(
             self.configuration.path.parent, server.credential_id, binding, self.credentials
         )
@@ -182,6 +182,8 @@ class MCPOAuthService:
         if server != entry.server:
             raise RuntimeFailure("MCP configuration changed; restart the Agent.", status=409)
         client = entry.http.client(auth=OAuthBearer(self, entry))
+        current = status.is_current
+        status.is_current = lambda: entry.active and current()
         client.event_hooks["response"].append(status.observe)
         return client
 
@@ -547,8 +549,8 @@ class MCPOAuthService:
                     )
         return {"state": "not_authorized", "local_cleared": True, "provider_revocation": revoked}
 
-    async def status(self, name: str) -> dict[str, Any]:
-        entry = await self.entry(name)
+    async def status(self, name: str, revision: str | None = None) -> dict[str, Any]:
+        entry = await self.entry(name, revision)
         async with entry.lock:
             await self.check(entry)
             record = await entry.storage.read_record()
@@ -571,6 +573,52 @@ class MCPOAuthService:
                 "expires_at": record.expires_at,
                 "authorization_id": entry.attempt.id if entry.attempt else None,
             }
+
+    async def save_credential(self, name: str, revision: str, reference: str, value: str) -> dict[str, bool]:
+        async with self._control:
+            if self._closed or self._changing:
+                raise RuntimeFailure("MCP authentication is stopping or changing configuration.", status=503)
+            view = await asyncio.to_thread(self.configuration.read)
+            if view["revision"] != revision:
+                raise RuntimeFailure(
+                    "MCP configuration changed; reload before saving credentials.", status=409
+                )
+            server = MCPSettings.model_validate_json(view["content"]).mcpServers.get(name)
+            if server is None or server.credential_id is None:
+                raise RuntimeFailure("MCP service has no configured credential identity.", status=422)
+            if (
+                not reference.startswith("keyring:")
+                or reference == "keyring:oauth-state"
+                or reference not in server.credential_references()
+            ):
+                raise RuntimeFailure(
+                    "Only configured keyring credential references can be written.", status=422
+                )
+            if not value or "\0" in value:
+                raise RuntimeFailure("MCP credential is empty or contains a NUL character.", status=422)
+            if isinstance(server.auth, (APIKeyAuth, BearerAuth)):
+                try:
+                    secret_header(value, bearer=isinstance(server.auth, BearerAuth))
+                except RuntimeFailure as exc:
+                    raise RuntimeFailure(exc.message, status=422) from None
+            credentials = MCPCredentials(
+                self.configuration.path.parent,
+                server.credential_id,
+                server.resolved_credential_binding(),
+                self.credentials,
+            )
+            if isinstance(server.auth, OAuthApplicationAuth):
+                entry = await self._entry(name, revision)
+                await self._invalidate(entry, clear=True)
+            self.credential_generations[name] = self.credential_generations.get(name, 0) + 1
+            task = asyncio.create_task(credentials.write(reference, value))
+            try:
+                await asyncio.shield(task)
+            except asyncio.CancelledError:
+                with CancelScope(shield=True):
+                    await task
+                raise
+        return {"saved": True, "restart_required": True}
 
     async def save_configuration(self, content: str, revision: str) -> dict[str, Any]:
         self.configuration._validate(content)

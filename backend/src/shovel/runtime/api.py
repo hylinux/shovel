@@ -51,6 +51,7 @@ from shovel.runtime.schemas import (
     MCPAuthCancelInput,
     MCPAuthInput,
     MCPConfigurationInput,
+    MCPCredentialInput,
     MemoryInput,
     MemoryReviewInput,
     MessageInput,
@@ -298,8 +299,10 @@ def configure_api(
         return auth_response(await rt.mcp_auth.callback(dict(query), callback_uri))
 
     @router.get("/agent/mcp/{server}/auth")
-    async def mcp_oauth_status(server: str, rt: RuntimeDependency) -> JSONResponse:
-        return auth_response(await rt.mcp_auth.status(server))
+    async def mcp_oauth_status(
+        server: str, rt: RuntimeDependency, revision: str | None = None
+    ) -> JSONResponse:
+        return auth_response(await rt.mcp_auth.status(server, revision))
 
     @router.post("/agent/mcp/{server}/auth/start")
     async def mcp_oauth_start(server: str, body: MCPAuthInput, rt: RuntimeDependency) -> JSONResponse:
@@ -312,6 +315,13 @@ def configure_api(
     @router.post("/agent/mcp/{server}/auth/disconnect")
     async def mcp_oauth_disconnect(server: str, body: MCPAuthInput, rt: RuntimeDependency) -> JSONResponse:
         return auth_response(await rt.mcp_auth.disconnect(server, body.revision))
+
+    @router.put("/agent/mcp/{server}/credentials")
+    async def mcp_credential(server: str, body: MCPCredentialInput, rt: RuntimeDependency) -> JSONResponse:
+        result = await rt.mcp_auth.save_credential(
+            server, body.revision, body.reference, body.value.get_secret_value()
+        )
+        return auth_response(result)
 
     @router.get("/runtime/configuration")
     async def runtime_configuration(rt: RuntimeDependency) -> JSONResponse:
@@ -335,12 +345,21 @@ def configure_api(
         )
 
     def mcp_response(rt: Runtime, result: dict[str, Any]) -> JSONResponse:
-        loaded_revision = rt.chat.agent.extensions.mcp_revision
+        extensions = rt.chat.agent.extensions
+        loaded_revision = extensions.mcp_revision
+        for item in result["items"]:
+            connection = extensions.mcp_connections.get(item["name"])
+            item["connection_state"] = (
+                connection.connection_state
+                if connection is not None and extensions.mcp_attempt_revision == result["revision"]
+                else "not_connected"
+            )
         result.update(
             agent_loaded=rt.chat.agent_state == "loaded",
             agent_state=rt.chat.agent_state,
             restart_required=rt.chat.agent_state == "restart_failed"
-            or (loaded_revision is not None and loaded_revision != result["revision"]),
+            or (loaded_revision is not None and loaded_revision != result["revision"])
+            or any(item["connection_state"] == "restart_required" for item in result["items"]),
         )
         return JSONResponse(result, headers={"Cache-Control": "no-store"})
 

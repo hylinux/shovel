@@ -265,7 +265,16 @@ async def test_mcp_configuration_roundtrip_conflicts_and_validation(
     )
     saved = await api.put("/api/v1/agent/mcp", json={"content": content, "revision": initial["revision"]})
     assert saved.status_code == 200
-    assert saved.json()["items"] == [{"name": "example", "transport": "http", "enabled": True}]
+    assert saved.json()["items"] == [
+        {
+            "name": "example",
+            "transport": "http",
+            "enabled": True,
+            "auth_type": "legacy",
+            "credential_refs": [],
+            "connection_state": "not_connected",
+        }
+    ]
     assert saved.json()["agent_loaded"] is False
     assert runtime.chat.agent.extensions.tools == []
     assert runtime.mcp.path.read_bytes() == content.encode("utf-8")

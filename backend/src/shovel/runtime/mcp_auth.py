@@ -5,6 +5,7 @@ import hashlib
 import json
 import re
 import time
+from collections.abc import Callable
 from http.cookiejar import CookieJar, DefaultCookiePolicy
 from pathlib import Path
 from typing import Annotated, Literal
@@ -282,10 +283,27 @@ class MCPOAuthStorage:
 class MCPHTTPStatus:
     def __init__(self) -> None:
         self.denied: int | None = None
+        self.state = "not_connected"
+        self.is_current: Callable[[], bool] = lambda: True
+
+    @property
+    def connection_state(self) -> str:
+        if not self.is_current():
+            return "restart_required"
+        if self.denied in {401, 403}:
+            return "authentication_failed" if self.denied == 401 else "permission_denied"
+        return self.state
 
     async def observe(self, response: httpx.Response) -> None:
         if response.status_code in {401, 403}:
             self.denied = response.status_code
+
+    def check_current(self) -> None:
+        if not self.is_current():
+            raise RuntimeFailure("MCP credentials changed; restart the Agent.", status=409)
+
+    async def check(self, request: httpx.Request) -> None:
+        self.check_current()
 
 
 def authenticated_http_client(status: MCPHTTPStatus) -> httpx.AsyncClient:
@@ -293,5 +311,5 @@ def authenticated_http_client(status: MCPHTTPStatus) -> httpx.AsyncClient:
         timeout=httpx.Timeout(30, read=300),
         follow_redirects=False,
         cookies=CookieJar(policy=DefaultCookiePolicy(allowed_domains=[])),
-        event_hooks={"response": [status.observe]},
+        event_hooks={"request": [status.check], "response": [status.observe]},
     )

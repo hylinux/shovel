@@ -22,6 +22,7 @@ from shovel.runtime.agent_extensions import AgentExtensions, MCPServerSettings, 
 from shovel.runtime.errors import RuntimeFailure
 from shovel.runtime.mcp_auth import MCPCredentials, MCPHTTPStatus, MCPOAuthStorage
 from shovel.runtime.mcp_config import MCPConfigurationService
+from shovel.runtime.mcp_oauth import MCPOAuthService
 from shovel.services.credentials import CredentialRef, InMemoryCredentialStore
 
 SERVICE_ID = "12b9ae42-c658-4177-a3bb-f8b9b616edaf"
@@ -181,6 +182,72 @@ async def test_unavailable_store_never_falls_back_or_claims_clear_success(tmp_pa
             await operation
         assert "private-backend" not in str(failure.value)
     assert not list(tmp_path.iterdir())
+
+
+async def test_settings_credential_write_reports_store_failure_without_secrets(tmp_path: Path) -> None:
+    config = MCPConfigurationService(tmp_path)
+    view = config.save(
+        json.dumps(
+            {
+                "mcpServers": {
+                    "fixture": configuration(auth={"type": "bearer", "credential_ref": "keyring:token"})
+                }
+            }
+        ),
+        config.read()["revision"],
+    )
+    service = MCPOAuthService(config, credentials=UnavailableStore())
+    with pytest.raises(RuntimeFailure, match="unavailable") as failure:
+        await service.save_credential("fixture", view["revision"], "keyring:token", "fixture-new-secret")
+    assert "fixture-new-secret" not in str(failure.value)
+    assert "private-backend" not in str(failure.value)
+    with pytest.raises(RuntimeFailure) as invalid:
+        await service.save_credential("fixture", view["revision"], "keyring:token", "invalid\nsecret")
+    assert invalid.value.status == 422 and "invalid\nsecret" not in str(invalid.value)
+    await service.close()
+
+
+async def test_cancelled_settings_credential_write_drains_before_configuration_changes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = MCPConfigurationService(tmp_path)
+    view = config.save(
+        json.dumps(
+            {
+                "mcpServers": {
+                    "fixture": configuration(auth={"type": "bearer", "credential_ref": "keyring:token"})
+                }
+            }
+        ),
+        config.read()["revision"],
+    )
+    store = InMemoryCredentialStore()
+    service = MCPOAuthService(config, credentials=store)
+    started, release = asyncio.Event(), asyncio.Event()
+    original = MCPCredentials.write
+
+    async def blocked(self: MCPCredentials, reference: str, value: str) -> None:
+        started.set()
+        await release.wait()
+        await original(self, reference, value)
+
+    monkeypatch.setattr(MCPCredentials, "write", blocked)
+    task = asyncio.create_task(
+        service.save_credential("fixture", view["revision"], "keyring:token", "fixture-new-secret")
+    )
+    await asyncio.wait_for(started.wait(), 2)
+    task.cancel()
+    changing = asyncio.create_task(service.save_configuration("{}", view["revision"]))
+    await asyncio.sleep(0)
+    assert not changing.done()
+    release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    await changing
+    server = MCPSettings.model_validate_json(view["content"]).mcpServers["fixture"]
+    credentials = MCPCredentials(tmp_path, server.credential_id, server.resolved_credential_binding(), store)
+    assert await credentials.get("keyring:token") == "fixture-new-secret"
+    await service.close()
 
 
 def test_locked_sdk_oauth_and_pre_registered_storage_contract(tmp_path: Path) -> None:

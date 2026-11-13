@@ -26,6 +26,7 @@ from shovel.config.settings import AppSettings
 from shovel.runtime.agent_extensions import AgentExtensions
 from shovel.runtime.api import configure_api, current_runtime
 from shovel.runtime.errors import RuntimeFailure
+from shovel.runtime.mcp_auth import MCPCredentials, MCPHTTPStatus, authenticated_http_client
 from shovel.runtime.mcp_config import MCPConfigurationService
 from shovel.runtime.mcp_oauth import MCPOAuthService
 from shovel.runtime.mcp_oauth_http import OAuthTransport
@@ -333,6 +334,7 @@ async def test_oauth_through_real_mcp_discovery_tool_call_and_explicit_rejection
     async with AsyncOpenAI(api_key="fixture") as sdk:
         try:
             await extensions.load(OpenAIChatCompletionClient(model="fixture", async_client=sdk))
+            assert extensions.mcp_connections["fixture"].connection_state == "connected"
             result = await extensions.tools[0].call_tool("echo", value="hello")
             assert any("oauth marker: hello" in (item.text or "") for item in result)
             assert provider.tool_calls == 1
@@ -342,8 +344,103 @@ async def test_oauth_through_real_mcp_discovery_tool_call_and_explicit_rejection
                 await extensions.tools[0].call_tool("echo", value="do-not-replay")
             assert provider.tool_calls == 1 and len(provider.forms) == before
             assert (await service.status("fixture"))["state"] == "reauthorization_required"
+            assert extensions.mcp_connections["fixture"].connection_state == "authentication_failed"
         finally:
             await extensions.close()
+    await service.close()
+
+
+async def test_user_authorization_change_projects_connection_restart(
+    tmp_path: Path, provider: OAuthFixture
+) -> None:
+    service = service_at(tmp_path, provider)
+    await authorize(service, provider)
+    extensions = AgentExtensions(AgentSettings(workspace_path=tmp_path), oauth=service)
+    async with AsyncOpenAI(api_key="fixture") as sdk:
+        try:
+            await extensions.load(OpenAIChatCompletionClient(model="fixture", async_client=sdk))
+            await service.start("fixture", service.configuration.read()["revision"], CALLBACK)
+            assert extensions.mcp_connections["fixture"].connection_state == "restart_required"
+            before = provider.tool_calls
+            with pytest.raises(Exception):
+                await extensions.tools[0].call_tool("echo", value="old-authorization")
+            assert provider.tool_calls == before
+        finally:
+            await extensions.close()
+    await service.close()
+
+
+@pytest.mark.parametrize("kind", ["bearer", "api_key", "stdio", "oauth_client_credentials"])
+async def test_write_only_credential_api_uses_configured_scope_and_revision(
+    tmp_path: Path, provider: OAuthFixture, kind: str
+) -> None:
+    service = service_at(tmp_path, provider)
+    server = provider.configuration("oauth_client_credentials")["mcpServers"]["fixture"]
+    reference = "keyring:fixture-secret"
+    if kind == "stdio":
+        server.pop("url")
+        server.pop("auth")
+        server.update(command="python", args=["-V"], env_credentials={"TOKEN": reference})
+    elif kind == "oauth_client_credentials":
+        server["auth"]["client_secret_ref"] = reference
+    else:
+        server["auth"] = {"type": kind, "credential_ref": reference}
+        if kind == "api_key":
+            server["auth"]["header"] = "X-API-Key"
+    view = service.configuration.save(
+        json.dumps({"mcpServers": {"fixture": server}}), service.configuration.read()["revision"]
+    )
+    app = FastAPI()
+    configure_api(app, lambda: None, AppSettings())
+    app.dependency_overrides[current_runtime] = lambda: SimpleNamespace(mcp_auth=service)
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://127.0.0.1:8080"
+    ) as client:
+        path = "/api/v1/agent/mcp/fixture/credentials"
+        body = {"revision": view["revision"], "reference": reference, "value": "fixture-new-secret"}
+        response = await client.put(path, json=body)
+        assert response.status_code == 200 and response.json() == {"saved": True, "restart_required": True}
+        assert response.headers["cache-control"] == "no-store"
+        assert "fixture-new-secret" not in response.text
+        assert "fixture-new-secret" not in json.dumps(service.configuration.read())
+        from shovel.runtime.agent_extensions import MCPSettings
+
+        settings = MCPSettings.model_validate_json(view["content"]).mcpServers["fixture"]
+        credentials = MCPCredentials(
+            tmp_path, settings.credential_id, settings.resolved_credential_binding(), service.credentials
+        )
+        assert await credentials.get(reference) == "fixture-new-secret"
+        assert (await client.put(path, json={**body, "revision": "0" * 64})).status_code == 409
+        for invalid in ["keyring:other-service", "env:MCP_APP_SECRET", "keyring:oauth-state"]:
+            rejected = await client.put(path, json={**body, "reference": invalid})
+            assert rejected.status_code == 422 and "fixture-new-secret" not in rejected.text
+        malformed = await client.put(path, json={**body, "unexpected": "fixture-new-secret"})
+        assert malformed.status_code == 422 and "fixture-new-secret" not in malformed.text
+        denied = await client.put(path, json=body, headers={"Origin": "https://untrusted.example"})
+        assert denied.status_code == 403
+    await service.close()
+
+
+async def test_credential_rotation_fences_cached_http_and_preserves_no_secret_readback(
+    tmp_path: Path, provider: OAuthFixture
+) -> None:
+    service = service_at(tmp_path, provider, "oauth_client_credentials")
+    entry = await service.entry("fixture")
+    await service.token(entry)
+    status = MCPHTTPStatus()
+    async with await service.client("fixture", entry.server, status):
+        config = provider.configuration("oauth_client_credentials", client_secret_ref="keyring:app")
+        await service.save_configuration(json.dumps(config), entry.revision)
+        revision = service.configuration.read()["revision"]
+        fresh = await service.entry("fixture")
+        await service.save_credential("fixture", revision, "keyring:app", "fixture-app-secret")
+        assert not fresh.active and status.connection_state == "restart_required"
+        assert (await fresh.storage.read_record()).tokens is None
+    static_status = MCPHTTPStatus()
+    static_status.is_current = lambda: False
+    async with authenticated_http_client(static_status) as client:
+        with pytest.raises(RuntimeFailure, match="restart"):
+            await client.get(BASE + "/mcp")
     await service.close()
 
 

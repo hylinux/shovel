@@ -14,6 +14,7 @@ from uuid import UUID, uuid4
 
 from agent_framework import (
     BaseAgent,
+    Content,
     FileSkill,
     FileSkillScript,
     FunctionTool,
@@ -81,6 +82,29 @@ class MCPServerSettings(BaseModel):
             "env": self.env,
             "headers": self.headers,
         }
+
+    def credential_references(self) -> list[str]:
+        references = list(self.env_credentials.values())
+        if isinstance(self.auth, (APIKeyAuth, BearerAuth)):
+            references.append(self.auth.credential_ref)
+        elif self.auth is not None and self.auth.type == "oauth_client_credentials":
+            references.append(self.auth.client_secret_ref)
+        return sorted(set(references))
+
+    def resolved_credential_binding(self) -> dict[str, object]:
+        binding = self.credential_binding()
+        binding["env"] = {key: _environment(value) for key, value in self.env.items()} if self.command else {}
+        binding["headers"] = (
+            {key: _environment(value) for key, value in self.headers.items()} if self.url else {}
+        )
+        if self.url:
+            url = _environment(self.url)
+            authenticated_url(url)
+            binding["url"] = url
+        else:
+            binding["command"] = _environment(self.command)
+            binding["args"] = [_environment(arg) for arg in self.args]
+        return binding
 
     @model_validator(mode="after")
     def transport(self) -> MCPServerSettings:
@@ -179,6 +203,17 @@ async def run_skill_script(
     return output
 
 
+class CredentialBoundStdioTool(MCPStdioTool):
+    def __init__(self, credential_status: MCPHTTPStatus, **kwargs: Any) -> None:
+        super().__init__(**kwargs)
+        self._credential_status = credential_status
+
+    async def _call_tool(self, tool_name: str, kwargs: dict[str, Any]) -> str | list[Content]:
+        # Both generated FunctionTools and call_tool use this SDK dispatch hook.
+        self._credential_status.check_current()
+        return await super()._call_tool(tool_name, kwargs)
+
+
 class AgentExtensions:
     def __init__(
         self,
@@ -194,6 +229,8 @@ class AgentExtensions:
         self._lock = asyncio.Lock()
         self._modules: list[str] = []
         self.mcp_revision: str | None = None
+        self.mcp_attempt_revision: str | None = None
+        self.mcp_connections: dict[str, MCPHTTPStatus] = {}
         self._credentials = credentials
         self._oauth = oauth
 
@@ -205,16 +242,7 @@ class AgentExtensions:
                 raise RuntimeFailure("MCP OAuth requires the Host authentication service.", status=503)
             return env, headers
         if server.credential_id is not None:
-            binding = server.credential_binding()
-            binding["env"] = env
-            binding["headers"] = headers
-            if server.url:
-                url = _environment(server.url)
-                authenticated_url(url)
-                binding["url"] = url
-            else:
-                binding["command"] = _environment(server.command)
-                binding["args"] = [_environment(arg) for arg in server.args]
+            binding = server.resolved_credential_binding()
             credentials = MCPCredentials(
                 self.settings.workspace, server.credential_id, binding, self._credentials
             )
@@ -236,6 +264,7 @@ class AgentExtensions:
             if self._stack is not None:
                 return
             stack = AsyncExitStack()
+            loading_status: MCPHTTPStatus | None = None
             try:
                 workspace = self.settings.workspace
                 for directory in ("skills", "functions", "pipeline"):
@@ -253,11 +282,28 @@ class AgentExtensions:
                     content = mcp_path.read_bytes()
                 except FileNotFoundError:
                     content = None
+                self.mcp_attempt_revision = mcp_revision(content)
+                self.mcp_connections = {}
                 if content is not None:
                     config = MCPSettings.model_validate_json(content)
                     for name, server in config.mcpServers.items():
                         if server.disabled:
                             continue
+                        http_status = MCPHTTPStatus()
+                        if self._oauth is not None:
+                            generations = self._oauth.credential_generations
+                            generation = generations.get(name, 0)
+
+                            def credential_current(
+                                name: str = name,
+                                generation: int = generation,
+                                generations: dict[str, int] = generations,
+                            ) -> bool:
+                                return generations.get(name, 0) == generation
+
+                            http_status.is_current = credential_current
+                        http_status.state = "connecting"
+                        self.mcp_connections[name] = loading_status = http_status
                         common: dict[str, Any] = {
                             "name": name,
                             "tool_name_prefix": f"mcp_{name}_",
@@ -272,10 +318,10 @@ class AgentExtensions:
                             raise RuntimeFailure(
                                 f"MCP {name}: {exc.message}", status=exc.status, hint=exc.hint
                             ) from None
-                        http_status = MCPHTTPStatus()
                         connection: MCPStdioTool | MCPStreamableHTTPTool
                         if server.command:
-                            connection = MCPStdioTool(
+                            connection = CredentialBoundStdioTool(
+                                credential_status=http_status,
                                 **common,
                                 command=_environment(server.command),
                                 args=[_environment(arg) for arg in server.args],
@@ -300,6 +346,8 @@ class AgentExtensions:
                             )
                         try:
                             tools.append(await stack.enter_async_context(connection))
+                            http_status.state = "connected"
+                            loading_status = None
                         except Exception:
                             status = http_status.denied
                             if status is not None:
@@ -335,7 +383,20 @@ class AgentExtensions:
                 self.tools, self.skills, self._stack = tools, skills, stack
                 self.mcp_revision = mcp_revision(content)
             except BaseException as exc:
+                if loading_status is not None:
+                    loading_status.state = (
+                        {
+                            401: "authorization_required",
+                            409: "configuration_changed",
+                            422: "configuration_error",
+                        }.get(exc.status, "unavailable")
+                        if isinstance(exc, RuntimeFailure)
+                        else "unavailable"
+                    )
                 await stack.aclose()
+                for connection_status in self.mcp_connections.values():
+                    if connection_status.state == "connected":
+                        connection_status.state = "not_connected"
                 if isinstance(exc, (asyncio.CancelledError, RuntimeFailure)):
                     raise
                 raise RuntimeFailure(
@@ -361,6 +422,9 @@ class AgentExtensions:
                 await self._stack.aclose()
                 self._stack = None
         finally:
+            for status in self.mcp_connections.values():
+                if status.state == "connected":
+                    status.state = "not_connected"
             for name in self._modules:
                 sys.modules.pop(name, None)
             self._modules.clear()

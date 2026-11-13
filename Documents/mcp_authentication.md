@@ -1,9 +1,9 @@
 # MCP authentication
 
-This reference covers the P0-P4 implementation for #22 / #30. API Key,
+This reference covers the P0-P5 implementation for #22 / #30. API Key,
 static Bearer/PAT, stdio credential references, OAuth application identities
-and explicit OAuth user authorization are implemented. Settings UI controls
-remain P5 work; real-provider acceptance remains separate.
+and explicit OAuth user authorization are implemented, including Settings
+controls. Real-provider acceptance remains separate.
 
 ## SDK and protocol baseline (P0)
 
@@ -154,7 +154,8 @@ Renaming the service, changing tool allow-lists or disabling it does not change
 the binding.
 
 For a static URL and `keyring:token`, an administrator can provision from Python
-under the same OS identity as the Host (no dedicated MCP credentials UI/CLI yet):
+under the same OS identity as the Host (Settings now also supports write-only
+provisioning; there is no dedicated credentials CLI):
 
 ```python
 import asyncio
@@ -240,7 +241,9 @@ requires `"authorization_id"`. Start returns a URL for the user to open
 explicitly. Register the exact backend redirect URI with the provider:
 `http://127.0.0.1:8080/api/v1/agent/mcp/oauth/callback` for default production,
 or port 9999 for default development (substitute the configured Host/port).
-The callback returns a small JSON result; no frontend authorization page exists yet.
+The callback returns a small JSON result in its own tab. Return to Settings;
+the static frontend polls local authorization state without handling OAuth
+codes or exchanging tokens.
 
 The callback validates random state, issuer, PKCE binding, exact redirect,
 five-minute expiry and single use. It requires the RFC 9207 `iss` response
@@ -305,6 +308,59 @@ connections. A cached invalidated connection fails closed; successful browser
 authorization alone does not reconnect it. Configuration saves never resolve
 credentials and do not silently restart the Agent.
 
+## Settings workflow (P5)
+
+Open Settings -> MCP Server Management. The existing JSON editor remains the
+configuration authority; authentication examples cover API Key, Bearer/PAT,
+user/application OAuth and stdio. They are disabled by default, contain only
+placeholders/references, and use distinct service UUIDs. Save before using
+authentication controls; unsaved drafts disable credential/authorization
+mutations. Polling, language changes and tab navigation never replace drafts.
+Revision conflicts remain explicit and require reload/discard rather than
+silently overwriting another configuration.
+
+The saved-server table separates authentication type from last observed
+connection state. A successful MCP initialization/tool discovery is shown as
+connected; it is **not** evidence that a business tool call was verified.
+401, 403, missing user authorization, invalid/changed configuration,
+unavailable connection/credentials and restart-required states are distinct.
+The page does not initiate a connection or execute a tool to check status.
+Failed all-or-nothing extension loading does not leave earlier servers
+incorrectly marked connected.
+
+User OAuth has explicit Start authorization and Open authorization page
+steps. The link opens a separate tab with no opener/referrer, is shown only
+for the matching pending authorization, and expires with that attempt.
+Cancel uses the current authorization ID. A pending attempt created by another
+page or a lost start response can be cancelled without recovering its URL.
+Disconnect requires confirmation; local removal and provider revocation are
+reported separately. After a lost mutation response, status is re-read rather
+than automatically repeating a login, disconnect or secret write.
+Application OAuth has no browser-login button and acquires tokens only when
+the Agent actually connects.
+
+Declared `keyring:` references have password-type, write-only inputs:
+`PUT /api/v1/agent/mcp/{server}/credentials` accepts
+`{"revision": "...", "reference": "keyring:LABEL", "value": "NEW-SECRET"}`.
+Only a reference already declared for that service may be written, using the
+same resolved workspace/service/configuration binding as runtime reads.
+`keyring:oauth-state` is reserved for internal token storage and cannot be
+written through this endpoint. Environment references remain read-only.
+New values are never read back, placed in configuration responses, or persisted
+in browser storage; acknowledged inputs are cleared. Existing inline
+headers/env remain visible in the original JSON and are not silently migrated.
+Missing/unavailable stores fail explicitly without backend exception details.
+Provisioning works for disabled services, without enabling or connecting them.
+
+Credential writes preserve configuration revision checks and drain uninterruptible
+keyring writes before configuration changes can proceed. Rotation invalidates
+cached HTTP and stdio tool dispatch; application rotation also clears local
+OAuth tokens. Already-dispatched work cannot be undone. Restart Agent
+explicitly to replace connections/process environments; saving a credential
+neither restarts Agent nor establishes live connectivity. The stdio guard uses
+the locked MAF SDK dispatch hook shared by generated tools and direct calls.
+OAuth authorization remains subject to the same platform/enterprise boundaries.
+
 ## Validation boundary
 
 Tests use local HTTP/stdio servers, synthetic secrets and in-memory stores.
@@ -315,6 +371,12 @@ real MCP initialization/tool calls behind a local OAuth provider, application
 acquisition/expiry/restart, user PKCE/refresh rotation, cancellation races,
 discovery/binding failures, revocation failure, REST revision/CSRF checks,
 callback replay/query redaction and DNS-pinned POST body preservation.
+Settings interaction tests cover explicit authorization, stale poll fencing,
+cancel/disconnect confirmation, inert invalid URLs, write-only provisioning,
+revision conflicts, literal draft retention and Chinese presentation. Backend
+tests cover provisioning scope/revision/read-only restrictions, store failure,
+cancelled writes and cached-client invalidation. Static build/lint/type checks
+do not establish live provider or system-keyring acceptance.
 
 No real credentials, OS accounts or enterprise data are used. System keyring
 availability and real provider authentication are separate live checks. Internal

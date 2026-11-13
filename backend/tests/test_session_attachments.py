@@ -29,7 +29,15 @@ from shovel.db.model.retrieval import SchemaMigration
 from shovel.db.model.runtime import ChatMessage, SessionAttachment
 from shovel.protection.domain import ProtectionDeniedError
 from shovel.protection.egress import egress_scope, mark_enterprise
-from shovel.runtime.agent import AgentResult, ContextBudgetMiddleware, ShovelContextProvider, content_size
+from shovel.runtime.agent import (
+    AgentResult,
+    ContextBudgetMiddleware,
+    ShovelContextProvider,
+    content_size,
+    profile_context,
+    request_context_size,
+)
+from shovel.runtime.agent_instructions import compose_instructions
 from shovel.runtime.api import configure_api
 from shovel.runtime.attachments import ATTACHED_TTL, PENDING_TTL
 from shovel.runtime.errors import RuntimeFailure
@@ -37,6 +45,7 @@ from shovel.runtime.schemas import MessageInput
 from shovel.runtime.service import Runtime, create_runtime
 from shovel.services.resource_service import ResourceService
 from test_hosted_runtime import streamed_completion
+from test_pdf_excerpts import pdf_file
 
 
 @pytest_asyncio.fixture
@@ -299,6 +308,116 @@ async def test_valid_images_are_decoded_sanitized_and_forwarded_as_native_conten
     assert (await put(api, url(identifier), image.getvalue()[:-50], "picture.png")).status_code == 400
 
 
+async def test_budget_preview_uses_native_media_and_serialized_excerpts_without_sending_or_binding(
+    runtime: Runtime, api: httpx.AsyncClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    identifier = await session_id(api)
+    image = io.BytesIO()
+    Image.new("RGB", (120, 80), "red").save(image, format="PNG")
+    picture = (await put(api, url(identifier), image.getvalue(), "picture.png")).json()
+    note = (await put(api, url(identifier), ("😀\n" * 4500).encode(), "notes.txt")).json()
+
+    def forbidden(*args: object, **kwargs: object) -> None:
+        pytest.fail("A budget preview must not call models or retrieve evidence")
+
+    monkeypatch.setattr(runtime.chat.agent, "client", forbidden)
+    monkeypatch.setattr(runtime.memory, "search", forbidden)
+    monkeypatch.setattr(runtime.retrieval, "search", forbidden)
+    body = {"content": "Count 😀", "attachment_ids": [picture["id"], note["id"]], "memory_enabled": False}
+    response = await api.post(f"/api/v1/conversations/{identifier}/budget-preview", json=body)
+    assert response.status_code == 200
+    preview = response.json()
+    request = MessageInput.model_validate(body)
+    request._attachment_contents = await runtime.attachments.contents(identifier, [picture, note])
+    instructions = compose_instructions(runtime.instructions.read()["content"])
+    size = request_context_size(request, instructions, profile_context(await runtime.user_profile.read()))
+    assert preview["estimated_chars"] == size.chars + 500
+    assert preview["images"] == 1
+    assert preview["image_bytes"] == picture["size"]
+    assert preview["reserved_chars"] == 1012
+    assert preview["exceeded"] == []
+    assert preview["estimate_only"] is True
+    async with runtime.sessions() as database:
+        assert not list(await database.scalars(select(ChatMessage)))
+        for item in (picture, note):
+            stored = await database.get(SessionAttachment, item["id"])
+            assert stored is not None and stored.message_id is None
+            assert stored.expires_at == item["expires_at"]
+    assert runtime.chat.agent._client is None
+
+
+async def test_budget_preview_reports_text_and_media_limits_and_rechecks_attachment_scope(
+    runtime: Runtime, api: httpx.AsyncClient
+) -> None:
+    identifier = await session_id(api)
+    image = io.BytesIO()
+    Image.new("RGB", (80, 80), "blue").save(image, format="PNG")
+    pictures = [
+        (await put(api, url(identifier), image.getvalue(), f"image{index}.png")).json() for index in range(2)
+    ]
+    runtime.settings.model.max_input_images = 1
+    runtime.settings.model.max_input_image_bytes = pictures[0]["size"]
+    path = f"/api/v1/conversations/{identifier}/budget-preview"
+    payload = {"attachment_ids": [item["id"] for item in pictures], "memory_enabled": False}
+    preview = (await api.post(path, json=payload)).json()
+    assert preview["exceeded"] == ["images", "image_bytes"]
+    runtime.settings.model.max_input_chars = preview["estimated_chars"] - 1
+    assert (await api.post(path, json=payload)).json()["exceeded"] == ["text", "images", "image_bytes"]
+    other = await session_id(api)
+    assert (await api.post(f"/api/v1/conversations/{other}/budget-preview", json=payload)).status_code == 404
+    async with runtime.sessions() as database:
+        await database.execute(update(SessionAttachment).values(expires_at=1))
+        await database.commit()
+    assert (await api.post(path, json=payload)).status_code == 410
+    assert (await api.post(path, json={"content": ""})).status_code == 422
+    async with runtime.chat.session_lock(identifier):
+        assert (await api.post(path, json={"content": "new"})).status_code == 409
+
+
+async def test_budget_preview_includes_profile_working_context_and_candidate_history_without_media_rejection(
+    runtime: Runtime, api: httpx.AsyncClient
+) -> None:
+    identifier = await session_id(api)
+    path = f"/api/v1/conversations/{identifier}/budget-preview"
+    baseline = (await api.post(path, json={"content": "hello"})).json()
+    profile = await api.put(
+        "/api/v1/user/profile",
+        json={
+            "revision": 0,
+            "nickname": "Synthetic",
+            "gender": "",
+            "occupation": "",
+            "bio": "Local fixture",
+        },
+    )
+    assert profile.status_code == 200
+    working = await api.put(
+        f"/api/v1/conversations/{identifier}/working-memory/task",
+        json={
+            "expected_revision": 0,
+            "goal": "Test local context",
+        },
+    )
+    assert working.status_code == 200
+    image = io.BytesIO()
+    Image.new("RGB", (40, 40), "blue").save(image, format="PNG")
+    uploaded = (await put(api, url(identifier), image.getvalue(), "history.png")).json()
+    async with runtime.sessions() as database:
+        database.add(
+            ChatMessage(
+                conversation_id=identifier, role="user", content="History", sequence=1, attachments=[uploaded]
+            )
+        )
+        await database.commit()
+    runtime.settings.model.max_input_image_bytes = 1
+    preview = (await api.post(path, json={"content": "hello", "working_task_id": "task"})).json()
+    assert preview["estimated_chars"] > baseline["estimated_chars"]
+    assert preview["history"]["messages"] == 1 and preview["history"]["images"] == 1
+    assert preview["history"]["image_bytes"] == uploaded["size"]
+    assert preview["images"] == 0 and preview["exceeded"] == []
+    assert (await api.post(path, json={"content": "hello", "working_task_id": "missing"})).status_code == 404
+
+
 @pytest.mark.parametrize(
     "suffix", [".py", ".js", ".ts", ".tsx", ".jsx", ".yaml", ".yml", ".toml", ".ini", ".cfg", ".sh"]
 )
@@ -498,15 +617,48 @@ async def test_office_extraction_and_zip_bomb_rejection(runtime: Runtime, api: h
             archive.writestr("word/document.xml", source)
         return output.getvalue()
 
-    source = b"<document><p><t>Safe document text</t></p></document>"
+    source = b"<document><p><r><t>Safe </t></r><r><t>document text</t></r></p></document>"
     response = await put(api, url(identifier), office(source), "document.docx")
     assert response.status_code == 200
     native = await runtime.attachments.contents(identifier, [response.json()])
-    assert "Safe document text" in native[0].text
+    assert native[0].text.endswith("Safe document text")
+    assert response.json()["reading_scope"]["office_extraction"] == "structured-v1"
+    legacy = {**response.json(), "reading_scope": {}}
+    old_native = await runtime.attachments.contents(identifier, [legacy])
+    assert old_native[0].text.endswith("Safe \ndocument text")
     entity = b'<!DOCTYPE x [<!ENTITY x "entity">]><document><t>&x;</t></document>'
     assert (await put(api, url(identifier), office(entity), "document.docx")).status_code == 400
     bomb = b"<document><t>" + b"x" * 1_000_000 + b"</t></document>"
     assert (await put(api, url(identifier), office(bomb), "document.docx")).status_code == 400
+
+
+async def test_pdf_upload_scope_model_input_download_and_session_isolation(
+    runtime: Runtime,
+    api: httpx.AsyncClient,
+) -> None:
+    identifier = await session_id(api)
+    payload = pdf_file(pages=2)
+    path = url(identifier)
+    response = await put(api, path, payload, "reference.pdf")
+    assert response.status_code == 200
+    metadata = response.json()
+    assert metadata["media_type"] == "application/pdf"
+    assert metadata["reading_scope"]["pdf_extraction"] == "text-v1"
+    assert metadata["reading_scope"]["pages"] == metadata["reading_scope"]["read_pages"] == 2
+    native = await runtime.attachments.contents(identifier, [metadata])
+    assert "Untrusted attachment" in native[0].text
+    assert "[Page 2]\nSafe PDF text" in native[0].text
+    downloaded = await api.get(path)
+    assert downloaded.content == payload
+    assert downloaded.headers["content-disposition"].startswith("attachment;")
+    assert downloaded.headers["x-content-type-options"] == "nosniff"
+    assert (await put(api, path, payload, "reference.pdf")).json() == metadata
+    other = await session_id(api)
+    assert (await api.get(url(other, metadata["id"]))).status_code == 404
+    assert (await put(api, url(identifier), pdf_file(action=True), "actions.pdf")).status_code == 415
+    status = (await api.get(f"/api/v1/conversations/{identifier}/attachments")).json()
+    assert ".pdf" in status["limits"]["extensions"]
+    assert status["limits"]["max_pdf_pages"] == 50
 
 
 async def test_session_binding_and_egress_fences(runtime: Runtime, api: httpx.AsyncClient) -> None:
@@ -595,6 +747,121 @@ def test_message_attachment_validation() -> None:
     ):
         with pytest.raises(ValueError):
             MessageInput.model_validate(data)
+
+
+async def test_reading_scope_matches_sanitized_image_and_actual_excerpt(
+    runtime: Runtime, api: httpx.AsyncClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    identifier = await session_id(api)
+    original = io.BytesIO()
+    Image.new("RGB", (3000, 1200), "blue").save(original, format="PNG")
+    image = (await put(api, url(identifier), original.getvalue(), "picture.png")).json()
+    assert image["reading_scope"] == {
+        "original_bytes": len(original.getvalue()),
+        "stored_bytes": image["size"],
+        "original_width": 3000,
+        "original_height": 1200,
+        "width": 2048,
+        "height": 819,
+    }
+    data = ("你好" * 4500).encode("utf-8-sig")
+    document = (await put(api, url(identifier), data, "notes.txt")).json()
+    assert document["reading_scope"] == {
+        "original_bytes": len(data),
+        "stored_bytes": len(data),
+        "excerpt_chars": 8000,
+        "truncated": True,
+    }
+    native = await runtime.attachments.contents(identifier, [document])
+    assert native[0].text.endswith("你好" * 4000)
+    assert "Excerpt truncated" in native[0].text
+    short = (await put(api, url(identifier), b"short", "short.txt")).json()
+    assert short["reading_scope"]["excerpt_chars"] == 5
+    assert short["reading_scope"]["truncated"] is False
+
+    async def respond(*_args: object, **_kwargs: object) -> AgentResult:
+        return AgentResult(content="Answer")
+
+    monkeypatch.setattr(runtime.chat.agent, "respond", respond)
+    assert (
+        await api.post(
+            f"/api/v1/conversations/{identifier}/messages",
+            json={"attachment_ids": [image["id"], document["id"]], "memory_enabled": False},
+        )
+    ).status_code == 200
+    history = (await api.get(f"/api/v1/conversations/{identifier}/messages")).json()["items"]
+    assert history[0]["attachments"][0]["reading_scope"] == image["reading_scope"]
+    assert history[0]["attachments"][1]["reading_scope"] == document["reading_scope"]
+
+
+async def test_attachment_status_is_scoped_reports_live_quotas_and_missing_files(
+    runtime: Runtime, api: httpx.AsyncClient
+) -> None:
+    identifier, other = await session_id(api), await session_id(api)
+    path = f"/api/v1/conversations/{identifier}/attachments"
+    initial = (await api.get(path)).json()
+    assert initial["items"] == []
+    assert ".txt" in initial["limits"]["extensions"]
+    assert ".exe" not in initial["limits"]["extensions"]
+    assert initial["limits"]["max_files"] == 5
+    assert initial["limits"]["max_input_images"] == runtime.settings.model.max_input_images
+    first = (await put(api, url(identifier), b"first", "first.txt")).json()
+    second = (await put(api, url(other), b"second", "second.txt")).json()
+    current = (await api.get(path)).json()
+    assert [row["id"] for row in current["items"]] == [first["id"]]
+    assert current["items"][0]["available"] is True
+    assert current["remaining"]["pending_files"] == initial["remaining"]["pending_files"] - 1
+    assert current["remaining"]["session_files"] == initial["remaining"]["session_files"] - 1
+    assert current["remaining"]["session_bytes"] == initial["remaining"]["session_bytes"] - first["size"]
+    assert current["remaining"]["store_bytes"] == (
+        initial["remaining"]["store_bytes"] - first["size"] - second["size"]
+    )
+    runtime.attachments._path(identifier, first["id"]).unlink()
+    assert (await api.get(path)).json()["items"][0]["available"] is False
+    assert (await api.get("/api/v1/conversations/missing/attachments")).status_code == 404
+    assert (await api.delete(first["url"])).status_code == 200
+    remaining = (await api.get(path)).json()
+    assert remaining["items"] == []
+    assert remaining["remaining"]["session_bytes"] == initial["remaining"]["session_bytes"]
+
+
+async def test_reading_scope_migration_preserves_legacy_uploads_without_inventing_details(
+    runtime: Runtime, api: httpx.AsyncClient
+) -> None:
+    identifier = await session_id(api)
+    uploaded = (await put(api, url(identifier))).json()
+    async with runtime.sessions() as database:
+        connection = await database.connection()
+        engine = connection.engine
+        await database.execute(text("ALTER TABLE session_attachment DROP COLUMN reading_scope"))
+        await database.execute(delete(SchemaMigration).where(SchemaMigration.version == 26))
+        await database.commit()
+    await upgrade_database(engine)
+    await upgrade_database(engine)
+    rows = (await api.get(f"/api/v1/conversations/{identifier}/attachments")).json()["items"]
+    assert rows[0]["id"] == uploaded["id"]
+    assert rows[0]["reading_scope"] == {}
+    assert rows[0]["available"] is True
+    retry = (await put(api, uploaded["url"])).json()
+    assert retry["reading_scope"] == {}
+    assert retry["expires_at"] == uploaded["expires_at"]
+
+
+@pytest.mark.parametrize("extra", ["", "<t>additional text</t>"])
+async def test_office_excerpt_boundary_reports_truncation_without_an_off_by_one(
+    runtime: Runtime, api: httpx.AsyncClient, extra: str
+) -> None:
+    identifier = await session_id(api)
+    document = io.BytesIO()
+    with zipfile.ZipFile(document, "w") as archive:
+        archive.writestr("[Content_Types].xml", "<Types/>")
+        archive.writestr("word/document.xml", f"<document><t>{'a' * 8000}</t>{extra}</document>")
+    uploaded = (await put(api, url(identifier), document.getvalue(), "document.docx")).json()
+    assert uploaded["reading_scope"]["excerpt_chars"] == 8000
+    assert uploaded["reading_scope"]["truncated"] == bool(extra)
+    contents = await runtime.attachments.contents(identifier, [uploaded])
+    assert ("Excerpt truncated" in contents[0].text) == bool(extra)
+    assert contents[0].text.endswith("a" * 8000)
 
 
 @pytest.mark.parametrize("kind", ["count", "bytes", "text", "metadata", "nonimage"])

@@ -169,7 +169,7 @@ jobs:
           retention-days: 7
 
   quality:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       # 主仓库放在 shovel/ 子目录
       - uses: actions/checkout@v5
@@ -219,6 +219,8 @@ jobs:
           npm run typecheck
           npm test
           npm run build
+          npx playwright install --with-deps chromium
+          npm run test:browser
           mkdir -p ../backend/src/shovel/static
           cp -R out/. ../backend/src/shovel/static/
 

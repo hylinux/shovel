@@ -797,6 +797,14 @@ def configure_api(
     async def message(identifier: str, body: MessageInput, rt: RuntimeDependency) -> dict[str, Any]:
         return message_view(await rt.chat.send(identifier, body))
 
+    @router.post("/conversations/{identifier}/budget-preview")
+    async def message_budget(identifier: str, body: MessageInput, rt: RuntimeDependency) -> dict[str, Any]:
+        return await rt.chat.preview(identifier, body)
+
+    @router.get("/conversations/{identifier}/attachments")
+    async def attachment_status(identifier: str, rt: RuntimeDependency) -> dict[str, Any]:
+        return await rt.attachments.status(identifier)
+
     @router.put("/conversations/{identifier}/attachments/{attachment_id}")
     async def upload_attachment(
         identifier: str,

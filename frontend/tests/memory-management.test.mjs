@@ -11,6 +11,8 @@ import * as messageFormat from "../app/message-format.ts";
 import { SessionDrafts } from "../app/session-drafts.ts";
 
 const messageComponents = {
+  "./send-budget": { useSendBudget: () => ({ blocked: false }), SendBudgetNotice: () => null },
+  "./session-scroll": { useSessionScroll: () => ({ messages: { current: null }, content: { current: null }, paused: false, unread: false, navigate() {}, bottom() {} }) },
   "./user-profile": { useUserProfile: () => ({ error: "", refresh() {} }), UserAvatar: () => createElement("svg") },
   "./message-content": { MessageContent: () => null, RichText: () => null },
   "./composer-tools": { ComposerTools: () => null },
@@ -142,7 +144,10 @@ function loadComponent(file, dependencies) {
     compilerOptions: { module: ts.ModuleKind.CommonJS, jsx: ts.JsxEmit.ReactJSX, target: ts.ScriptTarget.ES2022 },
   });
   const exports = {};
-  new Function("require", "exports", outputText)(id => id === "./icon.svg" ? { default: "/icon.svg" } : dependencies[id] ?? require(id), exports);
+  new Function("require", "exports", outputText)(id => {
+    if (file === "knowledge.tsx" && id === "react") return { ...require("react"), ...dependencies.react, memo: component => component };
+    return id === "./icon.svg" ? { default: "/icon.svg" } : dependencies[id] ?? require(id);
+  }, exports);
   return exports;
 }
 
@@ -327,7 +332,7 @@ test("Chat refreshes working revisions after settling and extraction candidates 
       segment: encodeURIComponent, useAction: () => ({ busy: false }),
       useAgentAction: () => ({ busy: false, run: async (...args) => { runs.push(args); return succeeded; } }),
       useQuery: path => ({
-        data: path.includes("/working-memory") ? { items: [task] } : path.startsWith("/operations/") ? { state: "succeeded", result: { memories: 0, candidates: 2 } } :
+        data: path.endsWith("/attachments") ? undefined : path.includes("/working-memory") ? { items: [task] } : path.startsWith("/operations/") ? { state: "succeeded", result: { memories: 0, candidates: 2 } } :
           { items: [{ id: "assistant", role: "assistant", content: "Answer", state: "completed", memory_operation_id: "extraction" }] },
         loading: false, error: "", refresh: () => refreshes.push(path),
       }),
@@ -350,8 +355,9 @@ test("Chat refreshes working revisions after settling and extraction candidates 
     assert.ok(refreshes.at(-2).includes("/messages"));
   }
   nodes = render();
-  const status = nodes.find(node => typeof node.type === "function" && node.type.name === "MemoryTaskStatus");
-  const heading = nodes.find(node => typeof node.type === "function" && node.type.name === "MessageHeading");
+  const row = nodes.find(node => typeof node.type === "function" && node.type.name === "HistoryMessage");
+  const status = elements(row.type(row.props)).find(node => typeof node.type === "function" && node.type.name === "MemoryTaskStatus");
+  const heading = elements(row.type(row.props)).find(node => typeof node.type === "function" && node.type.name === "MessageHeading");
   for (language of ["en", "zh-CN"]) {
     const headingHtml = renderToStaticMarkup(heading.type(heading.props));
     assert.match(headingHtml, /<img[^>]*alt=""[^>]*src="\/icon\.svg"/);
@@ -390,7 +396,7 @@ test("Unavailable selected working context blocks Chat without dropping identity
       "./api": {
         segment: encodeURIComponent,
         useAgentAction: () => ({ busy: false, run: async (...args) => { runs.push(args); return true; } }),
-        useQuery: path => ({ ...(path.endsWith("/working-memory") ? working : { data: { items: [] }, loading: false, error: "" }), refresh() {} }),
+        useQuery: path => ({ ...(path.endsWith("/working-memory") ? working : { data: path.endsWith("/attachments") ? undefined : { items: [] }, loading: false, error: "" }), refresh() {} }),
       },
       "./memory-model": model, "./ui": { Empty: () => null, Feedback: () => null, Sources: () => null },
       "./agent-client": { chatTrace() {} },

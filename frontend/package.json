@@ -6,11 +6,12 @@
     "dev": "next dev",
     "build": "next build",
     "lint": "eslint",
-    "typecheck": "tsc --noEmit",
-    "test": "node --experimental-strip-types --test tests/*.test.mjs"
+    "typecheck": "next typegen && tsc --noEmit",
+    "test": "node --experimental-strip-types --test tests/*.test.mjs",
+    "test:browser": "playwright test"
   },
   "dependencies": {
-    "@ag-ui/client": "^1.0.3",
+    "@ag-ui/client": "1.0.4",
     "dompurify": "^3.4.12",
     "katex": "^0.18.2",
     "mermaid": "^12.2.0",
@@ -24,12 +25,14 @@
     "rehype-raw": "^7.0.0",
     "rehype-sanitize": "^6.0.0",
     "remark-gfm": "^4.0.1",
-    "remark-math": "^6.0.0"
+    "remark-math": "^6.0.0",
+    "zod": "4.6.7"
   },
   "overrides": {
     "katex": "$katex"
   },
   "devDependencies": {
+    "@playwright/test": "1.58.2",
     "@tailwindcss/turbopack": "^4",
     "@types/node": "^20",
     "@types/papaparse": "^5.3.16",

@@ -45,6 +45,7 @@ from shovel.runtime.schemas import MessageInput
 from shovel.runtime.service import Runtime, create_runtime
 from shovel.services.resource_service import ResourceService
 from test_hosted_runtime import streamed_completion
+from test_pdf_excerpts import pdf_file
 
 
 @pytest_asyncio.fixture
@@ -629,6 +630,35 @@ async def test_office_extraction_and_zip_bomb_rejection(runtime: Runtime, api: h
     assert (await put(api, url(identifier), office(entity), "document.docx")).status_code == 400
     bomb = b"<document><t>" + b"x" * 1_000_000 + b"</t></document>"
     assert (await put(api, url(identifier), office(bomb), "document.docx")).status_code == 400
+
+
+async def test_pdf_upload_scope_model_input_download_and_session_isolation(
+    runtime: Runtime,
+    api: httpx.AsyncClient,
+) -> None:
+    identifier = await session_id(api)
+    payload = pdf_file(pages=2)
+    path = url(identifier)
+    response = await put(api, path, payload, "reference.pdf")
+    assert response.status_code == 200
+    metadata = response.json()
+    assert metadata["media_type"] == "application/pdf"
+    assert metadata["reading_scope"]["pdf_extraction"] == "text-v1"
+    assert metadata["reading_scope"]["pages"] == metadata["reading_scope"]["read_pages"] == 2
+    native = await runtime.attachments.contents(identifier, [metadata])
+    assert "Untrusted attachment" in native[0].text
+    assert "[Page 2]\nSafe PDF text" in native[0].text
+    downloaded = await api.get(path)
+    assert downloaded.content == payload
+    assert downloaded.headers["content-disposition"].startswith("attachment;")
+    assert downloaded.headers["x-content-type-options"] == "nosniff"
+    assert (await put(api, path, payload, "reference.pdf")).json() == metadata
+    other = await session_id(api)
+    assert (await api.get(url(other, metadata["id"]))).status_code == 404
+    assert (await put(api, url(identifier), pdf_file(action=True), "actions.pdf")).status_code == 415
+    status = (await api.get(f"/api/v1/conversations/{identifier}/attachments")).json()
+    assert ".pdf" in status["limits"]["extensions"]
+    assert status["limits"]["max_pdf_pages"] == 50
 
 
 async def test_session_binding_and_egress_fences(runtime: Runtime, api: httpx.AsyncClient) -> None:

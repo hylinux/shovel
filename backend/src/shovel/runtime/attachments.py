@@ -28,6 +28,7 @@ from shovel.db.unit_of_work import sqlite_write
 from shovel.protection.egress import EgressChannel, require_ordinary
 from shovel.runtime.errors import NotFound, RuntimeFailure
 from shovel.runtime.office import OFFICE_EXCERPT_VERSION, office_text
+from shovel.runtime.pdf import MAX_PDF_MEMORY, MAX_PDF_PAGES, PDF_TIMEOUT, PDF_VERSION, pdf_excerpt
 
 if TYPE_CHECKING:
     from shovel.runtime.service import Runtime
@@ -79,6 +80,7 @@ OFFICE_TYPES = {
     ".pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
     ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
 }
+PDF_TYPES = {".pdf": "application/pdf"}
 
 
 class AttachmentBound(RuntimeFailure):
@@ -100,7 +102,7 @@ def safe_name(name: str) -> str:
         or name.endswith(".")
     ):
         raise _failure("Invalid attachment filename.")
-    if Path(name).suffix.lower() not in TEXT_TYPES | IMAGE_TYPES | OFFICE_TYPES:
+    if Path(name).suffix.lower() not in TEXT_TYPES | IMAGE_TYPES | OFFICE_TYPES | PDF_TYPES:
         raise _failure("Unsupported attachment type.", 415)
     return name
 
@@ -144,6 +146,9 @@ def prepare_file(name: str, data: bytes) -> tuple[bytes, str, str]:
     if suffix in OFFICE_TYPES:
         office_text(data, suffix, MAX_TEXT_CHARS)
         return data, OFFICE_TYPES[suffix], "text"
+    if suffix in PDF_TYPES:
+        pdf_excerpt(data)
+        return data, PDF_TYPES[suffix], "text"
     try:
         text = data.decode("utf-8-sig")
     except UnicodeDecodeError as exc:
@@ -166,15 +171,20 @@ def reading_scope(name: str, original: bytes, prepared: bytes, context: str) -> 
         with Image.open(io.BytesIO(prepared)) as image:
             scope.update(width=image.width, height=image.height)
     else:
-        text = extracted_text(name, prepared)
+        pdf = pdf_excerpt(prepared) if Path(name).suffix.lower() in PDF_TYPES else None
+        text = pdf.text if pdf else extracted_text(name, prepared)
         scope.update(excerpt_chars=min(len(text), MAX_TEXT_CHARS), truncated=len(text) > MAX_TEXT_CHARS)
         if Path(name).suffix.lower() in OFFICE_TYPES:
             scope["office_extraction"] = OFFICE_EXCERPT_VERSION
+        if pdf:
+            scope.update(pdf_extraction=PDF_VERSION, pages=pdf.pages, read_pages=pdf.read_pages)
     return scope
 
 
 def extracted_text(name: str, data: bytes, *, legacy_office: bool = False) -> str:
     suffix = Path(name).suffix.lower()
+    if suffix in PDF_TYPES:
+        return pdf_excerpt(data).text
     return (
         office_text(data, suffix, MAX_TEXT_CHARS, legacy=legacy_office)
         if suffix in OFFICE_TYPES
@@ -462,7 +472,10 @@ class AttachmentService:
         return {
             "items": items,
             "limits": {
-                "extensions": sorted(TEXT_TYPES | IMAGE_TYPES | OFFICE_TYPES),
+                "extensions": sorted(TEXT_TYPES | IMAGE_TYPES | OFFICE_TYPES | PDF_TYPES),
+                "max_pdf_pages": MAX_PDF_PAGES,
+                "pdf_timeout_seconds": PDF_TIMEOUT,
+                "max_pdf_memory_bytes": MAX_PDF_MEMORY,
                 "max_files": MAX_MESSAGE_FILES,
                 "max_file_bytes": MAX_FILE_BYTES,
                 "max_text_chars": MAX_TEXT_CHARS,

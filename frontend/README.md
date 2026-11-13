@@ -136,6 +136,19 @@ at least 44-pixel composer/message control targets. Isolated previews have a
 keyboard-operable height slider (160–800 pixels, capped at 70% of viewport height);
 iframe sandbox permissions are unchanged.
 
+JSON mode offers explicit **Validate JSON** and **Format JSON** actions. Invalid
+input is retained, and formatting changes whitespace only: numeric lexemes,
+large integers, duplicate keys and strings stay exact. Tools accept at most
+100,000 source/output characters and 64 nesting levels; the composer still
+enforces its 16,000-character limit. JSON message blocks can toggle a formatted
+view without changing the saved message or **Copy source** result. Code language
+selection applies to Code mode fences and Markdown code insertion, survives
+Session navigation, and participates in the same preview/send-budget input.
+Images and completed Mermaid diagrams also offer an **Enlarge** viewer with
+50–300% keyboard zoom, reset, Escape/close and focus return. Native modal focus
+containment and the diagram's opaque-origin sandbox/CSP are retained; enlargement
+does not enable external resources or change source copying.
+
 History remains paginated to 100 messages rather than virtualizing selectable
 text or changing scroll anchors. Memoized history rows avoid reparsing unchanged
 messages while typing/streaming. Text updates coalesce over 50 milliseconds,
@@ -189,7 +202,9 @@ streaming/pagination/late-growth scrolling, clipboard failure, keyboard send and
 horizontal layout, preview focus/selection, touch targets, deferred/cached
 diagrams, height controls and sandbox isolation. A synthetic 100-attachment /
 240-chunk burst also checks the shared clock, bounded visible updates and the
-complete persisted final answer. These are frontend contract tests, not live model or full
+complete persisted final answer. Additional cases cover exact JSON formatting/
+copying, code-language draft/send consistency, image/diagram modal controls and
+PDF page scope/failure presentation. These are frontend contract tests, not live model or full
 backend acceptance; backend regressions independently verify the real preview
 endpoint and quota/attachment isolation. CI runs both suites without paid calls.
 
@@ -232,11 +247,12 @@ explicit unavailable marker instead of invented content. Removing an already
 sent file from an editor draft does not delete the history's copy.
 
 Supported uploads are PNG/JPEG/GIF/WebP, UTF-8 text/Markdown/JSON/CSV/TSV/HTML/XML,
-common source/configuration files, and DOCX/PPTX/XLSX. PDF, SVG, executable
+common source/configuration files, DOCX/PPTX/XLSX, and controlled text-layer PDF.
+SVG, executable
 binaries and archives are deliberately not accepted. Images are decoded within
 a 16-million-pixel bound, sanitized, oriented, resized to at most 2048×2048 and
 converted to JPEG; metadata and animation are removed. Previews and downloads
-use those sanitized bytes, not the original image. Text/Office attachments
+use those sanitized bytes, not the original image. Text/Office/PDF attachments
 contribute up to 8,000 characters per file to model context; they are untrusted
 reference data, not instructions. Image interpretation requires a vision-capable
 model and unsupported vision fails visibly. Attachments are also available in
@@ -256,6 +272,28 @@ without `reading_scope.office_extraction = "structured-v1"` retain the legacy
 flattened extraction so saved excerpt statistics are not silently reinterpreted.
 Re-upload an old file to obtain structured excerpts.
 
+PDF uses the existing locked `pypdf` dependency in a disposable local process,
+not the knowledge-ingestion parser or a browser PDF renderer. Each parse has
+a 15-second wall limit and 512 MiB process-memory ceiling (Windows Job Object
+or Linux address-space limit; Linux also limits CPU time to 10 seconds).
+Unavailable OS limits fail closed with 503; other platforms are not currently
+supported. At most two attachment processors run per Host, outside database/
+Session commit locks; timeout terminates and reaps the child. These are resource
+fences, not an OS filesystem/network sandbox or malware scanner.
+
+PDF must be at most 10 MiB and 50 pages. Bounded strict parsing limits object
+graphs, page trees, stream/filter/operation work and decoded streams (4 MiB).
+Encrypted, form/action/embedded-file PDFs, malformed/over-limit documents and
+documents without extractable text fail explicitly. No password guessing, OCR,
+JavaScript, external relationship fetching, image rendering or external tools
+are used. Text has page markers and the shared 8,000-character excerpt limit;
+scope reports total/processed pages, not proof the model read the entire file.
+Original PDF bytes are forced downloads with no inline PDF viewer, and remain
+untrusted if opened externally. PDF uses the same Session isolation, retry
+identity, expiry, quotas, non-Memory behavior and model text-budget gates.
+Backend regressions exercise real PDF bytes and the isolated worker; browser
+PDF tests exercise only the synthetic upload/API presentation contract.
+
 Model input has separate bounded budgets: `model.max_input_chars` continues
 to count text, instructions, serialized references/tool results and image
 metadata, while `model.max_input_images` (default 5) and
@@ -267,11 +305,58 @@ warning to stay within the remaining budgets. These are safety/admission limits,
 not provider-specific vision token estimates. Unsupported/non-image payloads
 do not bypass the character guard.
 
-Uploads and content preparation have bounded concurrency. Image/Office
+Uploads and content preparation have bounded concurrency. Image/Office/PDF
 processing and filesystem work run off the Host event loop; slow upload streams
 do not hold the attachment commit lock or Session chat lock. Final quota checks,
 file installation and metadata commit remain serialized, including cancellation
 and Session deletion.
+
+### Dependency audit disposition (2026-11-13)
+
+The initial online audits reported **15 affected package entries** (7 high,
+8 moderate), including **6 high production entries**. These are package counts,
+not 15 independent or demonstrated application exploits. Targeted compatible
+updates retain Next/eslint-config-next `16.4.0-canary.20`:
+
+| Advisory family | Resolution / disposition |
+| --- | --- |
+| Zod, GHSA-mrhx-c7xc-m3w5 | AG-UI client/internal packages 1.0.4 support the patched Zod peer; direct Zod 4.6.7 removes the vulnerable 3.25.76 / 4.5.4 branches. AG-UI transport/schema regressions remain required. |
+| Sharp/librsvg, GHSA-wq5f-xc86-pv6w | Updated 0.35.4 to 0.35.5 within Next's range. No malicious-SVG decode path was established in the static Python-served production export; reassess if server-side image processing is introduced. |
+| source-map-js, GHSA-68fv-2mgg-jv7q | Updated 1.2.1 to 1.2.2 in Next/PostCSS/Tailwind tooling. No user-document source-map parsing path was identified. |
+| brace-expansion, GHSA-q2hr-2g5m-vwhr / GHSA-qhr7-859c-m2p7 / GHSA-6j4f-fj2g-mc7p | Development branches updated to patched 1.1.21 / 5.0.12 without major overrides. |
+| minimatch, GHSA-g3hv-75wg-m249 | **Deferred, development-only:** typescript-eslint 8.70.0 retains minimatch 10.2.6. The advisory requires `optimizationLevel >= 2`; the inspected parser call passes only `{ dot: true }`, with no untrusted remote glob path identified. The available 11.0.1 fix is outside the upstream requested major; do not force that override or downgrade Next to satisfy an audit summary. |
+
+The successful `npm update sharp source-map-js brace-expansion` online audit
+reported **8 moderate entries, no high/critical entries**, consistent with
+minimatch and its development ancestors. `npm ls --omit=dev minimatch
+brace-expansion --all` contains neither package. This is **not a zero-findings
+claim**: monitor the minimatch advisory and typescript-eslint's compatible
+resolution; reopen the exception before enabling higher glob optimization or
+accepting untrusted build/lint patterns, and at the next dependency refresh.
+
+Interim standalone `npm audit --json` / `--omit=dev` attempts were blocked
+by the configured proxy's HTTP 429; a public-endpoint attempt failed TLS.
+TLS verification and registry configuration were not weakened. An offline
+audit returned an empty report despite the known moderate findings and was
+explicitly rejected as evidence. The final **online production audit succeeded
+with exit 0 and zero entries**. The subsequent full standalone audit still hit
+HTTP 429; its last successful post-upgrade all-dependency counts are the
+8 moderate entries from the update audit above, not the offline zero report.
+Re-run the full command when the audit service recovers, retaining nonzero
+advisory/service failures and updating this record:
+
+```powershell
+npm audit --json
+npm audit --omit=dev --json
+npm ls @ag-ui/client zod sharp source-map-js brace-expansion minimatch --all
+```
+
+Disposition is scoped to the frontend dependency audit for issue #12, not an
+exhaustive supply-chain/security assessment or proof of exploitability. No
+blanket `npm audit fix --force`, major glob override or automatic install-script
+approval was used.
+
+### Attachment interaction and lifecycle
 
 The composer reports actual upload transfer progress separately from server
 validation/saving. Cancel stops the browser request but does not claim that a

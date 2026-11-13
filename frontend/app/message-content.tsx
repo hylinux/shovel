@@ -9,8 +9,9 @@ import rehypeSanitize, { defaultSchema } from "rehype-sanitize";
 import rehypeKatex from "rehype-katex";
 import rehypeHighlight from "rehype-highlight";
 import { useI18n } from "./locale-context";
-import { csvTable, safeHttpUrl, safeImageUrl } from "./message-format";
+import { csvTable, formatJson, safeHttpUrl, safeImageUrl } from "./message-format";
 import { previewQueue } from "./preview-renderer";
+import { MediaViewer } from "./media-viewer";
 
 const schema = {
   ...defaultSchema,
@@ -44,11 +45,14 @@ function ImageContent({ src, alt, sessionId }: { src?: string; alt?: string; ses
   const { t } = useI18n();
   const safe = safeImageUrl(src, sessionId);
   if (!safe) return <span className="blocked-image"><ExternalLink href={src}>{alt || t("External image (not loaded)")}</ExternalLink><small> {t("Remote images are not loaded automatically.")}</small></span>;
-  return <a className="message-image-link" href={safe} target="_blank" rel="noopener noreferrer" referrerPolicy="no-referrer">
+  return <><a className="message-image-link" href={safe} target="_blank" rel="noopener noreferrer" referrerPolicy="no-referrer">
     {/* Uploaded raster images use the local API, not the Next.js image optimizer. */}
     {/* eslint-disable-next-line @next/next/no-img-element */}
     <img className="message-image" src={safe} alt={alt || t("Uploaded image")} loading="lazy" />
-  </a>;
+  </a><MediaViewer>{zoom =>
+    // eslint-disable-next-line @next/next/no-img-element
+    <img src={safe} alt={alt || t("Uploaded image")} style={{ width: `${zoom}%` }} />
+  }</MediaViewer></>;
 }
 
 function IsolatedPreview({ source, kind }: { source: string; kind: "html" | "mermaid" }) {
@@ -80,6 +84,7 @@ function IsolatedPreview({ source, kind }: { source: string; kind: "html" | "mer
       : result.error ? <p className="warning" role="status">{t("Preview unavailable. View the source.")} <span className="preserve">{t(result.error)}</span></p>
         : <><iframe title={kind === "html" ? t("Isolated HTML preview") : t("Mermaid diagram")} style={{ height }} sandbox="" referrerPolicy="no-referrer" srcDoc={result.document} />
           <label className="preview-size">{t("Preview height")} <input type="range" min={160} max={800} step={20} value={height} onChange={event => setHeight(Number(event.target.value))} /><output>{t("{p0} pixels", { p0: height })}</output></label>
+          {kind === "mermaid" && result.document && <MediaViewer diagram>{zoom => <iframe title={t("Mermaid diagram")} sandbox="" referrerPolicy="no-referrer" srcDoc={result.document?.replace("</style>", `body{zoom:${zoom / 100}}</style>`)} />}</MediaViewer>}
           <small className="muted">{t("Isolated preview: scripts, navigation and remote resources are disabled.")}</small></>}
   </div>;
 }
@@ -101,14 +106,23 @@ function CodeBlock({ children, className, streaming = false }: { children: React
   const language = /(?:^|\s)language-([\w-]+)/.exec(className || "")?.[1]?.toLowerCase() || "";
   const previewable = ["mermaid", "html", "csv", "latex", "tex"].includes(language);
   const [raw, setRaw] = useState(false);
+  const [json, setJson] = useState(false);
   return <div className="message-code">
-    <div className="message-code-toolbar"><span>{language || t("Code")}</span><div>{previewable && !streaming && <button type="button" aria-pressed={raw} onClick={() => setRaw(!raw)}>{raw ? t("Preview") : t("View source")}</button>}<CopyText text={source} /></div></div>
-    {!raw && !streaming && language === "mermaid" ? <IsolatedPreview source={source} kind="mermaid" />
+    <div className="message-code-toolbar"><span>{language || t("Code")}</span><div>{language === "json" && !streaming && <button type="button" aria-pressed={json} onClick={() => setJson(!json)}>{t(json ? "Original JSON" : "Format JSON")}</button>}{previewable && !streaming && <button type="button" aria-pressed={raw} onClick={() => setRaw(!raw)}>{raw ? t("Preview") : t("View source")}</button>}<CopyText text={source} /></div></div>
+    {json && language === "json" && !streaming ? <JsonPreview source={source} /> : !raw && !streaming && language === "mermaid" ? <IsolatedPreview source={source} kind="mermaid" />
       : !raw && !streaming && language === "html" ? <IsolatedPreview source={source} kind="html" />
         : !raw && !streaming && language === "csv" ? <CsvPreview source={source} />
           : !raw && !streaming && ["latex", "tex"].includes(language) ? <Markdown remarkPlugins={[remarkMath]} rehypePlugins={[[rehypeKatex, { trust: false, strict: "error", maxExpand: 100, maxSize: 20 }]]}>{`$$\n${source}\n$$`}</Markdown>
             : <pre tabIndex={0}><code className={className}>{children}</code></pre>}
   </div>;
+}
+
+function JsonPreview({ source }: { source: string }) {
+  const { t } = useI18n();
+  let text: string;
+  try { text = formatJson(source); }
+  catch (error) { return <><p className="warning" role="alert">{t(error instanceof Error ? error.message : "Invalid JSON. Check the source.")}</p><pre tabIndex={0}><code>{source}</code></pre></>; }
+  return <pre tabIndex={0}><code>{text}</code></pre>;
 }
 
 export const RichText = memo(function RichText({ content, sessionId, streaming = false }: { content: string; sessionId?: string; streaming?: boolean }) {

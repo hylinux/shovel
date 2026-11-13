@@ -6,17 +6,20 @@ import { attachmentPath } from "./message-format";
 import { useI18n } from "./locale-context";
 import type { SessionDraft } from "./session-drafts";
 import { attachmentNow, attachmentServerNow, subscribeAttachmentClock } from "./attachment-clock";
+import { MediaViewer } from "./media-viewer";
 
 export type Attachment = {
   id: string; name: string; media_type: string; size: number; url: string; expires_at: number;
   model_context: "text" | "image";
   reading_scope?: { original_bytes?: number; stored_bytes?: number; original_width?: number; original_height?: number;
-    width?: number; height?: number; excerpt_chars?: number; truncated?: boolean; office_extraction?: string };
+    width?: number; height?: number; excerpt_chars?: number; truncated?: boolean; office_extraction?: string;
+    pdf_extraction?: string; pages?: number; read_pages?: number };
   available?: boolean;
 };
 export type AttachmentStatus = {
   items: Attachment[];
   limits: { extensions: string[]; max_files: number; max_file_bytes: number; max_text_chars: number;
+    max_pdf_pages?: number; pdf_timeout_seconds?: number; max_pdf_memory_bytes?: number;
     max_image_pixels: number; max_image_edge: number; max_input_images: number; max_input_image_bytes: number };
   remaining: { pending_files: number; session_files: number; session_bytes: number; store_bytes: number };
 };
@@ -113,6 +116,7 @@ export function AttachmentScope({ item }: { item: Attachment }) {
     : t("Prepared excerpt: {p0} characters. {p1}", { p0: scope.excerpt_chars, p1: t(scope.truncated ? "Truncated." : "Not truncated.") })}
     {" "}{t("Original / stored: {p0} / {p1} bytes.", { p0: scope.original_bytes, p1: scope.stored_bytes })}
     {scope.office_extraction && <>{" "}{t("Structured Office excerpt: paragraphs/slides/sheets and stored cell values only; formulas are not recalculated.")}</>}
+    {scope.pdf_extraction && <>{" "}{t("PDF text excerpt: {p0} of {p1} pages processed; no OCR, images, forms or embedded files.", { p0: scope.read_pages, p1: scope.pages })}</>}
   </small>;
 }
 
@@ -151,6 +155,10 @@ function AvailableAttachments({ items, sessionId, status }: { items: Attachment[
       {!expired && item.media_type.startsWith("image/") && <a className="message-image-link" href={url} target="_blank" rel="noopener noreferrer" referrerPolicy="no-referrer">
         <UploadedImage src={url} name={item.name} attachment={item} />
       </a>}
+      {!expired && item.media_type.startsWith("image/") && <MediaViewer>{zoom =>
+        // eslint-disable-next-line @next/next/no-img-element
+        <img src={url} alt={item.name} style={{ width: `${zoom}%` }} />
+      }</MediaViewer>}
       <figcaption>{expired ? <span>{item.name} · {t("Attachment unavailable or expired")}</span> : <a href={`${url}?download=true`} download={item.name}>{item.name}</a>}
         <small>{Math.ceil(item.size / 1024)} {"KB"} · {t("Expires")} {date(item.expires_at)}</small>
         <small>{t(item.model_context === "image" ? "Image input for the model" : "Text excerpt for the model")}</small>

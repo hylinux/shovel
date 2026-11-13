@@ -34,7 +34,7 @@ function Chat({ sessionId, status, onActivity, draft }: { sessionId: string; sta
   const [before, setBefore] = useState<number>();
   const historyPath = `/conversations/${segment(sessionId)}/messages?limit=100${before ? `&before=${before}` : ""}`;
   const history = useQuery<MessagePage>(historyPath);
-  const { content, format, preview } = useSyncExternalStore(draft.subscribe, draft.getSnapshot, draft.getSnapshot);
+  const { content, format, preview, codeLanguage = "" } = useSyncExternalStore(draft.subscribe, draft.getSnapshot, draft.getSnapshot);
   const setContent = (content: string) => draft.update({ content });
   const setFormat = (format: MessageFormat) => draft.update({ format });
   const setPreview = (preview: boolean) => draft.update({ preview });
@@ -77,7 +77,7 @@ function Chat({ sessionId, status, onActivity, draft }: { sessionId: string; sta
     if (wasBusy.current && !action.busy) questionRef.current?.focus({ preventScroll: true });
     wasBusy.current = action.busy;
   }, [action.busy]);
-  const outgoing = content.trim() ? formattedMessage(content, format) : "";
+  const outgoing = content.trim() ? formattedMessage(content, format, codeLanguage) : "";
   const tooLong = outgoing.length > 16000;
   const budgetInput = !tooLong && !attachments.uploading && !attachments.invalid && !workingUnavailable && (outgoing || attachments.completed.length)
     ? { content: outgoing, resource_ids: [], memory_enabled: true, search_mode: "auto", working_task_id: chosenTask,
@@ -127,10 +127,10 @@ function Chat({ sessionId, status, onActivity, draft }: { sessionId: string; sta
     <Feedback error={action.error} />
     {workingUnavailable && <p className="warning" role="alert">{t("The selected working task is unavailable. Refresh or select an active task, or explicitly choose No working task before sending.")}</p>}
     <label htmlFor="question">{t("Message")}</label>
-    <div className="composer-editor"><ComposerTools value={content} onChange={setContent} textarea={questionRef} disabled={action.busy} format={format} onFormat={setFormat} preview={preview} onPreview={togglePreview} />
+    <div className="composer-editor"><ComposerTools value={content} onChange={setContent} textarea={questionRef} disabled={action.busy} format={format} onFormat={setFormat} language={codeLanguage} onLanguage={codeLanguage => draft.update({ codeLanguage })} preview={preview} onPreview={togglePreview} />
     <div ref={previewRef} id="composer-preview" className="composer-preview" hidden={!preview} tabIndex={-1} aria-label={t("Message preview")} onKeyDown={event => {
       if (event.key === "Escape") { event.preventDefault(); togglePreview(); }
-    }}>{preview && <RichText content={formattedMessage(content, format)} sessionId={sessionId} />}</div>
+    }}>{preview && <RichText content={formattedMessage(content, format, codeLanguage)} sessionId={sessionId} />}</div>
     <textarea ref={questionRef} id="question" hidden={preview} value={content} onChange={(event) => setContent(event.target.value)} onPaste={event => {
       const files = Array.from(event.clipboardData.files);
       if (files.length && !action.busy) {
@@ -168,7 +168,11 @@ function Chat({ sessionId, status, onActivity, draft }: { sessionId: string; sta
     </div>}
     <details className="attachment-policy"><summary>{t("Attachment limits and privacy")}</summary>
       <p>{t("Uploads stay local until you send. Pending files expire after 24 hours; sent files expire after 7 days. Deleting the Session removes its files.")}</p>
-      {attachmentStatus.data && <p>{t("Images: at most {p0} pixels before decoding, resized to {p1} × {p1}. Text/Office excerpt limit: {p2} characters per file.", { p0: attachmentStatus.data.limits.max_image_pixels, p1: attachmentStatus.data.limits.max_image_edge, p2: attachmentStatus.data.limits.max_text_chars })}</p>}
+      {attachmentStatus.data && <p>{t("Images: at most {p0} pixels before decoding, resized to {p1} × {p1}. Text/Office/PDF excerpt limit: {p2} characters per file.", { p0: attachmentStatus.data.limits.max_image_pixels, p1: attachmentStatus.data.limits.max_image_edge, p2: attachmentStatus.data.limits.max_text_chars })}</p>}
+      {attachmentStatus.data?.limits.max_pdf_pages && attachmentStatus.data.limits.pdf_timeout_seconds && attachmentStatus.data.limits.max_pdf_memory_bytes && <p>{t("PDF: at most {p0} pages, {p1} seconds and {p2} MiB per parser. Text only; no OCR or embedded files.", {
+        p0: attachmentStatus.data.limits.max_pdf_pages, p1: attachmentStatus.data.limits.pdf_timeout_seconds,
+        p2: attachmentStatus.data.limits.max_pdf_memory_bytes / 1048576,
+      })}</p>}
       <p>{t("Image understanding requires a vision-capable model. Files are untrusted reference data, not executable instructions or indexed resources.")}</p>
     </details>
   </form></>;

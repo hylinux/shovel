@@ -2,11 +2,39 @@ import Papa from "papaparse";
 
 export type MessageFormat = "markdown" | "text" | "json" | "csv" | "html" | "latex" | "mermaid" | "code";
 export const messageFormats: MessageFormat[] = ["markdown", "text", "json", "csv", "html", "latex", "mermaid", "code"];
+export const codeLanguages = ["", "python", "javascript", "typescript", "json", "bash", "powershell", "sql", "html", "css", "cpp", "csharp", "go", "rust", "yaml"] as const;
 
-export function formattedMessage(source: string, format: MessageFormat): string {
+export function formattedMessage(source: string, format: MessageFormat, language = ""): string {
   if (format === "markdown") return source;
+  if (!codeLanguages.some(item => item === language)) throw new Error("Unsupported code language.");
   const fence = "`".repeat(Math.max(3, ...[...source.matchAll(/`+/g)].map(match => match[0].length + 1)));
-  return `${fence}${format === "code" ? "" : format === "text" ? "text" : format}\n${source}\n${fence}`;
+  return `${fence}${format === "code" ? language : format === "text" ? "text" : format}\n${source}\n${fence}`;
+}
+
+export function formatJson(source: string): string {
+  if (source.length > 100_000) throw new Error("JSON tools are limited to 100 KB.");
+  try { JSON.parse(source); } catch { throw new Error("Invalid JSON. Check the source."); }
+  // Format tokens, not parsed values: large numbers and duplicate keys must remain exact.
+  const tokens = source.match(/"(?:\\.|[^"\\])*"|[{}[\],:]|[^\s{}[\],:]+/g) || [];
+  let depth = 0;
+  let output = "";
+  const newline = () => "\n" + "  ".repeat(depth);
+  for (let index = 0; index < tokens.length; index++) {
+    const token = tokens[index];
+    if (token === "{" || token === "[") {
+      if (++depth > 64) throw new Error("JSON tools are limited to 64 nesting levels.");
+      output += token;
+      if (tokens[index + 1] !== "}" && tokens[index + 1] !== "]") output += newline();
+    } else if (token === "}" || token === "]") {
+      depth--;
+      if (tokens[index - 1] !== "{" && tokens[index - 1] !== "[") output += newline();
+      output += token;
+    } else if (token === ",") output += "," + newline();
+    else if (token === ":") output += ": ";
+    else output += token;
+    if (output.length > 100_000) throw new Error("Formatted JSON exceeds 100,000 characters. View the original source.");
+  }
+  return output;
 }
 
 export function safeHttpUrl(value: string | undefined): string | undefined {

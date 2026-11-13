@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, type RefObject } from "react";
-import { insertMarkup, type EditorInsertion, type MessageFormat, messageFormats } from "./message-format";
+import { codeLanguages, formatJson, insertMarkup, type EditorInsertion, type MessageFormat, messageFormats } from "./message-format";
 import { useI18n } from "./locale-context";
 
 const tools: { label: string; symbol: string; insertion: EditorInsertion }[] = [
@@ -20,25 +20,39 @@ const tools: { label: string; symbol: string; insertion: EditorInsertion }[] = [
 ];
 const formatLabels: Record<MessageFormat, string> = { markdown: "Markdown", text: "Plain text", json: "JSON", csv: "CSV", html: "HTML", latex: "LaTeX", mermaid: "Mermaid", code: "Code" };
 
-export function ComposerTools({ value, onChange, textarea, disabled, format, onFormat, preview, onPreview }: {
+export function ComposerTools({ value, onChange, textarea, disabled, format, onFormat, language, onLanguage, preview, onPreview }: {
   value: string; onChange: (value: string) => void; textarea: RefObject<HTMLTextAreaElement | null>; disabled: boolean;
+  language: string; onLanguage: (language: string) => void;
   format: MessageFormat; onFormat: (format: MessageFormat) => void; preview: boolean; onPreview: () => void;
 }) {
   const { t } = useI18n();
-  const [notice, setNotice] = useState("");
+  const [notice, setNotice] = useState<{ source: string; text: string; error: boolean }>();
   function insert(insertion: EditorInsertion) {
     const element = textarea.current;
     if (!element) return;
     const result = insertMarkup(value, element.selectionStart, element.selectionEnd, insertion);
-    if (result.value.length > 16000) { setNotice("Formatting would exceed 16,000 characters. Shorten the message first."); return; }
-    setNotice("");
+    if (result.value.length > 16000) { setNotice({ source: value, text: "Formatting would exceed 16,000 characters. Shorten the message first.", error: true }); return; }
+    setNotice(undefined);
     onChange(result.value);
     requestAnimationFrame(() => { element.focus(); element.setSelectionRange(result.start, result.end); });
   }
+  function json(pretty: boolean) {
+    try {
+      const result = formatJson(value);
+      if (pretty && result.length > 16000) throw new Error("Formatting would exceed 16,000 characters. Shorten the message first.");
+      if (pretty) onChange(result);
+      setNotice({ source: pretty ? result : value, text: "JSON is valid.", error: false });
+    } catch (error) {
+      setNotice({ source: value, text: error instanceof Error ? error.message : "Invalid JSON. Check the source.", error: true });
+    }
+  }
   return <><div className="composer-tools">
-    <div className="formatting-tools" role="group" aria-label={t("Message formatting")}>{tools.map(tool => <button key={tool.label} type="button" title={t(tool.label)} aria-label={t(tool.label)} disabled={disabled || preview || format !== "markdown"} onClick={() => insert(tool.insertion)}>{tool.symbol}</button>)}</div>
+    <div className="formatting-tools" role="group" aria-label={t("Message formatting")}>{tools.map(tool => <button key={tool.label} type="button" title={t(tool.label)} aria-label={t(tool.label)} disabled={disabled || preview || format !== "markdown"} onClick={() => insert(tool.label === "Code block" ? { ...tool.insertion, before: `\n\`\`\`${language}\n` } : tool.insertion)}>{tool.symbol}</button>)}</div>
     <div className="composer-modes"><select aria-label={t("Message format")} disabled={disabled} value={format} onChange={event => onFormat(event.target.value as MessageFormat)}>
       {messageFormats.map(item => <option key={item} value={item}>{t(formatLabels[item])}</option>)}
-    </select><button type="button" aria-pressed={preview} aria-controls="composer-preview" disabled={disabled} onClick={onPreview}>{preview ? t("Edit") : t("Preview")}</button></div>
-  </div>{notice && <small className="warning composer-format-notice" role="alert">{t(notice)}</small>}</>;
+    </select>{(format === "code" || format === "markdown") && <select aria-label={t("Code language")} value={language} disabled={disabled || preview} onChange={event => onLanguage(event.target.value)}>
+      {codeLanguages.map(item => <option key={item} value={item}>{item || t("Unspecified language")}</option>)}
+    </select>}{format === "json" && <><button type="button" disabled={disabled || preview} onClick={() => json(false)}>{t("Validate JSON")}</button><button type="button" disabled={disabled || preview} onClick={() => json(true)}>{t("Format JSON")}</button></>}
+    <button type="button" aria-pressed={preview} aria-controls="composer-preview" disabled={disabled} onClick={onPreview}>{preview ? t("Edit") : t("Preview")}</button></div>
+  </div>{notice?.source === value && <small className={`${notice.error ? "warning" : "muted"} composer-format-notice`} role={notice.error ? "alert" : "status"}>{t(notice.text)}</small>}</>;
 }

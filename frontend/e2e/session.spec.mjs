@@ -240,3 +240,107 @@ test("Offscreen rich previews defer work, duplicate diagrams reuse output and he
     expect(await page.evaluate(() => window.bad)).toBeUndefined();
     await expect(html.locator("iframe")).toHaveAttribute("sandbox", "");
   });
+
+test("JSON tools preserve exact numbers and duplicate keys; invalid input is not silently rewritten", async ({ page }) => {
+  const source = '{"n":900719925474099312345,"n":1e999,"a":[]}';
+  await page.getByLabel("Message format", { exact: true }).selectOption("json");
+  await input(page).fill("{bad}");
+  await page.getByRole("button", { name: "Format JSON", exact: true }).click();
+  await expect(page.locator(".composer").getByRole("alert")).toContainText("Invalid JSON");
+  await expect(input(page)).toHaveValue("{bad}");
+  await input(page).fill(source);
+  await expect(page.locator(".composer-format-notice")).toHaveCount(0);
+  await page.getByRole("button", { name: "Validate JSON", exact: true }).click();
+  await expect(input(page)).toHaveValue(source);
+  await expect(page.locator(".composer-format-notice")).toHaveText("JSON is valid.");
+  await page.getByRole("button", { name: "Format JSON", exact: true }).click();
+  const formatted = await input(page).inputValue();
+  expect(formatted).toContain('"n": 900719925474099312345');
+  expect(formatted).toContain('"n": 1e999');
+  expect(formatted).toContain("\n");
+  await input(page).fill("");
+  await control(page, { richHistory: true });
+  await page.reload();
+  const message = page.locator('[data-message-id="message-28"]');
+  await message.scrollIntoViewIfNeeded();
+  await message.getByRole("button", { name: "Format JSON", exact: true }).click();
+  await expect(message.locator(".message-code pre")).toContainText('"n": 900719925474099312345');
+  await page.evaluate(() => Object.defineProperty(navigator, "clipboard", { configurable: true, value: {
+    writeText: async value => { window.fixtureCopied = value; },
+  } }));
+  await message.locator(".message-code").getByRole("button", { name: "Copy source", exact: true }).click();
+  expect(await page.evaluate(() => window.fixtureCopied)).toBe('{"n":900719925474099312345,"n":1e999,"safe":"<script>"}');
+  await message.getByRole("button", { name: "Original JSON", exact: true }).click();
+  await expect(message.locator(".message-code pre")).toContainText('"n":900719925474099312345');
+});
+
+test("Code language survives Session navigation and reaches preview, send budget and saved source", async ({ page }) => {
+  await page.getByLabel("Message format", { exact: true }).selectOption("code");
+  await page.getByLabel("Code language", { exact: true }).selectOption("python");
+  await input(page).fill("print(1)");
+  await page.getByRole("button", { name: "New Session", exact: true }).click();
+  await expect(input(page)).toHaveValue("");
+  await page.getByRole("button", { name: /Fixture Session/ }).click();
+  await expect(page.getByLabel("Code language", { exact: true })).toHaveValue("python");
+  await expect(input(page)).toHaveValue("print(1)");
+  await expect(send(page)).toBeEnabled();
+  expect((await fixture(page)).previews.at(-1).content).toBe("```python\nprint(1)\n```");
+  await send(page).click();
+  await expect(input(page)).toHaveValue("");
+  const message = page.locator("[data-message-id].user").last();
+  await message.getByRole("button", { name: "View source", exact: true }).click();
+  await expect(message.locator(".message-source")).toHaveText("```python\nprint(1)\n```");
+});
+
+test("Image and diagram viewers support keyboard zoom, Escape and focus return without relaxing isolation", async ({ page }) => {
+  await page.locator("input[type=file]").setInputFiles({ name: "fixture.png", mimeType: "image/png", buffer: Buffer.from(png, "base64") });
+  await expect(page.locator(".upload-list")).toContainText("Ready");
+  await expect(send(page)).toBeEnabled();
+  await send(page).click();
+  await expect(input(page)).toHaveValue("");
+  const imageButton = page.getByRole("button", { name: "Enlarge image", exact: true });
+  await imageButton.click();
+  const image = page.getByRole("dialog", { name: "Enlarged image", exact: true });
+  await expect(image).toBeVisible();
+  await image.getByLabel("Zoom").press("End");
+  await expect(image.getByLabel("Zoom")).toHaveValue("300");
+  await expect(image.locator("img")).toHaveAttribute("style", /300%/);
+  const canvas = image.getByRole("region", { name: "Enlarged content" });
+  await canvas.focus();
+  await canvas.press("ArrowRight");
+  await expect.poll(() => canvas.evaluate(element => element.scrollLeft)).toBeGreaterThan(0);
+  await image.getByRole("button", { name: "Reset zoom" }).click();
+  await expect(image.getByLabel("Zoom")).toHaveValue("100");
+  await image.press("Escape");
+  await expect(image).toHaveCount(0);
+  await expect(imageButton).toBeFocused();
+  await control(page, { richHistory: true });
+  await page.reload();
+  const diagram = page.locator('[data-message-id="message-25"]');
+  await diagram.scrollIntoViewIfNeeded();
+  const diagramButton = diagram.getByRole("button", { name: "Enlarge diagram" });
+  await diagramButton.click();
+  const viewer = page.getByRole("dialog", { name: "Enlarged diagram", exact: true });
+  await expect(viewer.locator("iframe")).toHaveAttribute("sandbox", "");
+  await expect(viewer.locator("iframe")).toHaveAttribute("srcdoc", /script-src 'none'/);
+  await viewer.getByLabel("Zoom").press("End");
+  await expect(viewer.locator("iframe")).toHaveAttribute("srcdoc", /zoom:3/);
+  await viewer.press("Escape");
+  await expect(diagramButton).toBeFocused();
+});
+
+test("PDF upload exposes page scope and unsupported-document failures without treating files as images", async ({ page }) => {
+  await page.locator("input[type=file]").setInputFiles({ name: "reference.pdf", mimeType: "application/pdf", buffer: Buffer.from("%PDF-contract-fixture") });
+  await expect(page.locator(".upload-list")).toContainText("2 of 2 pages processed");
+  await expect(page.locator(".upload-list img")).toHaveCount(0);
+  await expect(send(page)).toBeEnabled();
+  await send(page).click();
+  await expect(input(page)).toHaveValue("");
+  const attachment = page.locator(".attachment-card").last();
+  await expect(attachment).toContainText("PDF text excerpt");
+  await expect(attachment.getByRole("link", { name: "reference.pdf" })).toHaveAttribute("download", "reference.pdf");
+  await control(page, { failPdf: true });
+  await page.locator("input[type=file]").setInputFiles({ name: "encrypted.pdf", mimeType: "application/pdf", buffer: Buffer.from("%PDF-contract-fixture") });
+  await expect(page.locator(".upload-list").getByRole("alert")).toContainText("Encrypted PDFs are not supported.");
+  await expect(send(page)).toBeDisabled();
+});

@@ -8,7 +8,8 @@ import { setTimeout as delay } from "node:timers/promises";
 const root = resolve("out");
 await stat(resolve(root, "index.html"));
 const clients = new Map();
-const limits = { extensions: [".txt", ".png"], max_files: 5, max_file_bytes: 10485760,
+const limits = { extensions: [".txt", ".png", ".pdf"], max_files: 5, max_file_bytes: 10485760,
+  max_pdf_pages: 50, pdf_timeout_seconds: 15, max_pdf_memory_bytes: 536870912,
   max_text_chars: 8000, max_image_pixels: 16000000, max_image_edge: 2048,
   max_input_images: 2, max_input_image_bytes: 10485760 };
 function state(req, res) {
@@ -61,6 +62,7 @@ async function api(req, res, url, data) {
     const items = data.messages.filter(item => item.conversation_id === identifier && item.sequence < before).slice(-limit).map(item => {
       if (data.richHistory && [25, 26].includes(item.sequence)) return { ...item, content: "```mermaid\nflowchart LR\n A --> B\n```" };
       if (data.richHistory && item.sequence === 27) return { ...item, content: '```html\n<h1>Safe fixture</h1><script>window.parent.bad=true</script><img src="https://invalid.example/tracker">\n```' };
+      if (data.richHistory && item.sequence === 28) return { ...item, content: '```json\n{"n":900719925474099312345,"n":1e999,"safe":"<script>"}\n```' };
       return data.historyAttachments ? { ...item, attachments: [{ id: `00000000-0000-4000-8000-${String(item.sequence).padStart(12, "0")}`,
         name: "Synthetic history.txt", media_type: "text/plain", model_context: "text", size: 12, expires_at: 2000000000 }] } : item;
     });
@@ -92,14 +94,17 @@ async function api(req, res, url, data) {
       data.uploads.push(id);
       const name = url.searchParams.get("filename");
       const image = name.endsWith(".png");
+      const pdf = name.endsWith(".pdf");
       await delay(700);
+      if (pdf && data.failPdf) return json(res, { error: { message: "Encrypted PDFs are not supported." } }, 415);
       if (!data.attachments.has(id)) data.attachments.set(id, {
         id, session: identifier, name, size: bytes.length, bytes, available: true, bound: false,
-        media_type: image ? "image/png" : "text/plain", model_context: image ? "image" : "text",
+        media_type: image ? "image/png" : pdf ? "application/pdf" : "text/plain", model_context: image ? "image" : "text",
         url: path, expires_at: Math.floor(Date.now() / 1000) + 86400,
         reading_scope: { original_bytes: bytes.length, stored_bytes: bytes.length, ...(image
           ? { width: 1, height: 1, original_width: 1, original_height: 1 }
-          : { excerpt_chars: Math.min(8000, bytes.toString().length), truncated: bytes.toString().length > 8000 }) },
+          : { excerpt_chars: Math.min(8000, bytes.toString().length), truncated: bytes.toString().length > 8000,
+            ...(pdf ? { pdf_extraction: "text-v1", pages: 2, read_pages: 2 } : {}) }) },
       });
       return json(res, data.attachments.get(id));
     }

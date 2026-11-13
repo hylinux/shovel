@@ -31,6 +31,9 @@ class PdfExcerpt:
 def pdf_excerpt(data: bytes) -> PdfExcerpt:
     if not data.startswith(b"%PDF-") or len(data) > MAX_PDF_BYTES:
         raise RuntimeFailure("Invalid or oversized PDF attachment.", status=400)
+    creationflags = 0
+    if sys.platform == "win32":
+        creationflags = subprocess.CREATE_NO_WINDOW
     try:
         result = subprocess.run(
             [sys.executable, "-m", "shovel.runtime.pdf"],
@@ -39,7 +42,7 @@ def pdf_excerpt(data: bytes) -> PdfExcerpt:
             stderr=subprocess.DEVNULL,
             timeout=PDF_TIMEOUT,
             check=False,
-            creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0,
+            creationflags=creationflags,
         )
     except subprocess.TimeoutExpired as exc:
         raise RuntimeFailure("PDF parsing exceeded the 15-second limit.", status=413) from exc

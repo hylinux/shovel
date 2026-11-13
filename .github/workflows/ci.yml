@@ -169,7 +169,7 @@ jobs:
           retention-days: 7
 
   quality:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       # 主仓库放在 shovel/ 子目录
       - uses: actions/checkout@v5

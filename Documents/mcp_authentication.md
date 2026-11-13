@@ -1,6 +1,7 @@
 # MCP authentication
 
-This reference covers the P0-P5 implementation for #22 / #30. API Key,
+This reference covers the P0-P6 implementation and acceptance boundaries for
+#22 / #30. API Key,
 static Bearer/PAT, stdio credential references, OAuth application identities
 and explicit OAuth user authorization are implemented, including Settings
 controls. Real-provider acceptance remains separate.
@@ -363,7 +364,7 @@ OAuth authorization remains subject to the same platform/enterprise boundaries.
 
 ## Validation boundary
 
-Tests use local HTTP/stdio servers, synthetic secrets and in-memory stores.
+Default tests use local HTTP/stdio servers, synthetic secrets and in-memory stores.
 They cover actual discovery and tool calls, disabled/missing credentials,
 configuration conflicts, namespace isolation, storage failure, OAuth storage,
 401/403, redirection and secret absence from model requests. OAuth tests exercise
@@ -375,10 +376,87 @@ Settings interaction tests cover explicit authorization, stale poll fencing,
 cancel/disconnect confirmation, inert invalid URLs, write-only provisioning,
 revision conflicts, literal draft retention and Chinese presentation. Backend
 tests cover provisioning scope/revision/read-only restrictions, store failure,
-cancelled writes and cached-client invalidation. Static build/lint/type checks
-do not establish live provider or system-keyring acceptance.
+cancelled writes and cached-client invalidation.
 
-No real credentials, OS accounts or enterprise data are used. System keyring
-availability and real provider authentication are separate live checks. Internal
-and Mooncake Kusto MCP endpoints/auth parameters remain unconfirmed; this work
-does not establish enterprise admission or real-service acceptance.
+### Repeatable acceptance (P6)
+
+| Evidence | Coverage and boundary |
+| --- | --- |
+| `test_agent_extensions.py`, `test_mcp_auth.py` | Real local HTTP/stdio discovery and calls; API Key/Bearer/env injection, no-auth compatibility, allowed tools, scoped storage, failures and invalidated dispatch |
+| `test_mcp_oauth.py` | Local OAuth provider plus real MCP; user PKCE/refresh, application secret basic/post, callback/revocation/concurrency failures and endpoint fences |
+| OAuth containment regression | User and both application methods run a real Agent tool round trip through a mocked model, refresh/renew tokens, then exercise a failed exchange; access/refresh tokens, client secret, code/state, PKCE verifier and provider-private errors are absent from model requests/tool-call messages, public projections, errors and captured DEBUG/development logs |
+| `mcp-authentication.test.mjs` | Settings component interactions, failure/revision handling and localization |
+| `scripts/mcp-edge-smoke.mjs` | Ten actual headless Edge scenario groups against the production static export, with synthetic REST interception only |
+| `test_mcp_system_keyring.py` | Separately opted-in Windows Credential Manager storage check; no OAuth login, provider requests or existing credential access |
+
+Run the backend authentication suite from the repository root:
+
+```powershell
+uv run pytest backend\tests\test_agent_extensions.py backend\tests\test_mcp_auth.py backend\tests\test_mcp_oauth.py backend\tests\test_hosted_runtime.py --no-cov
+```
+
+From `frontend\`, run `npm ci`, `npm run lint`, `npm run typecheck`,
+`npm test`, `npm run build`, then `npm run test:smoke:edge`.
+Typecheck runs `next typegen && tsc --noEmit`: it generates `next-env.d.ts`
+and route types before checking SVG imports, without requiring a previous
+build. Generated declarations remain ignored rather than replaced with
+handwritten permissive SVG declarations.
+
+The Edge runner requires Microsoft Edge; it never falls back to another
+browser. It creates a fresh browser context and ephemeral loopback static
+server, blocks external requests and service workers, rejects unexpected APIs,
+and closes browser/server resources even on failure. It checks explicit
+authorization/safe links, cancellation, local-state polling versus connectivity,
+confirmed disconnect, write-only input clearing, draft retention, unsaved-draft
+fencing, exact revisions, absence of secrets/state in persistent storage and
+absence of page/console/network errors. No real Host, provider or keyring is
+used by this browser fixture. A successful run writes only a sanitized receipt
+to `frontend\.tools\mcp-edge-smoke.json`; an old receipt is removed before each run.
+The `mcp-edge-smoke` Windows CI job uses Node 22, the committed npm lock and
+the actual `msedge` channel, then uploads that receipt. The quality job also
+checks types before its first build.
+
+For the separate native-system-keyring check, on Windows only:
+
+```powershell
+$env:SHOVEL_RUN_MCP_KEYRING_TESTS = "1"
+try {
+    uv run pytest backend\tests\test_mcp_system_keyring.py --no-cov
+} finally {
+    Remove-Item Env:\SHOVEL_RUN_MCP_KEYRING_TESTS
+}
+```
+
+This is skipped by default, including ordinary CI. Explicit opt-in requires
+the native `WinVaultKeyring`; an unavailable or different backend fails rather
+than silently falling back or being reported as accepted. Each run uses a
+random `shovel.mcp.acceptance.<uuid>` service namespace and synthetic values,
+checks read/write/overwrite, workspace/service/endpoint isolation, OAuth
+record reuse/expiry/client info and secret clearing, then verifies deletion
+absence in cleanup even if an earlier assertion fails. It does not enumerate
+existing accounts, read or modify existing credentials, change the configured
+backend, or invoke WAM/interactive OS authentication.
+
+The P6 local Windows check passed with the native backend and verified cleanup;
+the ten browser scenario groups passed in Microsoft Edge 157.0.4341.46.
+These are synthetic storage/browser results, **not real-provider acceptance**.
+No real credentials, OS login or enterprise data are used.
+
+### Real-provider acceptance gate
+
+Real-provider validation remains **not run / blocked** until an approved
+target and operation are supplied. Record the following without secrets:
+
+| Required input | What must be established before execution |
+| --- | --- |
+| Target and cloud | Exact MCP endpoint (not a Kusto cluster URL), public/company/Mooncake environment, owner and permitted network route |
+| OAuth contract | Verified protected-resource metadata, issuer/discovery, client type/ID, exact backend redirect URI, scopes and resource binding; compatibility with the implemented restrictions above |
+| Credential preparation | Approved OS identity and environment/keyring reference provisioning; never paste tokens/client secrets into an Issue, command history or model context |
+| Approved operation | Who approves, test window, exact discovery/read-only tool and bounded arguments/data scope, allowed downstream use and required platform/enterprise grants |
+| Success and cleanup | Expected nonsecret outcome, disconnect/revocation expectations and evidence destination; stop and report incompatibility rather than weakening checks or retrying uncertain effects |
+
+Company and Mooncake Kusto MCP endpoints/auth parameters remain unconfirmed.
+Do not guess them, start login from a chat request, or treat synthetic receipts,
+OS-keyring availability or human approval as enterprise admission. A private
+provider or incompatible OAuth contract needs an explicit design decision,
+not a bypass of the current same-origin/public-DNS restrictions.

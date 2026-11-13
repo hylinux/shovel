@@ -4,6 +4,7 @@ import asyncio
 import base64
 import hashlib
 import json
+import logging
 import socket
 import time
 from collections.abc import AsyncIterator
@@ -15,6 +16,7 @@ from urllib.parse import parse_qs, urlencode, urlsplit
 import httpx
 import pytest
 import pytest_asyncio
+from agent_framework import Agent
 from agent_framework.openai import OpenAIChatCompletionClient
 from fastapi import FastAPI, Request
 from mcp.server.fastmcp import FastMCP
@@ -25,12 +27,14 @@ from shovel.config.agent_config import AgentSettings
 from shovel.config.settings import AppSettings
 from shovel.runtime.agent_extensions import AgentExtensions
 from shovel.runtime.api import configure_api, current_runtime
+from shovel.runtime.diagnostics import DevelopmentRequestLogging, development_logging
 from shovel.runtime.errors import RuntimeFailure
 from shovel.runtime.mcp_auth import MCPCredentials, MCPHTTPStatus, authenticated_http_client
 from shovel.runtime.mcp_config import MCPConfigurationService
 from shovel.runtime.mcp_oauth import MCPOAuthService
 from shovel.runtime.mcp_oauth_http import OAuthTransport
 from shovel.services.credentials import ChainedCredentialStore, EnvCredentialStore, InMemoryCredentialStore
+from test_agent_extensions import completion, tool_call
 
 BASE = "http://127.0.0.1:8765"
 CALLBACK = "http://127.0.0.1:8080/api/v1/agent/mcp/oauth/callback"
@@ -348,6 +352,106 @@ async def test_oauth_through_real_mcp_discovery_tool_call_and_explicit_rejection
         finally:
             await extensions.close()
     await service.close()
+
+
+@pytest.mark.parametrize(
+    ("kind", "method"),
+    [
+        ("oauth_user", "none"),
+        ("oauth_client_credentials", "client_secret_basic"),
+        ("oauth_client_credentials", "client_secret_post"),
+    ],
+)
+async def test_oauth_credentials_stay_out_of_model_projections_errors_and_logs(
+    tmp_path: Path,
+    provider: OAuthFixture,
+    kind: str,
+    method: str,
+    caplog: pytest.LogCaptureFixture,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    changes = {"token_endpoint_auth_method": method} if kind == "oauth_client_credentials" else {}
+    service = service_at(tmp_path, provider, kind, **changes)
+    entry = await service.entry("fixture")
+    app = FastAPI()
+    configure_api(app, lambda: None, AppSettings(http_port=8080))
+    app.dependency_overrides[current_runtime] = lambda: SimpleNamespace(mcp_auth=service)
+    params: dict[str, str] = {}
+    if kind == "oauth_user":
+        started = await service.start("fixture", entry.revision, CALLBACK)
+        params = await provider.consent(started)
+    caplog.clear()
+    requests: list[dict[str, Any]] = []
+    projections: list[str] = []
+
+    def model(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        requests.append(body)
+        if len(requests) == 1:
+            name = body["tools"][0]["function"]["name"]
+            return completion(calls=[tool_call(name, {"value": "safe-input"})])
+        results = [message["content"] for message in body["messages"] if message["role"] == "tool"]
+        assert any("oauth marker: safe-input" in text for text in results)
+        return completion(content="OAuth tool completed.")
+
+    extensions = AgentExtensions(AgentSettings(workspace_path=tmp_path), oauth=service)
+    try:
+        with caplog.at_level(logging.DEBUG), development_logging():
+            if params:
+                # Call the inbound ASGI transport directly: HTTPX caller logs are not Host logs.
+                async with httpx.ASGITransport(app=DevelopmentRequestLogging(app)) as transport:
+                    response = await transport.handle_async_request(
+                        httpx.Request("GET", CALLBACK, params=params)
+                    )
+                    await response.aread()
+                    assert response.status_code == 200
+                    projections.append(response.text)
+            else:
+                await service.token(entry)
+            record = await entry.storage.read_record()
+            record.expires_at = time.time() - 1
+            await entry.storage.write_record(record)
+            async with AsyncOpenAI(
+                api_key="fixture-model",
+                http_client=httpx.AsyncClient(transport=httpx.MockTransport(model)),
+            ) as sdk:
+                client = OpenAIChatCompletionClient(model="fixture", async_client=sdk)
+                await extensions.load(client)
+                agent = Agent(client, tools=extensions.tools)
+                assert (await agent.run("Echo safe-input.")).text == "OAuth tool completed."
+            assert provider.tool_calls == 1 and len(requests) == 2
+            assert len(provider.forms) == 2
+            assert provider.forms[-1]["grant_type"] == (
+                "refresh_token" if kind == "oauth_user" else "client_credentials"
+            )
+            projections.append(json.dumps(await service.status("fixture")))
+            projections.append(json.dumps(service.configuration.read()))
+            record = await entry.storage.read_record()
+            record.expires_at = time.time() - 1
+            await entry.storage.write_record(record)
+            provider.fail_token = True
+            with pytest.raises(RuntimeFailure) as failure:
+                await service.token(entry)
+            projections.append(str(failure.value))
+            projections.append(json.dumps(await service.status("fixture")))
+    finally:
+        await extensions.close()
+        await service.close()
+    assert caplog.records
+    captured = capsys.readouterr()
+    if params:
+        assert "http.completed" in captured.out
+    surfaces = json.dumps(requests) + "".join(projections) + caplog.text + captured.out + captured.err
+    secrets = [
+        "fixture-app-secret",
+        base64.b64encode(b"fixture-client:fixture-app-secret").decode(),
+        "fixture-private",
+        *provider.valid_tokens,
+        *(f"fixture-refresh-{index}" for index in (1, 2)),
+        *(params[key] for key in ("code", "state") if key in params),
+        *(form["code_verifier"] for form in provider.forms if "code_verifier" in form),
+    ]
+    assert all(secret not in surfaces for secret in secrets)
 
 
 async def test_user_authorization_change_projects_connection_restart(

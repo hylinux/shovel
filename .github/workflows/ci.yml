@@ -258,6 +258,38 @@ jobs:
           path: shovel/dist/
           retention-days: 7
 
+  mcp-edge-smoke:
+    runs-on: windows-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - name: Install locked browser tooling
+        working-directory: frontend
+        run: npm ci
+      - name: Ensure Microsoft Edge is available
+        working-directory: frontend
+        run: npx playwright-core install msedge
+      - name: Generate and check clean workbench types
+        working-directory: frontend
+        run: npm run typecheck
+      - name: Build static workbench
+        working-directory: frontend
+        run: npm run build
+      - name: Run synthetic MCP authentication smoke in Edge
+        working-directory: frontend
+        run: npm run test:smoke:edge
+      - uses: actions/upload-artifact@v5
+        with:
+          name: mcp-edge-smoke
+          path: frontend/.tools/mcp-edge-smoke.json
+          if-no-files-found: error
+          retention-days: 7
+
   enterprise-provenance:
     if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
     needs: [quality, windows-wam, windows-outlook]

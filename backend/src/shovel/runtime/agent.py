@@ -879,7 +879,7 @@ class ShovelAgent:
         self._instructions_lock = asyncio.Lock()
         if configuration is not None:
             self._apply_instructions(configuration)
-        self.extensions = AgentExtensions(runtime.settings.agent)
+        self.extensions = AgentExtensions(runtime.settings.agent, oauth=runtime.mcp_auth)
         self._client: httpx.AsyncClient | None = None
         self._sdk: AsyncOpenAI | None = None
         self._framework: OpenAIChatCompletionClient[Any] | None = None

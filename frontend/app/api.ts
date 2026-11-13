@@ -26,7 +26,11 @@ export type { Memory, MemoryInput, WorkingMemory } from "./memory-model";
 export type Items<T> = { items: T[] };
 export type Profile = { id: string; name: string; scan_mode: string; is_enabled: boolean; include: string[]; exclude: string[]; max_file_bytes: number; time_window_days: number | null; pipeline: Record<string, unknown> };
 export type MessagePage = { items: (Message & { sequence: number })[]; next_before: number | null };
-export type MCPConfiguration = { path: string; content: string; revision: string; exists: boolean; items: { name: string; transport: "stdio" | "http"; enabled: boolean }[]; validation_error: string | null; agent_loaded: boolean; agent_state: "loaded" | "not_loaded" | "restarting" | "restart_failed"; restart_required: boolean };
+export type MCPServer = { name: string; transport: "stdio" | "http"; enabled: boolean; auth_type: "none" | "legacy" | "api_key" | "bearer" | "stdio_credentials" | "oauth_user" | "oauth_client_credentials"; credential_refs: string[]; connection_state: "not_connected" | "connecting" | "connected" | "authentication_failed" | "permission_denied" | "authorization_required" | "configuration_changed" | "configuration_error" | "unavailable" | "restart_required" };
+export type MCPConfiguration = { path: string; content: string; revision: string; exists: boolean; items: MCPServer[]; warnings: string[]; validation_error: string | null; agent_loaded: boolean; agent_state: "loaded" | "not_loaded" | "restarting" | "restart_failed"; restart_required: boolean };
+export type MCPAuthorization = { state: "not_authorized" | "authorizing" | "authorized" | "reauthorization_required"; auth_type: "oauth_user" | "oauth_client_credentials"; revision: string; expires_at: UnixSeconds | null; authorization_id: string | null };
+export type MCPAuthorizationStart = { authorization_id: string; authorization_url: string; expires_at: UnixSeconds; issuer: string; scopes: string[] };
+export type MCPDisconnect = { state: "not_authorized"; local_cleared: boolean; provider_revocation: "unsupported" | "completed" };
 export type AgentInstructions = { path: string; content: string; revision: string; exists: boolean; builtin_instructions: string; max_length: number; validation_error: string | null; applied: boolean; agent_state: MCPConfiguration["agent_state"]; restart_required: boolean };
 export type RuntimeConfigValue = string | number | boolean | null;
 export type RuntimeConfigField = {

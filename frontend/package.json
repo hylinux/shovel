@@ -6,8 +6,9 @@
     "dev": "next dev",
     "build": "next build",
     "lint": "eslint",
-    "typecheck": "tsc --noEmit",
-    "test": "node --experimental-strip-types --test tests/*.test.mjs"
+    "typecheck": "next typegen && tsc --noEmit",
+    "test": "node --experimental-strip-types --test tests/*.test.mjs",
+    "test:smoke:edge": "node scripts/mcp-edge-smoke.mjs"
   },
   "dependencies": {
     "@ag-ui/client": "^1.0.3",
@@ -37,6 +38,7 @@
     "@types/react-dom": "^19",
     "eslint": "^9",
     "eslint-config-next": "16.4.0-canary.20",
+    "playwright-core": "1.65.0",
     "tailwindcss": "^4",
     "typescript": "^5"
   }

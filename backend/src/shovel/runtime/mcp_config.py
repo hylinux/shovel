@@ -28,6 +28,7 @@ class MCPConfigurationService:
     def _view(self, view: WorkspaceTextView) -> dict[str, Any]:
         error = None
         items = []
+        warnings = []
         try:
             config = self._validate(view["content"])
         except RuntimeFailure as exc:
@@ -41,10 +42,16 @@ class MCPConfigurationService:
                 }
                 for name, server in config.mcpServers.items()
             ]
+            if any(server.headers or server.env for server in config.mcpServers.values()):
+                warnings.append(
+                    "Legacy headers/env are saved and returned verbatim. "
+                    "Use auth/env_credentials references for secrets; existing values were not migrated."
+                )
         return {
             **view,
             "items": items,
             "validation_error": error,
+            "warnings": warnings,
         }
 
     def read(self) -> dict[str, Any]:

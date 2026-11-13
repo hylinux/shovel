@@ -574,6 +574,8 @@ the Main Agent's Memory, RAG, instructions, tools, or Skills.
 Workspace `agent-instructions.md` appends custom instructions to retained
 built-in rules. Instructions and MCP use revision-checked atomic UTF-8 saves.
 Saving instructions restarts the Agent automatically; saving MCP does not.
+See [MCP authentication](Documents/mcp_authentication.md) for API Key, static
+Bearer/PAT and stdio credential references, compatibility, and the OAuth roadmap.
 Restart after changing cached extensions/MCP, and finish active or queued chats
 first. A saved-but-failed instructions restart remains visible and blocks chat
 until recovery.

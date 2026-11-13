@@ -14,10 +14,13 @@ from agent_framework import Agent, MCPStreamableHTTPTool
 from agent_framework.openai import OpenAIChatCompletionClient
 from mcp.server.fastmcp import FastMCP
 from openai import AsyncOpenAI
+from starlette.responses import JSONResponse
+from starlette.types import Receive, Scope, Send
 
 from shovel.config.agent_config import AgentSettings
 from shovel.runtime.agent_extensions import AgentExtensions
 from shovel.runtime.errors import RuntimeFailure
+from shovel.runtime.mcp_auth import MCPHTTPStatus
 from shovel.runtime.mcp_config import MCPConfigurationService
 
 
@@ -136,23 +139,43 @@ async def test_python_extensions_are_not_imported_without_explicit_opt_in(tmp_pa
             await extensions.close()
 
 
-@pytest.mark.parametrize("transport", ["stdio", "http"])
+@pytest.mark.parametrize(
+    ("transport", "authentication"),
+    [("stdio", None), ("stdio", "env"), ("http", None), ("http", "api_key"), ("http", "bearer")],
+)
 async def test_real_mcp_transports_execute_and_close_on_owner_task(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, transport: str
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, transport: str, authentication: str | None
 ) -> None:
+    secret = "fixture-secret-not-for-the-model"
+    monkeypatch.setenv("SHOVEL_MCP_TEST_SECRET", secret)
+    monkeypatch.setenv("SHOVEL_MCP_UNSELECTED", "must-not-inherit")
+    authenticated_requests: list[str] = []
+    authenticated_clients: list[httpx.AsyncClient] = []
     async with AsyncExitStack() as stack:
         if transport == "stdio":
             script = tmp_path / "server.py"
             script.write_text(
                 "from mcp.server.fastmcp import FastMCP\n"
-                "server = FastMCP('test')\n"
+                "import os\n"
+                + (
+                    "assert os.environ['MCP_FIXTURE_SECRET'] == 'fixture-secret-not-for-the-model'\n"
+                    "assert 'SHOVEL_MCP_UNSELECTED' not in os.environ\n"
+                    if authentication
+                    else ""
+                )
+                + "server = FastMCP('test')\n"
                 "@server.tool()\n"
                 "def echo(value: str) -> str:\n"
                 "    return 'mcp marker: ' + value\n"
                 "server.run(transport='stdio')\n",
                 encoding="utf-8",
             )
-            server_config = {"command": sys.executable, "args": [str(script)]}
+            server_config: dict[str, Any] = {"command": sys.executable, "args": [str(script)]}
+            if authentication:
+                server_config.update(
+                    credential_id="12b9ae42-c658-4177-a3bb-f8b9b616edaf",
+                    env_credentials={"MCP_FIXTURE_SECRET": "env:SHOVEL_MCP_TEST_SECRET"},
+                )
         else:
             server = FastMCP("test", stateless_http=True, json_response=True)
 
@@ -161,17 +184,50 @@ async def test_real_mcp_transports_execute_and_close_on_owner_task(
                 return "mcp marker: " + value
 
             app = server.streamable_http_app()
+            expected_header = "authorization" if authentication == "bearer" else "x-api-key"
+            expected_value = f"Bearer {secret}" if authentication == "bearer" else secret
+
+            async def protected_app(scope: Scope, receive: Receive, send: Send) -> None:
+                headers = dict(scope.get("headers", []))
+                if authentication:
+                    if headers.get(expected_header.encode()) != expected_value.encode():
+                        await JSONResponse({"error": "unauthorized"}, status_code=401)(scope, receive, send)
+                        return
+                    authenticated_requests.append(scope["method"])
+                await app(scope, receive, send)
+
             await stack.enter_async_context(server.session_manager.run())
             http_client = await stack.enter_async_context(
-                httpx.AsyncClient(transport=httpx.ASGITransport(app=app))
+                httpx.AsyncClient(transport=httpx.ASGITransport(app=protected_app))
             )
 
             def connection(**kwargs: Any) -> MCPStreamableHTTPTool:
-                return MCPStreamableHTTPTool(**kwargs, http_client=http_client)
+                kwargs.setdefault("http_client", http_client)
+                return MCPStreamableHTTPTool(**kwargs)
+
+            def authenticated_client(status: MCPHTTPStatus) -> httpx.AsyncClient:
+                client = httpx.AsyncClient(
+                    transport=httpx.ASGITransport(app=protected_app),
+                    event_hooks={"response": [status.observe]},
+                )
+                authenticated_clients.append(client)
+                return client
 
             monkeypatch.setattr("shovel.runtime.agent_extensions.MCPStreamableHTTPTool", connection)
+            monkeypatch.setattr(
+                "shovel.runtime.agent_extensions.authenticated_http_client", authenticated_client
+            )
             monkeypatch.setenv("SHOVEL_TEST_MCP_URL", "http://127.0.0.1:8000/mcp")
             server_config = {"url": "${SHOVEL_TEST_MCP_URL}"}
+            if authentication:
+                server_config.update(
+                    credential_id="12b9ae42-c658-4177-a3bb-f8b9b616edaf",
+                    auth={
+                        "type": authentication,
+                        "credential_ref": "env:SHOVEL_MCP_TEST_SECRET",
+                        **({"header": "X-API-Key"} if authentication == "api_key" else {}),
+                    },
+                )
         (tmp_path / "mcp.json").write_text(
             json.dumps({"mcpServers": {"test": {**server_config, "allowed_tools": ["echo"]}}}),
             encoding="utf-8",
@@ -180,6 +236,7 @@ async def test_real_mcp_transports_execute_and_close_on_owner_task(
 
         def model(request: httpx.Request) -> httpx.Response:
             body = json.loads(request.content)
+            assert secret not in request.content.decode()
             requests.append(body)
             if len(requests) == 1:
                 name = body["tools"][0]["function"]["name"]
@@ -199,6 +256,9 @@ async def test_real_mcp_transports_execute_and_close_on_owner_task(
             assert (await agent.run("Echo test.")).text == "MCP completed."
         finally:
             await asyncio.create_task(extensions.close())
+        if transport == "http" and authentication:
+            assert authenticated_requests.count("POST") >= 3
+            assert authenticated_clients and all(client.is_closed for client in authenticated_clients)
 
 
 @pytest.mark.live

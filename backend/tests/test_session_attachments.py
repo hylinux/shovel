@@ -597,6 +597,121 @@ def test_message_attachment_validation() -> None:
             MessageInput.model_validate(data)
 
 
+async def test_reading_scope_matches_sanitized_image_and_actual_excerpt(
+    runtime: Runtime, api: httpx.AsyncClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    identifier = await session_id(api)
+    original = io.BytesIO()
+    Image.new("RGB", (3000, 1200), "blue").save(original, format="PNG")
+    image = (await put(api, url(identifier), original.getvalue(), "picture.png")).json()
+    assert image["reading_scope"] == {
+        "original_bytes": len(original.getvalue()),
+        "stored_bytes": image["size"],
+        "original_width": 3000,
+        "original_height": 1200,
+        "width": 2048,
+        "height": 819,
+    }
+    data = ("你好" * 4500).encode("utf-8-sig")
+    document = (await put(api, url(identifier), data, "notes.txt")).json()
+    assert document["reading_scope"] == {
+        "original_bytes": len(data),
+        "stored_bytes": len(data),
+        "excerpt_chars": 8000,
+        "truncated": True,
+    }
+    native = await runtime.attachments.contents(identifier, [document])
+    assert native[0].text.endswith("你好" * 4000)
+    assert "Excerpt truncated" in native[0].text
+    short = (await put(api, url(identifier), b"short", "short.txt")).json()
+    assert short["reading_scope"]["excerpt_chars"] == 5
+    assert short["reading_scope"]["truncated"] is False
+
+    async def respond(*_args: object, **_kwargs: object) -> AgentResult:
+        return AgentResult(content="Answer")
+
+    monkeypatch.setattr(runtime.chat.agent, "respond", respond)
+    assert (
+        await api.post(
+            f"/api/v1/conversations/{identifier}/messages",
+            json={"attachment_ids": [image["id"], document["id"]], "memory_enabled": False},
+        )
+    ).status_code == 200
+    history = (await api.get(f"/api/v1/conversations/{identifier}/messages")).json()["items"]
+    assert history[0]["attachments"][0]["reading_scope"] == image["reading_scope"]
+    assert history[0]["attachments"][1]["reading_scope"] == document["reading_scope"]
+
+
+async def test_attachment_status_is_scoped_reports_live_quotas_and_missing_files(
+    runtime: Runtime, api: httpx.AsyncClient
+) -> None:
+    identifier, other = await session_id(api), await session_id(api)
+    path = f"/api/v1/conversations/{identifier}/attachments"
+    initial = (await api.get(path)).json()
+    assert initial["items"] == []
+    assert ".txt" in initial["limits"]["extensions"]
+    assert ".exe" not in initial["limits"]["extensions"]
+    assert initial["limits"]["max_files"] == 5
+    assert initial["limits"]["max_input_images"] == runtime.settings.model.max_input_images
+    first = (await put(api, url(identifier), b"first", "first.txt")).json()
+    second = (await put(api, url(other), b"second", "second.txt")).json()
+    current = (await api.get(path)).json()
+    assert [row["id"] for row in current["items"]] == [first["id"]]
+    assert current["items"][0]["available"] is True
+    assert current["remaining"]["pending_files"] == initial["remaining"]["pending_files"] - 1
+    assert current["remaining"]["session_files"] == initial["remaining"]["session_files"] - 1
+    assert current["remaining"]["session_bytes"] == initial["remaining"]["session_bytes"] - first["size"]
+    assert current["remaining"]["store_bytes"] == (
+        initial["remaining"]["store_bytes"] - first["size"] - second["size"]
+    )
+    runtime.attachments._path(identifier, first["id"]).unlink()
+    assert (await api.get(path)).json()["items"][0]["available"] is False
+    assert (await api.get("/api/v1/conversations/missing/attachments")).status_code == 404
+    assert (await api.delete(first["url"])).status_code == 200
+    remaining = (await api.get(path)).json()
+    assert remaining["items"] == []
+    assert remaining["remaining"]["session_bytes"] == initial["remaining"]["session_bytes"]
+
+
+async def test_reading_scope_migration_preserves_legacy_uploads_without_inventing_details(
+    runtime: Runtime, api: httpx.AsyncClient
+) -> None:
+    identifier = await session_id(api)
+    uploaded = (await put(api, url(identifier))).json()
+    async with runtime.sessions() as database:
+        connection = await database.connection()
+        engine = connection.engine
+        await database.execute(text("ALTER TABLE session_attachment DROP COLUMN reading_scope"))
+        await database.execute(delete(SchemaMigration).where(SchemaMigration.version == 26))
+        await database.commit()
+    await upgrade_database(engine)
+    await upgrade_database(engine)
+    rows = (await api.get(f"/api/v1/conversations/{identifier}/attachments")).json()["items"]
+    assert rows[0]["id"] == uploaded["id"]
+    assert rows[0]["reading_scope"] == {}
+    assert rows[0]["available"] is True
+    retry = (await put(api, uploaded["url"])).json()
+    assert retry["reading_scope"] == {}
+    assert retry["expires_at"] == uploaded["expires_at"]
+
+
+@pytest.mark.parametrize("extra", ["", "<t>additional text</t>"])
+async def test_office_excerpt_boundary_reports_truncation_without_an_off_by_one(
+    runtime: Runtime, api: httpx.AsyncClient, extra: str
+) -> None:
+    identifier = await session_id(api)
+    document = io.BytesIO()
+    with zipfile.ZipFile(document, "w") as archive:
+        archive.writestr("[Content_Types].xml", "<Types/>")
+        archive.writestr("word/document.xml", f"<document><t>{'a' * 8000}</t>{extra}</document>")
+    uploaded = (await put(api, url(identifier), document.getvalue(), "document.docx")).json()
+    assert uploaded["reading_scope"]["excerpt_chars"] == 8000
+    assert uploaded["reading_scope"]["truncated"] == bool(extra)
+    contents = await runtime.attachments.contents(identifier, [uploaded])
+    assert ("Excerpt truncated" in contents[0].text) == bool(extra)
+    assert contents[0].text.endswith("a" * 8000)
+
+
 @pytest.mark.parametrize("kind", ["count", "bytes", "text", "metadata", "nonimage"])
 async def test_final_budget_keeps_separate_bounded_media_and_text_guards(runtime: Runtime, kind: str) -> None:
     image = Content.from_data(b"x" * 3000, "image/jpeg")

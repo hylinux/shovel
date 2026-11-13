@@ -38,6 +38,11 @@ MAX_FILE_BYTES = 10 * 1024 * 1024
 MAX_SESSION_BYTES = 100 * 1024 * 1024
 MAX_STORE_BYTES = 1024 * 1024 * 1024
 MAX_TEXT_CHARS = 8000
+MAX_MESSAGE_FILES = 5
+MAX_PENDING_FILES = 20
+MAX_SESSION_FILES = 100
+MAX_IMAGE_PIXELS = 16_000_000
+MAX_IMAGE_EDGE = 2048
 PENDING_TTL = 24 * 60 * 60
 ATTACHED_TTL = 7 * 24 * 60 * 60
 TEXT_TYPES = {
@@ -135,8 +140,10 @@ def _office_text(data: bytes, suffix: str) -> str:
                 root = ElementTree.fromstring(source)  # noqa: S314 -- bounded, DTD/entity-free XML
                 for element in root.iter():
                     if element.tag.rsplit("}", 1)[-1] in {"t", "v"} and element.text:
+                        if output:
+                            used += 1
                         output.append(element.text[: MAX_TEXT_CHARS + 1 - used])
-                        used += len(output[-1]) + 1
+                        used += len(output[-1])
                         if used > MAX_TEXT_CHARS:
                             return "\n".join(output)
             return "\n".join(output)
@@ -162,7 +169,7 @@ def prepare_file(name: str, data: bytes) -> tuple[bytes, str, str]:
                 with Image.open(io.BytesIO(data)) as image:
                     if image.format != IMAGE_TYPES[suffix]:
                         raise _failure("Image format does not match the filename.")
-                    if image.width * image.height > 16_000_000:
+                    if image.width * image.height > MAX_IMAGE_PIXELS:
                         raise _failure("Images are limited to 16 million decoded pixels.", 413)
                     image.verify()
                 with Image.open(io.BytesIO(data)) as image:
@@ -170,7 +177,7 @@ def prepare_file(name: str, data: bytes) -> tuple[bytes, str, str]:
                     image.load()
                     # Strip metadata and animation; bound both native image input and browser decoding.
                     oriented = ImageOps.exif_transpose(image)
-                    oriented.thumbnail((2048, 2048))
+                    oriented.thumbnail((MAX_IMAGE_EDGE, MAX_IMAGE_EDGE))
                     rgba = oriented.convert("RGBA")
                     flattened = Image.new("RGB", oriented.size, "white")
                     flattened.paste(rgba, mask=rgba.getchannel("A"))
@@ -206,6 +213,24 @@ def prepare_file(name: str, data: bytes) -> tuple[bytes, str, str]:
     return data, TEXT_TYPES[suffix], "text"
 
 
+def reading_scope(name: str, original: bytes, prepared: bytes, context: str) -> dict[str, Any]:
+    scope: dict[str, Any] = {"original_bytes": len(original), "stored_bytes": len(prepared)}
+    if context == "image":
+        with Image.open(io.BytesIO(original)) as image:
+            scope.update(original_width=image.width, original_height=image.height)
+        with Image.open(io.BytesIO(prepared)) as image:
+            scope.update(width=image.width, height=image.height)
+    else:
+        text = extracted_text(name, prepared)
+        scope.update(excerpt_chars=min(len(text), MAX_TEXT_CHARS), truncated=len(text) > MAX_TEXT_CHARS)
+    return scope
+
+
+def extracted_text(name: str, data: bytes) -> str:
+    suffix = Path(name).suffix.lower()
+    return _office_text(data, suffix) if suffix in OFFICE_TYPES else data.decode("utf-8-sig")
+
+
 def attachment_view(row: SessionAttachment) -> dict[str, Any]:
     return {
         "id": row.id,
@@ -215,6 +240,7 @@ def attachment_view(row: SessionAttachment) -> dict[str, Any]:
         "url": f"/api/v1/conversations/{row.conversation_id}/attachments/{row.id}",
         "expires_at": row.expires_at,
         "model_context": row.model_context,
+        "reading_scope": row.reading_scope,
     }
 
 
@@ -331,10 +357,11 @@ class AttachmentService:
             async with self._processing:
                 prepared, media_type, context = await _blocking(lambda: prepare_file(name, bytes(data)))
                 digest = await _blocking(lambda: hashlib.sha256(data).hexdigest())
+                scope = await _blocking(lambda: reading_scope(name, bytes(data), prepared, context))
             require_ordinary(EgressChannel.ARTIFACT, prepared)
             async with self.lock:
                 storing = asyncio.create_task(
-                    self._store(identifier, attachment_id, name, digest, prepared, media_type, context)
+                    self._store(identifier, attachment_id, name, digest, prepared, media_type, context, scope)
                 )
                 try:
                     return await asyncio.shield(storing)
@@ -352,6 +379,7 @@ class AttachmentService:
         prepared: bytes,
         media_type: str,
         context: str,
+        scope: dict[str, Any],
     ) -> dict[str, Any]:
         path = await _blocking(lambda: self._path(identifier, attachment_id))
         partial = path.with_name(f"{uuid4().hex[:16]}.part")
@@ -385,7 +413,7 @@ class AttachmentService:
                     or 0
                 )
                 if (
-                    count >= 100
+                    count >= MAX_SESSION_FILES
                     or total + len(prepared) > MAX_SESSION_BYTES
                     or store_total + len(prepared) > MAX_STORE_BYTES
                 ):
@@ -402,7 +430,7 @@ class AttachmentService:
                     )
                     or 0
                 )
-                if pending >= 20:
+                if pending >= MAX_PENDING_FILES:
                     raise _failure("Too many pending Session attachments.", 413)
                 await _blocking(lambda: self._install(identifier, path, partial, prepared))
                 installed = True
@@ -414,6 +442,7 @@ class AttachmentService:
                     size=len(prepared),
                     digest=digest,
                     model_context=context,
+                    reading_scope=scope,
                     expires_at=now_ts() + PENDING_TTL,
                 )
                 session.add(row)
@@ -451,6 +480,53 @@ class AttachmentService:
                 return path.read_bytes()
 
             return row, await _blocking(read)
+
+    async def status(self, identifier: str) -> dict[str, Any]:
+        require_ordinary(EgressChannel.DISPLAY)
+        async with self.lock, self.runtime.sessions() as session:
+            await self._conversation(session, identifier)
+            rows = list(
+                await session.scalars(
+                    select(SessionAttachment).where(
+                        SessionAttachment.conversation_id == identifier,
+                        SessionAttachment.expires_at > now_ts(),
+                    )
+                )
+            )
+            store_bytes = int(
+                await session.scalar(
+                    select(func.coalesce(func.sum(SessionAttachment.size), 0)).where(
+                        SessionAttachment.expires_at > now_ts()
+                    )
+                )
+                or 0
+            )
+            items = await _blocking(
+                lambda: [
+                    {**attachment_view(row), "available": self._available(identifier, row.id)} for row in rows
+                ]
+            )
+        pending = sum(row.message_id is None for row in rows)
+        model = self.runtime.settings.model
+        return {
+            "items": items,
+            "limits": {
+                "extensions": sorted(TEXT_TYPES | IMAGE_TYPES | OFFICE_TYPES),
+                "max_files": MAX_MESSAGE_FILES,
+                "max_file_bytes": MAX_FILE_BYTES,
+                "max_text_chars": MAX_TEXT_CHARS,
+                "max_image_pixels": MAX_IMAGE_PIXELS,
+                "max_image_edge": MAX_IMAGE_EDGE,
+                "max_input_images": model.max_input_images,
+                "max_input_image_bytes": model.max_input_image_bytes,
+            },
+            "remaining": {
+                "pending_files": max(0, MAX_PENDING_FILES - pending),
+                "session_files": max(0, MAX_SESSION_FILES - len(rows)),
+                "session_bytes": max(0, MAX_SESSION_BYTES - sum(row.size for row in rows)),
+                "store_bytes": max(0, MAX_STORE_BYTES - store_bytes),
+            },
+        }
 
     async def delete(self, identifier: str, attachment_id: str) -> None:
         require_ordinary(EgressChannel.ARTIFACT)
@@ -534,11 +610,7 @@ class AttachmentService:
                     ]
                 )
             else:
-                text = (
-                    _office_text(data, Path(name).suffix.lower())
-                    if Path(name).suffix.lower() in OFFICE_TYPES
-                    else data.decode("utf-8-sig")
-                )
+                text = extracted_text(name, data)
                 notice += "\n[Excerpt truncated to 8000 characters.]" if len(text) > MAX_TEXT_CHARS else ""
                 contents.append(Content.from_text(notice + "\n" + text[:MAX_TEXT_CHARS]))
         return contents

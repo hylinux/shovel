@@ -190,6 +190,31 @@ do not hold the attachment commit lock or Session chat lock. Final quota checks,
 file installation and metadata commit remain serialized, including cancellation
 and Session deletion.
 
+The composer reports actual upload transfer progress separately from server
+validation/saving. Cancel stops the browser request but does not claim that a
+server-side commit was undone: the draft retains its file and UUID for retry or
+removal, and any already-received temporary file remains subject to expiry.
+Retrying never assigns a new UUID. Text accompanying pasted images/files is
+inserted at the current selection, with a visible notice if the message limit
+truncates it; files retain clipboard order.
+
+`GET /api/v1/conversations/{session}/attachments` supplies the allowed extensions,
+upload/model-media limits, active availability and remaining storage/count
+quotas. These are current snapshots, not reservations or a complete model
+context estimate; the server always rechecks admission. Composer and history
+show prepared excerpt length/truncation, original/stored bytes and image
+dimensions where recorded. Image dimensions also reserve preview space.
+Migration 26 adds `reading_scope` without reparsing old attachments: older
+records explicitly report unavailable details rather than invented statistics.
+Prepared content is not proof of model attention; expiry and context selection
+may omit files/history. Existing model-context warnings remain authoritative.
+
+Session scrolling follows streamed text and image/layout growth only while
+near the bottom. Scrolling up pauses following and reveals a keyboard-accessible
+back-to-bottom control with a new-reply notice. Historical pages remember their
+individual reading anchors when navigating between older/latest pages; changing
+pages never restores against the previous page's in-flight response.
+
 Additional server quotas are twenty pending and one hundred active attachments
 per Session, 100 MiB of stored bytes per Session and 1 GiB per runtime namespace.
 Uploads are streamed with byte limits, validated by type, and support retrying

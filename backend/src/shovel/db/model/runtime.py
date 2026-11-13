@@ -111,6 +111,9 @@ class SessionAttachment(Base):
     size: Mapped[int] = mapped_column(sa.Integer, nullable=False)
     digest: Mapped[str] = mapped_column(sa.Text, nullable=False)
     model_context: Mapped[str] = mapped_column(sa.Text, nullable=False)
+    reading_scope: Mapped[dict[str, Any]] = mapped_column(
+        sa.JSON, default=dict, server_default="{}", nullable=False
+    )
     created_at: Mapped[int] = mapped_column(sa.Integer, default=now_ts, nullable=False)
     expires_at: Mapped[int] = mapped_column(sa.Integer, nullable=False, index=True)
 

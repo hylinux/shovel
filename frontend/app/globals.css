@@ -302,6 +302,11 @@ progress::-moz-progress-bar { background: var(--accent); }
 .upload-name small { display: block; color: var(--muted); }
 .upload-list button { padding: 2px 7px; }
 .upload-thumbnail { width: 44px; height: 44px; object-fit: cover; border-radius: 4px; background: #eaf0f5; }
+.message-list { display: flow-root; }
+.session-scroll-control { display: flex; justify-content: center; padding: 4px 12px; }
+.session-scroll-control button { border-radius: 20px; box-shadow: 0 2px 8px #20384618; }
+.attachment-budget { display: grid; gap: 3px; margin-top: 6px; color: var(--muted); line-height: 1.5; }
+.upload-name progress { display: block; width: 100%; margin-top: 4px; accent-color: var(--accent); }
 @media (max-width: 760px) {
   .composer-attach #message-shortcuts { display: none; }
   .formatting-tools button { min-width: 32px; min-height: 34px; }

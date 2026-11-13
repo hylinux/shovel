@@ -53,6 +53,13 @@ export function validateDiagram(source: string): void {
 }
 
 export type EditorInsertion = { before: string; after?: string; placeholder: string };
+export function pastedText(value: string, start: number, end: number, text: string, limit = 16000) {
+  const available = Math.max(0, limit - (value.length - (end - start)));
+  const inserted = text.slice(0, available);
+  return { value: value.slice(0, start) + inserted + value.slice(end), cursor: start + inserted.length,
+    truncated: inserted.length !== text.length };
+}
+
 export function insertMarkup(value: string, start: number, end: number, insertion: EditorInsertion) {
   const selection = value.slice(start, end) || insertion.placeholder;
   const replacement = insertion.before + selection + (insertion.after ?? "");

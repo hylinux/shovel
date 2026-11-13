@@ -65,6 +65,10 @@ export async function api<T>(path: string, options: RequestInit = {}): Promise<T
   } finally {
     if (!read) invalidateReads();
   }
+  return decodeResponse<T>(response);
+}
+
+async function decodeResponse<T>(response: Response): Promise<T> {
   let body;
   try { body = await response.json(); }
   catch { throw new ApiError("Shovel returned an invalid response; the operation outcome may be unknown."); }
@@ -75,6 +79,37 @@ export async function api<T>(path: string, options: RequestInit = {}): Promise<T
     throw new ApiError([body?.error?.message || detail || `Request failed (${response.status}).`, body?.error?.hint].filter(Boolean).join(" "), response.status, typeof body?.error?.code === "string" ? body.error.code : undefined);
   }
   return body as T;
+}
+
+export function uploadFile<T>(path: string, file: File, signal: AbortSignal, progress: (fraction: number) => void): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const request = new XMLHttpRequest();
+    const abort = () => { request.abort(); };
+    const finish = () => { signal.removeEventListener("abort", abort); invalidateReads(); };
+    if (signal.aborted) { reject(new DOMException("Upload cancelled.", "AbortError")); return; }
+    request.open("PUT", `/api/v1${path}`);
+    request.setRequestHeader("Content-Type", "application/octet-stream");
+    request.timeout = 120_000;
+    request.upload.onprogress = event => {
+      if (!signal.aborted && event.lengthComputable && event.total > 0) progress(Math.min(1, event.loaded / event.total));
+    };
+    request.upload.onload = () => { if (!signal.aborted) progress(1); };
+    request.onload = () => {
+      finish();
+      if (request.status < 200 || request.status > 599) {
+        reject(new ApiError("Shovel returned an invalid response; the operation outcome may be unknown."));
+        return;
+      }
+      const empty = [204, 205, 304].includes(request.status);
+      void decodeResponse<T>(new Response(empty ? null : request.responseText, { status: request.status })).then(resolve, reject);
+    };
+    request.onerror = () => { finish(); reject(new ApiError("Cannot reach Shovel. Check that the backend is running, then retry.")); };
+    request.ontimeout = () => { finish(); reject(new ApiError("Upload timed out. Retry the same file to check its outcome.")); };
+    request.onabort = () => { finish(); reject(new DOMException("Upload cancelled.", "AbortError")); };
+    signal.addEventListener("abort", abort, { once: true });
+    invalidateReads();
+    request.send(file);
+  });
 }
 
 export function useQuery<T>(path: string | null, interval = 0, shouldPoll?: (result: T) => boolean) {

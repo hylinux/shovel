@@ -15,6 +15,7 @@ function elements(tree) {
 
 function composer(run = async () => false) {
   const drafts = new SessionDrafts();
+  const added = [];
   const source = readFileSync(new URL("../app/knowledge.tsx", import.meta.url), "utf8");
   const { outputText } = ts.transpileModule(source, {
     compilerOptions: { module: ts.ModuleKind.CommonJS, jsx: ts.JsxEmit.ReactJSX, target: ts.ScriptTarget.ES2022 },
@@ -26,18 +27,19 @@ function composer(run = async () => false) {
   };
   function ComposerTools() { return null; }
   const dependencies = {
+    "./session-scroll": { useSessionScroll: () => ({ paused: false, unread: false, navigate() {}, bottom() {} }) },
     react,
     "./locale-context": { useI18n: () => ({ t: key => key }) },
     "./user-profile": { useUserProfile: () => ({ error: "", refresh() {} }) },
     "./api": { segment: encodeURIComponent, useAgentAction: () => ({ busy: false, run }),
-      useQuery: () => ({ data: { items: [] }, loading: false, error: "", refresh() {} }) },
+      useQuery: path => ({ data: path.endsWith("/attachments") ? undefined : { items: [] }, loading: false, error: "", refresh() {} }) },
     "./ui": { Empty: () => null, Feedback: () => null, Sources: () => null },
     "./agent-client": { chatTrace() {} }, "./memory-model": memory,
     "./working-memory": { WorkingMemoryPanel: () => null },
     "./message-content": { MessageContent: () => null, RichText: () => null },
     "./message-format": format, "./composer-tools": { ComposerTools },
     "./chat-attachments": { MessageAttachments: () => null, UploadList: () => null,
-      useAttachments: () => ({ uploads: [], completed: [], uploading: false, invalid: false }) },
+      useAttachments: () => ({ uploads: [], completed: [], uploading: false, invalid: false, add: files => added.push(...files) }) },
   };
   const exports = {};
   const require = createRequire(import.meta.url);
@@ -45,6 +47,7 @@ function composer(run = async () => false) {
     ? { default: "/icon.svg" } : dependencies[id] ?? require(id), exports);
   return {
     drafts,
+    added,
     render(session, workspace = "workspace") {
       const root = exports.Knowledge({ sessionId: session, status: { workspace_id: workspace, model_configured: true, memory_configured: true },
         drafts, onSessionChanged() {} });
@@ -104,4 +107,26 @@ test("Failed sends retain text and format; Session deletion aborts uploads and p
   removed.update({ content: "Late callback" });
   assert.equal(request.signal.aborted, true);
   assert.equal(ui.input(ui.render("a")).props.value, "");
+});
+
+test("Mixed image/text paste keeps clipboard text at the selected range and uploads files in clipboard order", () => {
+  const ui = composer();
+  ui.input(ui.render("a")).props.onChange({ target: { value: "Before replace after" } });
+  const first = new File(["image"], "first.png");
+  const second = new File(["image"], "second.png");
+  let prevented = false;
+  let selection;
+  const previous = globalThis.requestAnimationFrame;
+  globalThis.requestAnimationFrame = callback => callback();
+  try {
+    ui.input(ui.render("a")).props.onPaste({
+      clipboardData: { files: [first, second], getData: type => type === "text/plain" ? "pasted text" : "" },
+      currentTarget: { selectionStart: 7, selectionEnd: 14, setSelectionRange: (...args) => { selection = args; } },
+      preventDefault() { prevented = true; },
+    });
+  } finally { globalThis.requestAnimationFrame = previous; }
+  assert.equal(prevented, true);
+  assert.equal(ui.input(ui.render("a")).props.value, "Before pasted text after");
+  assert.deepEqual(selection, [18, 18]);
+  assert.deepEqual(ui.added, [first, second]);
 });

@@ -797,6 +797,10 @@ def configure_api(
     async def message(identifier: str, body: MessageInput, rt: RuntimeDependency) -> dict[str, Any]:
         return message_view(await rt.chat.send(identifier, body))
 
+    @router.get("/conversations/{identifier}/attachments")
+    async def attachment_status(identifier: str, rt: RuntimeDependency) -> dict[str, Any]:
+        return await rt.attachments.status(identifier)
+
     @router.put("/conversations/{identifier}/attachments/{attachment_id}")
     async def upload_attachment(
         identifier: str,

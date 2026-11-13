@@ -216,7 +216,7 @@ async def test_oauth_contract_is_saveable_but_never_connects_unauthenticated(
     assert saved["validation_error"] is None
     async with AsyncOpenAI(api_key="fixture") as sdk:
         extensions = AgentExtensions(AgentSettings(workspace_path=tmp_path))
-        with pytest.raises(RuntimeFailure, match="not implemented"):
+        with pytest.raises(RuntimeFailure, match="Host authentication service"):
             await extensions.load(OpenAIChatCompletionClient(model="fixture", async_client=sdk))
         assert extensions.tools == []
         await extensions.close()

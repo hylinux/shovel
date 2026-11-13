@@ -4,6 +4,7 @@ import asyncio
 import hashlib
 import json
 import re
+import time
 from http.cookiejar import CookieJar, DefaultCookiePolicy
 from pathlib import Path
 from typing import Annotated, Literal
@@ -207,10 +208,17 @@ class MCPCredentials:
             raise RuntimeFailure("MCP credential store is unavailable.", status=503) from None
 
 
-class _OAuthState(BaseModel):
+class OAuthRecord(BaseModel):
     model_config = ConfigDict(extra="forbid", hide_input_in_errors=True)
-    tokens: OAuthToken | None = None
-    client_info: OAuthClientInformationFull | None = None
+    tokens: OAuthToken | None = Field(default=None, repr=False)
+    client_info: OAuthClientInformationFull | None = Field(default=None, repr=False)
+    expires_at: float | None = None
+    issuer: str | None = None
+    resource: str | None = None
+    client_id: str | None = None
+    authorization_id: str | None = None
+    reauthorization_required: bool = False
+    revocation_endpoint: str | None = None
 
 
 class MCPOAuthStorage:
@@ -221,23 +229,30 @@ class MCPOAuthStorage:
         self._lock = asyncio.Lock()
         self._reference = "keyring:oauth-state"
 
-    async def _read(self) -> _OAuthState:
+    async def _read(self) -> OAuthRecord:
         value = await self.credentials.read(self._reference)
         if value is None:
-            return _OAuthState()
+            return OAuthRecord()
         try:
-            return _OAuthState.model_validate_json(value)
+            return OAuthRecord.model_validate_json(value)
         except ValidationError:
             raise RuntimeFailure("Stored MCP OAuth state is invalid.", status=503) from None
 
     async def get_tokens(self) -> OAuthToken | None:
         async with self._lock:
-            return (await self._read()).tokens
+            state = await self._read()
+            if state.tokens is None:
+                return None
+            remaining = max(0, int(state.expires_at - time.time())) if state.expires_at is not None else 0
+            return state.tokens.model_copy(
+                update={"expires_in": remaining if state.tokens.expires_in is not None else None}
+            )
 
     async def set_tokens(self, tokens: OAuthToken) -> None:
         async with self._lock:
             state = await self._read()
             state.tokens = tokens
+            state.expires_at = time.time() + tokens.expires_in if tokens.expires_in is not None else None
             await self.credentials.write(self._reference, state.model_dump_json())
 
     async def get_client_info(self) -> OAuthClientInformationFull | None:
@@ -253,7 +268,15 @@ class MCPOAuthStorage:
     async def clear(self) -> None:
         async with self._lock:
             # Replace secrets atomically; the shared keyring delete API tolerates backend errors.
-            await self.credentials.write(self._reference, _OAuthState().model_dump_json())
+            await self.credentials.write(self._reference, OAuthRecord().model_dump_json())
+
+    async def read_record(self) -> OAuthRecord:
+        async with self._lock:
+            return await self._read()
+
+    async def write_record(self, record: OAuthRecord) -> None:
+        async with self._lock:
+            await self.credentials.write(self._reference, record.model_dump_json())
 
 
 class MCPHTTPStatus:

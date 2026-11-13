@@ -9,7 +9,7 @@ import sys
 from contextlib import AsyncExitStack
 from pathlib import Path
 from types import ModuleType
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
 from uuid import UUID, uuid4
 
 from agent_framework import (
@@ -43,6 +43,9 @@ from shovel.runtime.mcp_auth import (
 )
 from shovel.runtime.workspace_config import content_revision as mcp_revision
 from shovel.services.credentials import CredentialStore
+
+if TYPE_CHECKING:
+    from shovel.runtime.mcp_oauth import MCPOAuthService
 
 
 class MCPServerSettings(BaseModel):
@@ -177,7 +180,13 @@ async def run_skill_script(
 
 
 class AgentExtensions:
-    def __init__(self, settings: AgentSettings, *, credentials: CredentialStore | None = None) -> None:
+    def __init__(
+        self,
+        settings: AgentSettings,
+        *,
+        credentials: CredentialStore | None = None,
+        oauth: MCPOAuthService | None = None,
+    ) -> None:
         self.settings = settings
         self.tools: list[Any] = []
         self.skills: SkillsProvider | None = None
@@ -186,15 +195,15 @@ class AgentExtensions:
         self._modules: list[str] = []
         self.mcp_revision: str | None = None
         self._credentials = credentials
+        self._oauth = oauth
 
     async def _mcp_credentials(self, server: MCPServerSettings) -> tuple[dict[str, str], dict[str, str]]:
         env = {key: _environment(value) for key, value in server.env.items()} if server.command else {}
         headers = {key: _environment(value) for key, value in server.headers.items()} if server.url else {}
         if server.auth is not None and not isinstance(server.auth, (NoAuth, APIKeyAuth, BearerAuth)):
-            raise RuntimeFailure(
-                "MCP OAuth is configured but is not implemented in P0-P2. Authorize support is pending.",
-                status=503,
-            )
+            if self._oauth is None:
+                raise RuntimeFailure("MCP OAuth requires the Host authentication service.", status=503)
+            return env, headers
         if server.credential_id is not None:
             binding = server.credential_binding()
             binding["env"] = env
@@ -278,9 +287,12 @@ class AgentExtensions:
                                 raise RuntimeFailure("MCP url must use HTTP or HTTPS.", status=503)
                             if server.auth is not None and not isinstance(server.auth, NoAuth):
                                 authenticated_url(url)
-                                common["http_client"] = await stack.enter_async_context(
-                                    authenticated_http_client(http_status)
-                                )
+                                if isinstance(server.auth, (APIKeyAuth, BearerAuth)):
+                                    http_client = authenticated_http_client(http_status)
+                                else:
+                                    assert self._oauth is not None
+                                    http_client = await self._oauth.client(name, server, http_status)
+                                common["http_client"] = await stack.enter_async_context(http_client)
                             connection = MCPStreamableHTTPTool(
                                 **common,
                                 url=url,

@@ -95,6 +95,15 @@ class MCPConfigurationInput(BaseModel):
     revision: str = Field(pattern=r"^[a-f0-9]{64}$")
 
 
+class MCPAuthInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    revision: str = Field(pattern=r"^[a-f0-9]{64}$")
+
+
+class MCPAuthCancelInput(MCPAuthInput):
+    authorization_id: str = Field(min_length=1, max_length=128, pattern=r"^[A-Za-z0-9_-]+$")
+
+
 class AgentInstructionsInput(BaseModel):
     model_config = ConfigDict(extra="forbid")
     content: str = Field(max_length=MAX_INSTRUCTIONS_CHARS)

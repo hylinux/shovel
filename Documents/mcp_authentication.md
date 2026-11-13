@@ -1,9 +1,9 @@
 # MCP authentication
 
-This reference covers the P0-P2 implementation for #22 / #30. API Key,
-static Bearer/PAT and stdio credential references are implemented. OAuth
-configuration and secure storage contracts are present, but OAuth networking,
-login, refresh, disconnect and UI controls remain P3-P5 work.
+This reference covers the P0-P4 implementation for #22 / #30. API Key,
+static Bearer/PAT, stdio credential references, OAuth application identities
+and explicit OAuth user authorization are implemented. Settings UI controls
+remain P5 work; real-provider acceptance remains separate.
 
 ## SDK and protocol baseline (P0)
 
@@ -22,14 +22,13 @@ An offline constructor/storage probe verifies:
 | `ClientCredentialsOAuthProvider` | Client secret basic/post, scopes and pinned issuer |
 | `TokenStorage` | Async token and registered-client reads/writes |
 
-These are SDK capabilities, not implemented Shovel OAuth behavior. User OAuth
-will initially require a pre-registered public client, Authorization Code with
-PKCE S256 and an exact loopback callback. Applications will use Client
-Credentials with a secret and an explicitly pinned issuer. Dynamic registration,
+Shovel uses the SDK's PKCE, metadata URL/challenge helpers and token models,
+with a Host-owned HTTPX authentication lifecycle rather than the SDK's automatic
+interactive/replay flow. User OAuth requires a pre-registered public client,
+Authorization Code with PKCE S256 and an exact loopback callback. Applications
+use Client Credentials with a secret and an explicitly pinned issuer. Dynamic registration,
 client metadata documents, Device Code, certificates and workload identities are
-not promised by this first scope. Discovery validation, issuer/resource binding,
-callback checks, token expiry and replay-safe refresh still need integration
-tests in P3/P4 before OAuth can be enabled.
+not implemented in this scope.
 
 ## Configuration and compatibility
 
@@ -181,23 +180,23 @@ no plaintext-file fallback or echo of backend exception details.
 
 `MCPOAuthStorage` implements the SDK's four async storage methods. Tokens and
 registered-client data share one bound keyring record, with serialized updates
-within one adapter instance. Reuse one instance per authorization binding in
-the future authentication service. `clear()` overwrites the record with empty
+within one adapter instance. The Host reuses one instance per authorization
+binding. `clear()` overwrites the record with empty
 state so it removes stored secrets without relying on the shared store's
 best-effort delete; backend failure is reported rather than acknowledged.
 Malformed stored data is an error, not an anonymous fallback.
 
-This storage adapter does not perform authorization, preserve an active
-connection, fence late callbacks, or implement provider-side revocation.
-Absolute expiry bookkeeping, authoritative discovered issuer/subject binding,
-authorization generations and disconnect/refresh cancellation belong to P3/P4.
-They must be established before using stored OAuth data on the network.
+The record also preserves absolute expiry, issuer, resource, client identity and
+the local user-authorization generation. Relative token lifetimes do not reset
+on restart. Opaque tokens are not decoded to invent a user identity.
+`MCPOAuthService` owns network validation, generation fencing and provider
+revocation; the storage adapter alone does not establish authorization.
 
-## OAuth configuration and future API contract
+## OAuth configuration and REST controls (P3/P4)
 
-The following objects can be validated/saved, but enabled OAuth servers fail
-explicitly at load with HTTP 503; no browser, token request or anonymous MCP
-connection is attempted in P0-P2. Disable them until OAuth implementation lands.
+Use these objects inside an HTTP server definition with a `credential_id`.
+Enabled OAuth servers require the Host authentication service. No browser is
+opened automatically from chat, discovery, restart or status queries.
 
 ```json
 {
@@ -208,7 +207,8 @@ connection is attempted in P0-P2. Disable them until OAuth implementation lands.
 }
 ```
 
-User `issuer` is optional for future validated discovery. Application `issuer`
+User `issuer` is optional when protected resource metadata advertises exactly
+one authorization server; otherwise select it explicitly. Application `issuer`
 is required to pin the recipient of client credentials:
 
 ```json
@@ -224,20 +224,32 @@ is required to pin the recipient of client credentials:
 
 `client_secret_post` is the other supported declaration. Scopes are distinct
 OAuth scope tokens, not one space-delimited list entry. The callback address
-will come from the existing loopback FastAPI Host, not a Next.js server route.
+comes from the existing loopback FastAPI Host, not a Next.js server route.
 
-P3-P5 API contract to implement (not currently registered routes):
+Registered controls:
 
 | Method / path below `/api/v1/agent/mcp/{server}/auth` | Semantics |
 | --- | --- |
-| `GET` | Nonsecret configured/state/error projection; does not initiate login |
+| `GET` | Nonsecret local authorization state, revision, expiry and pending authorization ID; no discovery/login |
 | `POST /start` | Exact configuration revision, explicit user action; returns authorization ID, browser URL and expiry, never tokens |
 | `POST /cancel` | Exact authorization ID and revision; invalidate pending callback |
 | `POST /disconnect` | Exact revision; clear local identity, fence pending work and invalidate authenticated connections |
 
-The FastAPI callback will validate state, issuer, PKCE binding, exact redirect,
-expiry and single use. Statuses will distinguish not authorized, authorizing,
-authorized and reauthorization required, independently of connection success.
+Mutation bodies use `{"revision": "<current mcp.json revision>"}`; cancel also
+requires `"authorization_id"`. Start returns a URL for the user to open
+explicitly. Register the exact backend redirect URI with the provider:
+`http://127.0.0.1:8080/api/v1/agent/mcp/oauth/callback` for default production,
+or port 9999 for default development (substitute the configured Host/port).
+The callback returns a small JSON result; no frontend authorization page exists yet.
+
+The callback validates random state, issuer, PKCE binding, exact redirect,
+five-minute expiry and single use. It requires the RFC 9207 `iss` response
+parameter; providers omitting it are not supported in this first scope.
+Only the exact callback GET accepts cross-site browser navigation. The raw
+query is removed from the original ASGI scope before access logging; callback
+responses, including errors, use `no-store` and `no-referrer`.
+States distinguish `not_authorized`, `authorizing`, `authorized` and
+`reauthorization_required`, independently of live connection success.
 Configuration changes produce revision conflicts; malformed declarations are
 422; missing/unavailable credentials and authentication-dependent load failure
 are 503 with sanitized messages. MCP HTTP 401 and 403 are distinguished in the
@@ -247,12 +259,62 @@ No endpoint may return access/refresh tokens or client secrets. A settings
 save, a token in storage and a successful live connection are different facts.
 OAuth authentication never supplies missing platform/enterprise permissions.
 
+### Discovery and provider compatibility
+
+Protected resource metadata must identify the configured MCP resource and
+stay on its origin. The configured issuer must be advertised verbatim; discovered
+issuer metadata must match it exactly. Authorization server metadata discovery
+supports the SDK's OAuth and OIDC fallback URLs. Authorization, token and
+revocation endpoints must remain on the issuer origin. User providers must
+advertise PKCE S256; applications validate their grant and client-auth method.
+Each token request includes the bound `resource` and requested scopes.
+
+OAuth network requests use DNS-pinned public HTTPS with certificate validation,
+no environment proxy, cookies, redirects or automatic HTTP retries. Private and
+reserved destinations are rejected, except the exact configured MCP loopback
+origin for local servers. Consequently private-network-only MCP/identity
+deployments need a separately designed trusted network policy, not a DNS bypass.
+Discovery/token responses have bounded time and size; an initial MCP challenge
+probe closes without consuming a potentially endless SSE response.
+
+Tokens must have positive `expires_in`; a returned scope set must equal the
+requested set. These checks deliberately reject no-expiry tokens and providers
+that silently reduce or broaden scopes. Token responses and provider error
+descriptions are not returned to callers or logged.
+
+### Expiry, refresh and disconnect
+
+Acquisition and refresh are serialized per service. Applications acquire lazily,
+reuse persisted expiry with a small skew, and coalesce concurrent failed token
+requests with a two-second cooldown. Users refresh only a still-bound
+authorization; rotating refresh tokens replace the prior record atomically.
+A failed or cancelled refresh clears local refresh state and requires explicit
+reauthorization, rather than retrying an uncertain rotating credential.
+Dispatched MCP requests are never automatically replayed on 401/403.
+
+Cancel, disconnect, configuration changes and Host shutdown invalidate pending
+work and old authenticated clients. Late callbacks/token writes cannot restore
+the invalidated generation. Disconnect clears local tokens before attempting
+advertised provider revocation, reports unsupported revocation separately, and
+returns an explicit failure if the provider cannot revoke. Local removal does
+not prove server-side revocation.
+
+After a new user authorization, disconnect/reconnect or configuration change,
+restart the Agent explicitly to replace previously loaded authenticated MCP
+connections. A cached invalidated connection fails closed; successful browser
+authorization alone does not reconnect it. Configuration saves never resolve
+credentials and do not silently restart the Agent.
+
 ## Validation boundary
 
 Tests use local HTTP/stdio servers, synthetic secrets and in-memory stores.
 They cover actual discovery and tool calls, disabled/missing credentials,
 configuration conflicts, namespace isolation, storage failure, OAuth storage,
-401/403, redirection and secret absence from model requests.
+401/403, redirection and secret absence from model requests. OAuth tests exercise
+real MCP initialization/tool calls behind a local OAuth provider, application
+acquisition/expiry/restart, user PKCE/refresh rotation, cancellation races,
+discovery/binding failures, revocation failure, REST revision/CSRF checks,
+callback replay/query redaction and DNS-pinned POST body preservation.
 
 No real credentials, OS accounts or enterprise data are used. System keyring
 availability and real provider authentication are separate live checks. Internal

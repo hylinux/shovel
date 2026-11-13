@@ -128,6 +128,25 @@ Both user messages and replies render Markdown/GFM tables, highlighted code and
 LaTeX. **View source / Preview** switches preserve the original message, and
 **Copy source** copies it without copying rendered markup. Streaming replies
 render Markdown incrementally; HTML/CSV/Mermaid block previews wait for completion.
+Preview moves keyboard focus to the rendered composer; Escape or **Edit**
+restores the editor selection and focus. Code-like formats disable spelling,
+autocorrection and capitalization. Formatting that exceeds the input limit
+reports an inline error rather than silently doing nothing. Touch layouts use
+at least 44-pixel composer/message control targets. Isolated previews have a
+keyboard-operable height slider (160–800 pixels, capped at 70% of viewport height);
+iframe sandbox permissions are unchanged.
+
+History remains paginated to 100 messages rather than virtualizing selectable
+text or changing scroll anchors. Memoized history rows avoid reparsing unchanged
+messages while typing/streaming. Text updates coalesce over 50 milliseconds,
+flushing the latest cumulative value on completion; durable completion still
+requires AG-UI confirmation. History attachment cards share one 30-second expiry
+clock, removed when unused. HTML/Mermaid previews start within 200 pixels of
+the viewport, use one serial renderer, and reuse sanitized results from a
+16-entry / two-million-character LRU cache. At most 32 previews may be
+active/queued; overflow reports an error with source viewing or retry available.
+Unmounted/changed previews discard stale results. These bound repeated work,
+not initial history layout or arbitrary diagram complexity.
 
 The composer requests a debounced, cancellable send-budget estimate through
 `POST /api/v1/conversations/{id}/budget-preview`. It uses the same server-side
@@ -167,7 +186,10 @@ The same tests run in desktop Chromium and mobile Chromium emulation. They cover
 native dirty-draft reload protection, successful/failed sends, budget changes and
 retry, mixed paste, upload cancellation/same-UUID recovery, reading scope,
 streaming/pagination/late-growth scrolling, clipboard failure, keyboard send and
-horizontal layout. These are frontend contract tests, not live model or full
+horizontal layout, preview focus/selection, touch targets, deferred/cached
+diagrams, height controls and sandbox isolation. A synthetic 100-attachment /
+240-chunk burst also checks the shared clock, bounded visible updates and the
+complete persisted final answer. These are frontend contract tests, not live model or full
 backend acceptance; backend regressions independently verify the real preview
 endpoint and quota/attachment isolation. CI runs both suites without paid calls.
 
@@ -220,6 +242,19 @@ reference data, not instructions. Image interpretation requires a vision-capable
 model and unsupported vision fails visibly. Attachments are also available in
 retained model history until expiry, subject to existing context limits, but
 are not automatically fed into Memory extraction.
+
+New Office attachments use versioned structured excerpts: DOCX retains joined
+runs, paragraphs and table row/cell boundaries; PPTX follows presentation slide
+order; XLSX follows worksheet order/names, resolves shared/inline strings and
+labels coordinates, booleans, errors, stored formulas and cached results.
+Formulas are never evaluated; missing expressions/caches are marked unavailable,
+and shared formulas are not reconstructed. Number/date styling, merged-cell
+layout, charts, speaker notes and full Office visual fidelity are not provided.
+Package limits and XML/relationship fences remain enforced; extraction never
+follows external relationships or fetches external data. Existing attachments
+without `reading_scope.office_extraction = "structured-v1"` retain the legacy
+flattened extraction so saved excerpt statistics are not silently reinterpreted.
+Re-upload an old file to obtain structured excerpts.
 
 Model input has separate bounded budgets: `model.max_input_chars` continues
 to count text, instructions, serialized references/tool results and image

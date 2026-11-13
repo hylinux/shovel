@@ -14,6 +14,7 @@ const { outputText } = ts.transpileModule(source, {
 });
 const components = {};
 new Function("require", "exports", outputText)(id => {
+  if (id === "./preview-renderer") return { previewQueue: {} };
   if (id === "./message-format") return format;
   if (id === "./locale-context") return { useI18n: () => ({ t: (key, values) => key.replace(/\{p0\}/g, values?.p0 ?? "") }) };
   return require(id);

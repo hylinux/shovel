@@ -2,10 +2,10 @@
 
 import { useI18n } from "./locale-context";
 
-import { useEffect, useRef, useState, useSyncExternalStore, type FormEvent } from "react";
+import { memo, useEffect, useRef, useState, useSyncExternalStore, type FormEvent } from "react";
 import Image from "next/image";
 import shovelLogo from "./icon.svg";
-import { segment, useAction, useAgentAction, useQuery, type Items, type WorkingMemory, type MessagePage, type Operation, type Status } from "./api";
+import { segment, useAction, useAgentAction, useQuery, type Items, type WorkingMemory, type Message, type MessagePage, type Operation, type Status } from "./api";
 import { Empty, Feedback, Sources } from "./ui";
 import { chatTrace } from "./agent-client";
 import { memoryExtractionNotice, selectedWorkingTask } from "./memory-model";
@@ -55,6 +55,22 @@ function Chat({ sessionId, status, onActivity, draft }: { sessionId: string; sta
     `${history.data?.items.at(-1)?.id ?? ""}:${pendingQuestion}:${action.busy}:${action.text}:${action.tool}`);
   function navigate(next?: number) { scroll.navigate(next ? String(next) : "latest"); setBefore(next); }
   const questionRef = useRef<HTMLTextAreaElement>(null);
+  const previewRef = useRef<HTMLDivElement>(null);
+  function togglePreview() {
+    const element = questionRef.current;
+    if (!preview && element) draft.update({ selection: {
+      start: element.selectionStart, end: element.selectionEnd, direction: element.selectionDirection,
+    }, preview: true });
+    else setPreview(!preview);
+    requestAnimationFrame(() => {
+      if (!preview) previewRef.current?.focus({ preventScroll: true });
+      else {
+        questionRef.current?.focus({ preventScroll: true });
+        const selection = draft.getSnapshot().selection;
+        if (selection) questionRef.current?.setSelectionRange(selection.start, selection.end, selection.direction);
+      }
+    });
+  }
   const fileRef = useRef<HTMLInputElement>(null);
   const wasBusy = useRef(false);
   useEffect(() => {
@@ -97,11 +113,7 @@ function Chat({ sessionId, status, onActivity, draft }: { sessionId: string; sta
     </div>}
     <Feedback error={history.error} retry={history.refresh} />
     {!historyReady ? <p role="status">{t("Loading session…")}</p> : history.data?.items.length === 0 ? <Empty title={t("What would you like to find out?")}>{t("Ask a specific question about your indexed documents. Answers include source excerpts when available.")}</Empty> : history.data?.items.map((message) =>
-      <article className={`message ${message.role}`} key={message.id} data-message-id={message.id}><MessageHeading user={message.role === "user"} failed={message.state === "failed"} />
-        <MessageContent content={message.content || (message.state === "failed" ? t("The model could not complete this response.") : "")} sessionId={sessionId} />
-        <MessageAttachments items={message.attachments || []} sessionId={sessionId} status={attachmentStatus.data} />
-        {message.warnings?.map((warning, index) => <p className="warning" key={index}>{warning}</p>)}<Sources items={message.citations || []} collapsible />
-        {message.memory_operation_id && <MemoryTaskStatus id={message.memory_operation_id} />}</article>)}
+      <HistoryMessage key={message.id} message={message} sessionId={sessionId} status={attachmentStatus.data} />)}
     {action.busy && <div role="status" className="pending-answer">
       <article className="message user"><MessageHeading user /><MessageContent content={pendingQuestion} sessionId={sessionId} /><MessageAttachments items={pendingAttachments} sessionId={sessionId} /></article>
       <article className="message assistant"><MessageHeading user={false} />{action.text ? <MessageContent content={action.text} sessionId={sessionId} streaming /> : <p className="muted">{t("Shovel is preparing an answer…")}</p>}{action.tool && <p className="muted">{t("Tool: ")}{action.tool}</p>}</article>
@@ -115,8 +127,10 @@ function Chat({ sessionId, status, onActivity, draft }: { sessionId: string; sta
     <Feedback error={action.error} />
     {workingUnavailable && <p className="warning" role="alert">{t("The selected working task is unavailable. Refresh or select an active task, or explicitly choose No working task before sending.")}</p>}
     <label htmlFor="question">{t("Message")}</label>
-    <div className="composer-editor"><ComposerTools value={content} onChange={setContent} textarea={questionRef} disabled={action.busy} format={format} onFormat={setFormat} preview={preview} onPreview={() => setPreview(!preview)} />
-    {preview && <div className="composer-preview"><RichText content={formattedMessage(content, format)} sessionId={sessionId} /></div>}
+    <div className="composer-editor"><ComposerTools value={content} onChange={setContent} textarea={questionRef} disabled={action.busy} format={format} onFormat={setFormat} preview={preview} onPreview={togglePreview} />
+    <div ref={previewRef} id="composer-preview" className="composer-preview" hidden={!preview} tabIndex={-1} aria-label={t("Message preview")} onKeyDown={event => {
+      if (event.key === "Escape") { event.preventDefault(); togglePreview(); }
+    }}>{preview && <RichText content={formattedMessage(content, format)} sessionId={sessionId} />}</div>
     <textarea ref={questionRef} id="question" hidden={preview} value={content} onChange={(event) => setContent(event.target.value)} onPaste={event => {
       const files = Array.from(event.clipboardData.files);
       if (files.length && !action.busy) {
@@ -133,7 +147,7 @@ function Chat({ sessionId, status, onActivity, draft }: { sessionId: string; sta
         event.preventDefault();
         if (!event.repeat && !sendDisabled) event.currentTarget.form?.requestSubmit();
       }
-    }} placeholder={t("Write Markdown, paste an image, or attach a file…")} rows={4} maxLength={16000} required={!attachments.completed.length} disabled={action.busy} aria-describedby="message-shortcuts attachment-help" />
+    }} placeholder={t("Write Markdown, paste an image, or attach a file…")} spellCheck={format === "markdown" || format === "text"} autoCorrect={format === "markdown" || format === "text" ? "on" : "off"} autoCapitalize={format === "markdown" || format === "text" ? "sentences" : "off"} rows={4} maxLength={16000} required={!attachments.completed.length} disabled={action.busy} aria-describedby="message-shortcuts attachment-help" />
     <UploadList uploads={attachments.uploads} remove={attachments.remove} cancel={attachments.cancel} retry={attachments.retry} disabled={action.busy} sessionId={sessionId} status={attachmentStatus.data} /></div>
     <Feedback error={attachmentStatus.error} retry={attachmentStatus.refresh} />
     {pasteNotice && <p className="warning" role="status">{t(pasteNotice)}</p>}
@@ -159,6 +173,15 @@ function Chat({ sessionId, status, onActivity, draft }: { sessionId: string; sta
     </details>
   </form></>;
 }
+
+const HistoryMessage = memo(function HistoryMessage({ message, sessionId, status }: { message: Message; sessionId: string; status?: AttachmentStatus }) {
+  const { t } = useI18n();
+  return <article className={`message ${message.role}`} data-message-id={message.id}><MessageHeading user={message.role === "user"} failed={message.state === "failed"} />
+    <MessageContent content={message.content || (message.state === "failed" ? t("The model could not complete this response.") : "")} sessionId={sessionId} />
+    <MessageAttachments items={message.attachments || []} sessionId={sessionId} status={status} />
+    {message.warnings?.map((warning, index) => <p className="warning" key={index}>{warning}</p>)}<Sources items={message.citations || []} collapsible />
+    {message.memory_operation_id && <MemoryTaskStatus id={message.memory_operation_id} />}</article>;
+});
 
 export function MessageHeading({ user, failed = false }: { user: boolean; failed?: boolean }) {
   const { t } = useI18n();

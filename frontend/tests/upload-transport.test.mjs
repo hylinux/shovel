@@ -3,6 +3,7 @@ import { readFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import test from "node:test";
 import ts from "typescript";
+import * as streamBatch from "../app/stream-batch.ts";
 
 function transport() {
   const requests = [];
@@ -22,6 +23,7 @@ function transport() {
   const { outputText } = ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.CommonJS } });
   const exports = {};
   const dependencies = {
+    "./stream-batch": streamBatch,
     "./read-requests": { invalidateReads: () => { invalidations++; } },
     "./agent-client": {}, "./request-recovery": {}, "./session-history": {}, "./query-polling": {}, "./platform-types": {},
   };

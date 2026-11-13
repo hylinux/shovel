@@ -269,9 +269,11 @@ progress::-moz-progress-bar { background: var(--accent); }
 .rich-text .katex-display { overflow-x: auto; overflow-y: hidden; max-width: 100%; padding: 6px 0; }
 .external-link-mark { font-size: .8em; }
 .blocked-image small { color: var(--muted); }
-.isolated-preview { padding: 10px; }
+.isolated-preview { padding: 10px; min-height: 160px; }
 .isolated-preview iframe { display: block; width: 100%; height: 340px; border: 0; background: white; border-radius: 5px; resize: vertical; min-height: 160px; max-height: 70dvh; }
 .isolated-preview > small { display: block; margin-top: 6px; line-height: 1.5; }
+.preview-size { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; margin-top: 8px; font-size: 12px; }
+.preview-size input { width: min(200px, 100%); }
 .message-attachments { display: flex; flex-wrap: wrap; gap: 12px; margin-top: 12px; }
 .attachment-card { max-width: 100%; width: 280px; margin: 0; border: 1px solid var(--border); border-radius: 8px; overflow: hidden; background: white; }
 .attachment-card figcaption { padding: 9px 12px; overflow-wrap: anywhere; font-size: 13px; }
@@ -290,6 +292,8 @@ progress::-moz-progress-bar { background: var(--accent); }
 .main-chat .composer-editor textarea, .composer-editor textarea { display: block; border: 0; border-radius: 0; outline: 0; box-shadow: none; resize: vertical; min-height: 100px; padding: 12px; font: 14px/1.65 ui-monospace, "Cascadia Code", Consolas, monospace; }
 .composer-editor textarea[hidden] { display: none; }
 .composer-preview { padding: 12px; min-height: 100px; max-height: 28dvh; overflow-y: auto; }
+.composer-preview[hidden] { display: none; }
+.composer-format-notice { display: block; padding: 6px 12px; }
 .composer-attach { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; min-width: 0; }
 .composer-attach > button { padding: 6px 10px; white-space: nowrap; }
 .attachment-help { display: block; font-size: 11px; line-height: 1.5; margin-top: 8px; }
@@ -309,9 +313,13 @@ progress::-moz-progress-bar { background: var(--accent); }
 .upload-name progress { display: block; width: 100%; margin-top: 4px; accent-color: var(--accent); }
 @media (max-width: 760px) {
   .composer-attach #message-shortcuts { display: none; }
-  .formatting-tools button { min-width: 32px; min-height: 34px; }
   .message-display-toolbar { flex-wrap: wrap; }
   .main-chat .composer { max-height: 55dvh; overflow-y: auto; }
+}
+@media (pointer: coarse), (max-width: 760px) {
+  .composer button, .composer select, .message-display-toolbar button, .message-code-toolbar button,
+  .session-scroll-control button { min-height: 44px; min-width: 44px; }
+  .preview-size input { min-height: 44px; }
 }
 .search-tool { background: white; border: 1px solid var(--border); border-radius: 7px; padding: 24px; }
 .search-tool > p { margin: 8px 0 20px; }

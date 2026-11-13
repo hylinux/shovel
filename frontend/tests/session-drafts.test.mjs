@@ -21,6 +21,7 @@ function composer(run = async () => false) {
     compilerOptions: { module: ts.ModuleKind.CommonJS, jsx: ts.JsxEmit.ReactJSX, target: ts.ScriptTarget.ES2022 },
   });
   const react = {
+    memo: component => component,
     useState: initial => [typeof initial === "function" ? initial() : initial, () => {}],
     useSyncExternalStore: (_subscribe, getSnapshot) => getSnapshot(),
     useRef: () => ({ current: null }), useEffect() {},
@@ -44,8 +45,8 @@ function composer(run = async () => false) {
   };
   const exports = {};
   const require = createRequire(import.meta.url);
-  new Function("require", "exports", outputText)(id => id === "./icon.svg"
-    ? { default: "/icon.svg" } : dependencies[id] ?? require(id), exports);
+  new Function("require", "exports", "requestAnimationFrame", outputText)(id => id === "./icon.svg"
+    ? { default: "/icon.svg" } : dependencies[id] ?? require(id), exports, callback => callback());
   return {
     drafts,
     added,

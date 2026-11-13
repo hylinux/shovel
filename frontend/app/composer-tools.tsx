@@ -1,6 +1,6 @@
 "use client";
 
-import type { RefObject } from "react";
+import { useState, type RefObject } from "react";
 import { insertMarkup, type EditorInsertion, type MessageFormat, messageFormats } from "./message-format";
 import { useI18n } from "./locale-context";
 
@@ -25,18 +25,20 @@ export function ComposerTools({ value, onChange, textarea, disabled, format, onF
   format: MessageFormat; onFormat: (format: MessageFormat) => void; preview: boolean; onPreview: () => void;
 }) {
   const { t } = useI18n();
+  const [notice, setNotice] = useState("");
   function insert(insertion: EditorInsertion) {
     const element = textarea.current;
     if (!element) return;
     const result = insertMarkup(value, element.selectionStart, element.selectionEnd, insertion);
-    if (result.value.length > 16000) return;
+    if (result.value.length > 16000) { setNotice("Formatting would exceed 16,000 characters. Shorten the message first."); return; }
+    setNotice("");
     onChange(result.value);
     requestAnimationFrame(() => { element.focus(); element.setSelectionRange(result.start, result.end); });
   }
-  return <div className="composer-tools">
+  return <><div className="composer-tools">
     <div className="formatting-tools" role="group" aria-label={t("Message formatting")}>{tools.map(tool => <button key={tool.label} type="button" title={t(tool.label)} aria-label={t(tool.label)} disabled={disabled || preview || format !== "markdown"} onClick={() => insert(tool.insertion)}>{tool.symbol}</button>)}</div>
     <div className="composer-modes"><select aria-label={t("Message format")} disabled={disabled} value={format} onChange={event => onFormat(event.target.value as MessageFormat)}>
       {messageFormats.map(item => <option key={item} value={item}>{t(formatLabels[item])}</option>)}
-    </select><button type="button" aria-pressed={preview} disabled={disabled} onClick={onPreview}>{preview ? t("Edit") : t("Preview")}</button></div>
-  </div>;
+    </select><button type="button" aria-pressed={preview} aria-controls="composer-preview" disabled={disabled} onClick={onPreview}>{preview ? t("Edit") : t("Preview")}</button></div>
+  </div>{notice && <small className="warning composer-format-notice" role="alert">{t(notice)}</small>}</>;
 }

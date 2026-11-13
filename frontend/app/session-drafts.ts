@@ -4,6 +4,7 @@ import type { MessageFormat } from "./message-format";
 type DraftState = {
   content: string; format: MessageFormat; preview: boolean;
   uploads: Upload[]; error: string; notice: string;
+  selection?: { start: number; end: number; direction: "forward" | "backward" | "none" };
 };
 
 export class SessionDraft {

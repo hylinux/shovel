@@ -10,14 +10,11 @@ import os
 import shutil
 import unicodedata
 import warnings
-import zipfile
-import zlib
 from collections.abc import AsyncIterator, Callable
 from functools import partial
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 from uuid import UUID, uuid4
-from xml.etree import ElementTree
 
 from agent_framework import Content
 from anyio import CancelScope
@@ -30,6 +27,7 @@ from shovel.db.model.runtime import Conversation, SessionAttachment
 from shovel.db.unit_of_work import sqlite_write
 from shovel.protection.egress import EgressChannel, require_ordinary
 from shovel.runtime.errors import NotFound, RuntimeFailure
+from shovel.runtime.office import OFFICE_EXCERPT_VERSION, office_text
 
 if TYPE_CHECKING:
     from shovel.runtime.service import Runtime
@@ -107,59 +105,6 @@ def safe_name(name: str) -> str:
     return name
 
 
-def _office_text(data: bytes, suffix: str) -> str:
-    try:
-        with zipfile.ZipFile(io.BytesIO(data)) as archive:
-            entries = archive.infolist()
-            if len(entries) > 1000 or sum(entry.file_size for entry in entries) > 20 * 1024 * 1024:
-                raise _failure("Office document expands beyond the safety limit.", 413)
-            for entry in entries:
-                if (
-                    entry.flag_bits & 1
-                    or "\\" in entry.filename
-                    or ":" in entry.filename
-                    or entry.filename.startswith("/")
-                    or ".." in entry.filename.split("/")
-                    or (entry.external_attr >> 16) & 0o170000 == 0o120000
-                    or entry.file_size > 4 * 1024 * 1024
-                    or entry.file_size > max(1, entry.compress_size) * 100
-                    or entry.filename.lower().endswith(("vbaproject.bin", ".exe", ".bin"))
-                ):
-                    raise _failure("Unsafe Office document.")
-            if "[Content_Types].xml" not in archive.namelist():
-                raise _failure("Invalid Office document.")
-            prefix = {".docx": "word/", ".pptx": "ppt/slides/", ".xlsx": "xl/"}[suffix]
-            output: list[str] = []
-            used = 0
-            for entry in entries:
-                if not entry.filename.startswith(prefix) or not entry.filename.endswith(".xml"):
-                    continue
-                source = archive.read(entry).decode("utf-8-sig")
-                if "\x00" in source or "<!DOCTYPE" in source.upper() or "<!ENTITY" in source.upper():
-                    raise _failure("Office entities are not permitted.")
-                root = ElementTree.fromstring(source)  # noqa: S314 -- bounded, DTD/entity-free XML
-                for element in root.iter():
-                    if element.tag.rsplit("}", 1)[-1] in {"t", "v"} and element.text:
-                        if output:
-                            used += 1
-                        output.append(element.text[: MAX_TEXT_CHARS + 1 - used])
-                        used += len(output[-1])
-                        if used > MAX_TEXT_CHARS:
-                            return "\n".join(output)
-            return "\n".join(output)
-    except (
-        zipfile.BadZipFile,
-        ElementTree.ParseError,
-        OSError,
-        RuntimeError,
-        UnicodeError,
-        LookupError,
-        ValueError,
-        zlib.error,
-    ) as exc:
-        raise _failure("Invalid Office document.") from exc
-
-
 def prepare_file(name: str, data: bytes) -> tuple[bytes, str, str]:
     suffix = Path(name).suffix.lower()
     if suffix in IMAGE_TYPES:
@@ -197,7 +142,7 @@ def prepare_file(name: str, data: bytes) -> tuple[bytes, str, str]:
         ) as exc:
             raise _failure("Invalid or oversized image.") from exc
     if suffix in OFFICE_TYPES:
-        _office_text(data, suffix)
+        office_text(data, suffix, MAX_TEXT_CHARS)
         return data, OFFICE_TYPES[suffix], "text"
     try:
         text = data.decode("utf-8-sig")
@@ -223,12 +168,18 @@ def reading_scope(name: str, original: bytes, prepared: bytes, context: str) -> 
     else:
         text = extracted_text(name, prepared)
         scope.update(excerpt_chars=min(len(text), MAX_TEXT_CHARS), truncated=len(text) > MAX_TEXT_CHARS)
+        if Path(name).suffix.lower() in OFFICE_TYPES:
+            scope["office_extraction"] = OFFICE_EXCERPT_VERSION
     return scope
 
 
-def extracted_text(name: str, data: bytes) -> str:
+def extracted_text(name: str, data: bytes, *, legacy_office: bool = False) -> str:
     suffix = Path(name).suffix.lower()
-    return _office_text(data, suffix) if suffix in OFFICE_TYPES else data.decode("utf-8-sig")
+    return (
+        office_text(data, suffix, MAX_TEXT_CHARS, legacy=legacy_office)
+        if suffix in OFFICE_TYPES
+        else data.decode("utf-8-sig")
+    )
 
 
 def attachment_view(row: SessionAttachment) -> dict[str, Any]:
@@ -619,7 +570,12 @@ class AttachmentService:
                     ]
                 )
             else:
-                text = extracted_text(name, data)
+                text = extracted_text(
+                    name,
+                    data,
+                    legacy_office=item.get("reading_scope", {}).get("office_extraction")
+                    != OFFICE_EXCERPT_VERSION,
+                )
                 notice += "\n[Excerpt truncated to 8000 characters.]" if len(text) > MAX_TEXT_CHARS else ""
                 contents.append(Content.from_text(notice + "\n" + text[:MAX_TEXT_CHARS]))
         return contents

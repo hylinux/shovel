@@ -5,6 +5,12 @@ export const defaultLocale: Locale = "en";
 export type TranslationValues = Record<string, string | number | boolean | null | undefined>;
 
 export const chinese: Readonly<Record<string, string>> = {
+  "Formatting would exceed 16,000 characters. Shorten the message first.": "插入格式后将超过 16,000 个字符，请先缩短正文。",
+  "Message preview": "消息预览",
+  "Preview height": "预览高度",
+  "{p0} pixels": "{p0} 像素",
+  "Preview queue is full. View the source or try again.": "预览队列已满，请查看源码或重试。",
+  "Structured Office excerpt: paragraphs/slides/sheets and stored cell values only; formulas are not recalculated.": "结构化 Office 摘录：仅包含段落、幻灯片、工作表及存储的单元格值；不重新计算公式。",
   "Send budget estimate": "发送预算预估",
   "Estimating send budget…": "正在预估发送预算…",
   "Retry budget estimate": "重新预估预算",

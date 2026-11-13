@@ -58,7 +58,12 @@ async function api(req, res, url, data) {
   if (path.endsWith("/messages")) {
     const before = Number(url.searchParams.get("before") || Infinity);
     const limit = Number(url.searchParams.get("limit") || 100);
-    const items = data.messages.filter(item => item.conversation_id === identifier && item.sequence < before).slice(-limit);
+    const items = data.messages.filter(item => item.conversation_id === identifier && item.sequence < before).slice(-limit).map(item => {
+      if (data.richHistory && [25, 26].includes(item.sequence)) return { ...item, content: "```mermaid\nflowchart LR\n A --> B\n```" };
+      if (data.richHistory && item.sequence === 27) return { ...item, content: '```html\n<h1>Safe fixture</h1><script>window.parent.bad=true</script><img src="https://invalid.example/tracker">\n```' };
+      return data.historyAttachments ? { ...item, attachments: [{ id: `00000000-0000-4000-8000-${String(item.sequence).padStart(12, "0")}`,
+        name: "Synthetic history.txt", media_type: "text/plain", model_context: "text", size: 12, expires_at: 2000000000 }] } : item;
+    });
     return json(res, { items, next_before: items.length === limit ? items[0].sequence : null });
   }
   if (path.endsWith("/budget-preview")) {
@@ -118,8 +123,8 @@ async function api(req, res, url, data) {
     const messageId = randomUUID();
     emit({ type: "TEXT_MESSAGE_START", messageId, role: "assistant" });
     let answer = "";
-    for (let index = 0; index < 24; index++) {
-      await delay(70);
+    for (let index = 0; index < (data.streamChunks || 24); index++) {
+      await delay(data.streamDelay ?? 70);
       const delta = `Synthetic reply chunk ${index + 1}.\n\n`;
       answer += delta;
       emit({ type: "TEXT_MESSAGE_CONTENT", messageId, delta });

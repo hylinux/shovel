@@ -616,11 +616,15 @@ async def test_office_extraction_and_zip_bomb_rejection(runtime: Runtime, api: h
             archive.writestr("word/document.xml", source)
         return output.getvalue()
 
-    source = b"<document><p><t>Safe document text</t></p></document>"
+    source = b"<document><p><r><t>Safe </t></r><r><t>document text</t></r></p></document>"
     response = await put(api, url(identifier), office(source), "document.docx")
     assert response.status_code == 200
     native = await runtime.attachments.contents(identifier, [response.json()])
-    assert "Safe document text" in native[0].text
+    assert native[0].text.endswith("Safe document text")
+    assert response.json()["reading_scope"]["office_extraction"] == "structured-v1"
+    legacy = {**response.json(), "reading_scope": {}}
+    old_native = await runtime.attachments.contents(identifier, [legacy])
+    assert old_native[0].text.endswith("Safe \ndocument text")
     entity = b'<!DOCTYPE x [<!ENTITY x "entity">]><document><t>&x;</t></document>'
     assert (await put(api, url(identifier), office(entity), "document.docx")).status_code == 400
     bomb = b"<document><t>" + b"x" * 1_000_000 + b"</t></document>"

@@ -5,12 +5,13 @@ import { api, ApiError, errorText, segment, uploadFile } from "./api";
 import { attachmentPath } from "./message-format";
 import { useI18n } from "./locale-context";
 import type { SessionDraft } from "./session-drafts";
+import { attachmentNow, attachmentServerNow, subscribeAttachmentClock } from "./attachment-clock";
 
 export type Attachment = {
   id: string; name: string; media_type: string; size: number; url: string; expires_at: number;
   model_context: "text" | "image";
   reading_scope?: { original_bytes?: number; stored_bytes?: number; original_width?: number; original_height?: number;
-    width?: number; height?: number; excerpt_chars?: number; truncated?: boolean };
+    width?: number; height?: number; excerpt_chars?: number; truncated?: boolean; office_extraction?: string };
   available?: boolean;
 };
 export type AttachmentStatus = {
@@ -111,6 +112,7 @@ export function AttachmentScope({ item }: { item: Attachment }) {
     ? t("Image: {p0} × {p1} → {p2} × {p3}; sanitized first frame.", { p0: scope.original_width, p1: scope.original_height, p2: scope.width, p3: scope.height })
     : t("Prepared excerpt: {p0} characters. {p1}", { p0: scope.excerpt_chars, p1: t(scope.truncated ? "Truncated." : "Not truncated.") })}
     {" "}{t("Original / stored: {p0} / {p1} bytes.", { p0: scope.original_bytes, p1: scope.stored_bytes })}
+    {scope.office_extraction && <>{" "}{t("Structured Office excerpt: paragraphs/slides/sheets and stored cell values only; formulas are not recalculated.")}</>}
   </small>;
 }
 
@@ -135,13 +137,13 @@ export function UploadList({ uploads, remove, cancel, retry, disabled, sessionId
 }
 
 export function MessageAttachments({ items, sessionId, status }: { items: Attachment[]; sessionId: string; status?: AttachmentStatus }) {
-  const { t, date } = useI18n();
-  const [now, setNow] = useState(() => Date.now() / 1000);
-  useEffect(() => {
-    const timer = setInterval(() => setNow(Date.now() / 1000), 30_000);
-    return () => clearInterval(timer);
-  }, []);
   if (!items.length) return null;
+  return <AvailableAttachments items={items} sessionId={sessionId} status={status} />;
+}
+
+function AvailableAttachments({ items, sessionId, status }: { items: Attachment[]; sessionId: string; status?: AttachmentStatus }) {
+  const { t, date } = useI18n();
+  const now = useSyncExternalStore(subscribeAttachmentClock, attachmentNow, attachmentServerNow);
   return <div className="message-attachments">{items.map(item => {
     const url = attachmentPath(sessionId, item.id);
     const expired = item.expires_at <= now || status?.items.some(row => row.id === item.id && row.available === false);

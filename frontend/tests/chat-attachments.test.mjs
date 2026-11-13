@@ -43,6 +43,7 @@ function attachmentHook(api, draft = new SessionDraft(), policy = status) {
   const require = createRequire(import.meta.url);
   const exports = {};
   const dependencies = {
+    "./attachment-clock": { attachmentNow: () => Date.now() / 1000, attachmentServerNow: () => 0, subscribeAttachmentClock: () => () => {} },
     react,
     "./api": { api, ApiError, errorText: error => error.message, segment: encodeURIComponent,
       uploadFile: (path, file, signal, onProgress) => api(path, { method: "PUT", headers: { "Content-Type": "application/octet-stream" }, body: file, signal, onProgress }) },

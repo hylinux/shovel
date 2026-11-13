@@ -171,6 +171,7 @@ test("Late content growth preserves the visible anchor; copy failure is explicit
     const message = [...element.querySelectorAll("[data-message-id]")].find(item => item.getBoundingClientRect().bottom > element.getBoundingClientRect().top);
     return { id: message.dataset.messageId, top: message.getBoundingClientRect().top };
   });
+
   await page.locator(".message-list").evaluate(element => {
     const image = new Image();
     image.alt = "Synthetic late image";
@@ -191,3 +192,51 @@ test("Late content growth preserves the visible anchor; copy failure is explicit
   await expect(message.locator(".message-source")).toContainText("Synthetic message");
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
 });
+
+test("Composer preview restores focus and selection; code disables spelling and oversized insertions report an error", async ({ page, isMobile }) => {
+    await input(page).fill("Before selected after");
+    await input(page).evaluate(element => { element.focus(); element.setSelectionRange(7, 15, "backward"); });
+    await page.locator(".composer-modes").getByRole("button", { name: "Preview", exact: true }).click();
+    await expect(page.getByLabel("Message preview", { exact: true })).toBeFocused();
+    await page.getByLabel("Message preview", { exact: true }).press("Escape");
+    await expect(input(page)).toBeFocused();
+    expect(await input(page).evaluate(element => [element.selectionStart, element.selectionEnd, element.selectionDirection])).toEqual([7, 15, "backward"]);
+    await page.getByLabel("Message format", { exact: true }).selectOption("json");
+    await expect(input(page)).toHaveAttribute("spellcheck", "false");
+    await expect(input(page)).toHaveAttribute("autocapitalize", "off");
+    await page.getByLabel("Message format", { exact: true }).selectOption("markdown");
+    await input(page).fill("x".repeat(16000));
+    await page.getByRole("button", { name: "Bold", exact: true }).click();
+    await expect(page.getByRole("alert").filter({ hasText: "Formatting would exceed" })).toBeVisible();
+    await expect(input(page)).toHaveValue("x".repeat(16000));
+    if (isMobile) {
+      const bounds = await page.getByRole("button", { name: "Bold", exact: true }).boundingBox();
+      expect(bounds.height).toBeGreaterThanOrEqual(44);
+      expect(bounds.width).toBeGreaterThanOrEqual(44);
+    }
+  });
+
+test("Offscreen rich previews defer work, duplicate diagrams reuse output and height controls retain iframe isolation", async ({ page }) => {
+    await control(page, { richHistory: true });
+    await page.reload();
+    await expect(page.locator("[data-message-id]")).toHaveCount(100);
+    await expect(page.locator(".isolated-preview iframe")).toHaveCount(0);
+    const first = page.locator('[data-message-id="message-25"]');
+    await first.scrollIntoViewIfNeeded();
+    await expect(first.locator("iframe")).toHaveAttribute("srcdoc", /<svg/);
+    const document = await first.locator("iframe").getAttribute("srcdoc");
+    const second = page.locator('[data-message-id="message-26"]');
+    await second.scrollIntoViewIfNeeded();
+    await expect(second.locator("iframe")).toHaveAttribute("srcdoc", document);
+    await first.getByLabel("Preview height").press("End");
+    await expect(first.getByLabel("Preview height")).toHaveValue("800");
+    await expect(first.locator("iframe")).toHaveAttribute("sandbox", "");
+    const html = page.locator('[data-message-id="message-27"]');
+    await html.scrollIntoViewIfNeeded();
+    await expect(html.locator("iframe")).toHaveAttribute("srcdoc", /Safe fixture/);
+    const sanitized = await html.locator("iframe").getAttribute("srcdoc");
+    expect(sanitized).not.toContain("<script>");
+    expect(sanitized).not.toContain("https://invalid.example");
+    expect(await page.evaluate(() => window.bad)).toBeUndefined();
+    await expect(html.locator("iframe")).toHaveAttribute("sandbox", "");
+  });

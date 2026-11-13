@@ -1736,14 +1736,20 @@ async def test_agui_stream_uses_framework_and_commits_before_success(
     )
     if development:
         lines = output.splitlines()
-        positions = []
+        positions = {}
         for event in milestones:
             line = next(line for line in lines if f"{event} " in line)
             assert "run_id=test-run" in line
             assert f"conversation_id={conversation}" in line
             assert response.headers["x-shovel-request-id"] in line
-            positions.append(lines.index(line))
-        assert positions == sorted(positions)
+            positions[event] = lines.index(line)
+        parallel_events = {"memory.recall.completed", "retrieval.completed"}
+        ordered_positions = [
+            position for event, position in positions.items() if event not in parallel_events
+        ]
+        assert ordered_positions == sorted(ordered_positions)
+        for event in parallel_events:
+            assert positions["agent.context.started"] < positions[event] < positions["agent.context.ready"]
         assert any("agent.stream.event" in line and "RUN_STARTED" in line for line in lines)
         assert any(
             "agent.stream.event" in line and ("RUN_FINISHED" if valid_citation else "RUN_ERROR") in line

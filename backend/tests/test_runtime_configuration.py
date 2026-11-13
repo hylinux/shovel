@@ -8,7 +8,7 @@ from typing import Any
 import httpx
 import pytest
 
-from shovel.config.settings import AppSettings
+from shovel.config.settings import AppSettings, load_settings
 from shovel.runtime.errors import RuntimeFailure
 from shovel.runtime.runtime_config import RuntimeConfigInput, RuntimeConfigurationService
 from shovel.runtime.service import Runtime
@@ -74,6 +74,40 @@ def test_save_preserves_hidden_fields_fixed_paths_and_secrets_and_verifies_resta
     assert restarted.check_application(saved["revision"])["applied"]
 
 
+@pytest.mark.parametrize("section", ["model", "memory.llm"])
+@pytest.mark.parametrize("budget", [32769, 128000])
+def test_output_budget_above_previous_ceiling_round_trips(
+    configuration: RuntimeConfigurationService, section: str, budget: int
+) -> None:
+    key = f"{section}.max_output_tokens"
+    saved = save(configuration, {key: budget})
+    item = next(item for item in saved["items"] if item["key"] == key)
+    assert item["value"] == budget
+    assert item["active_value"] == 2048
+    assert item["minimum"] == 1 and item["maximum"] is None
+    assert item["pending"]
+    restarted = RuntimeConfigurationService(AppSettings.load(configuration.file.path))
+    reloaded = next(item for item in restarted.read()["items"] if item["key"] == key)
+    assert reloaded["active_value"] == budget
+    assert restarted.read()["applied"]
+
+
+@pytest.mark.parametrize("section", ["model", "memory.llm"])
+def test_output_budget_environment_override_above_previous_ceiling(
+    configuration: RuntimeConfigurationService, monkeypatch: pytest.MonkeyPatch, section: str
+) -> None:
+    key = f"{section}.max_output_tokens"
+    env_key = "SHOVEL_" + key.replace(".", "__").upper()
+    monkeypatch.setenv(env_key, "128000")
+    saved = save(configuration, {key: 32769})
+    item = next(item for item in saved["items"] if item["key"] == key)
+    assert (item["value"], item["effective_value"]) == (32769, 128000)
+    assert item["environment"] == [env_key]
+    restarted = RuntimeConfigurationService(load_settings(configuration.file.path))
+    assert restarted.read()["applied"]
+    assert next(item for item in restarted.read()["items"] if item["key"] == key)["active_value"] == 128000
+
+
 @pytest.mark.parametrize(
     "key",
     [
@@ -113,6 +147,8 @@ def test_disallowed_paths_and_sections_cannot_be_written(
         ({"log_level": "secret-invalid"}, "log_level"),
         ({"service_name": " "}, "service_name"),
         ({"performance.max_concurrent_scans": 65}, "performance.max_concurrent_scans"),
+        ({"model.max_output_tokens": 0}, "model.max_output_tokens"),
+        ({"memory.llm.max_output_tokens": -1}, "memory.llm.max_output_tokens"),
         ({"agent.max_tool_iterations": "12"}, "agent.max_tool_iterations"),
         ({"memory.min_confidence": 2}, "memory.min_confidence"),
         ({"embedding.dimensions": 3}, "embedding.dimensions"),
@@ -215,8 +251,6 @@ def test_environment_source_and_actual_application_are_distinct(
     assert (item["value"], item["active_value"], item["effective_value"]) == (8, 5, 12)
     assert item["environment"] == ["SHOVEL_PERFORMANCE__MAX_CONCURRENT_SCANS"]
     assert "private" not in json.dumps(saved)
-    from shovel.config.settings import load_settings
-
     restarted = RuntimeConfigurationService(load_settings(configuration.file.path))
     assert restarted.read()["applied"]
     assert (

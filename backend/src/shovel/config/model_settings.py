@@ -45,7 +45,7 @@ class DefaultAgentModelSettings(BaseModel):
     model_name: str = ""
     api_version: str = ""
     security_key: str = ""
-    max_input_chars: int = Field(default=24000, ge=2000, le=500000)
+    max_input_chars: int = Field(default=24000, ge=2000)
     max_input_images: int = Field(default=5, ge=1, le=20)
     max_input_image_bytes: int = Field(default=10 * 1024 * 1024, ge=1024, le=50 * 1024 * 1024)
     max_output_tokens: int = Field(default=2048, ge=1)

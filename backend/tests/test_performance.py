@@ -9,7 +9,7 @@ import pytest
 from agent_framework import ChatContext, ChatResponse, ChatResponseUpdate, Message
 from sqlalchemy import select
 
-from shovel.config.model_settings import ModelProviderType
+from shovel.config.model_settings import DefaultAgentModelSettings, ModelProviderType
 from shovel.config.settings import AppSettings
 from shovel.db.model.runtime import Operation
 from shovel.pipeline.embedding_cache import EmbeddingCache
@@ -637,6 +637,29 @@ async def test_sdk_preserves_friendly_local_queue_timeout(runtime: Runtime) -> N
         with pytest.raises(RuntimeFailure, match="等待超时") as error:
             await runtime.chat.agent.respond("test", MessageInput(content="Hello", memory_enabled=False), [])
     assert error.value.status == 503
+
+
+async def test_large_configured_input_budget_is_still_enforced(runtime: Runtime) -> None:
+    settings = DefaultAgentModelSettings(max_input_chars=500001)
+    middleware = ContextBudgetMiddleware(settings.max_input_chars)
+    calls = 0
+
+    async def dispatch() -> None:
+        nonlocal calls
+        calls += 1
+
+    context = ChatContext(
+        runtime.chat.agent.client(),
+        [Message("user", ["x" * (settings.max_input_chars - 10)])],
+        {"instructions": "x" * 10},
+        stream=False,
+    )
+    await middleware.process(context, dispatch)
+    assert calls == 1
+    context.options["instructions"] += "x"
+    with pytest.raises(RuntimeFailure, match="上下文超过"):
+        await middleware.process(context, dispatch)
+    assert calls == 1
 
 
 async def test_final_context_budget_counts_maf_instructions_and_compact_tool_schema(runtime: Runtime) -> None:

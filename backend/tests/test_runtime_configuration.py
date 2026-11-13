@@ -75,16 +75,29 @@ def test_save_preserves_hidden_fields_fixed_paths_and_secrets_and_verifies_resta
 
 
 @pytest.mark.parametrize("section", ["model", "memory.llm"])
-@pytest.mark.parametrize("budget", [32769, 128000])
-def test_output_budget_above_previous_ceiling_round_trips(
-    configuration: RuntimeConfigurationService, section: str, budget: int
+@pytest.mark.parametrize(
+    "field,budget,default,minimum",
+    [
+        ("max_output_tokens", 32769, 2048, 1),
+        ("max_output_tokens", 128000, 2048, 1),
+        ("max_input_chars", 500001, 24000, 2000),
+        ("max_input_chars", 1000000, 24000, 2000),
+    ],
+)
+def test_model_budget_above_previous_ceiling_round_trips(
+    configuration: RuntimeConfigurationService,
+    section: str,
+    field: str,
+    budget: int,
+    default: int,
+    minimum: int,
 ) -> None:
-    key = f"{section}.max_output_tokens"
+    key = f"{section}.{field}"
     saved = save(configuration, {key: budget})
     item = next(item for item in saved["items"] if item["key"] == key)
     assert item["value"] == budget
-    assert item["active_value"] == 2048
-    assert item["minimum"] == 1 and item["maximum"] is None
+    assert item["active_value"] == default
+    assert item["minimum"] == minimum and item["maximum"] is None
     assert item["pending"]
     restarted = RuntimeConfigurationService(AppSettings.load(configuration.file.path))
     reloaded = next(item for item in restarted.read()["items"] if item["key"] == key)
@@ -93,19 +106,34 @@ def test_output_budget_above_previous_ceiling_round_trips(
 
 
 @pytest.mark.parametrize("section", ["model", "memory.llm"])
-def test_output_budget_environment_override_above_previous_ceiling(
-    configuration: RuntimeConfigurationService, monkeypatch: pytest.MonkeyPatch, section: str
+@pytest.mark.parametrize(
+    "field,saved_budget,effective_budget",
+    [
+        ("max_output_tokens", 32769, 128000),
+        ("max_input_chars", 500001, 1000000),
+    ],
+)
+def test_model_budget_environment_override_above_previous_ceiling(
+    configuration: RuntimeConfigurationService,
+    monkeypatch: pytest.MonkeyPatch,
+    section: str,
+    field: str,
+    saved_budget: int,
+    effective_budget: int,
 ) -> None:
-    key = f"{section}.max_output_tokens"
+    key = f"{section}.{field}"
     env_key = "SHOVEL_" + key.replace(".", "__").upper()
-    monkeypatch.setenv(env_key, "128000")
-    saved = save(configuration, {key: 32769})
+    monkeypatch.setenv(env_key, str(effective_budget))
+    saved = save(configuration, {key: saved_budget})
     item = next(item for item in saved["items"] if item["key"] == key)
-    assert (item["value"], item["effective_value"]) == (32769, 128000)
+    assert (item["value"], item["effective_value"]) == (saved_budget, effective_budget)
     assert item["environment"] == [env_key]
     restarted = RuntimeConfigurationService(load_settings(configuration.file.path))
     assert restarted.read()["applied"]
-    assert next(item for item in restarted.read()["items"] if item["key"] == key)["active_value"] == 128000
+    assert (
+        next(item for item in restarted.read()["items"] if item["key"] == key)["active_value"]
+        == effective_budget
+    )
 
 
 @pytest.mark.parametrize(
@@ -149,6 +177,8 @@ def test_disallowed_paths_and_sections_cannot_be_written(
         ({"performance.max_concurrent_scans": 65}, "performance.max_concurrent_scans"),
         ({"model.max_output_tokens": 0}, "model.max_output_tokens"),
         ({"memory.llm.max_output_tokens": -1}, "memory.llm.max_output_tokens"),
+        ({"model.max_input_chars": 1999}, "model.max_input_chars"),
+        ({"memory.llm.max_input_chars": 1999}, "memory.llm.max_input_chars"),
         ({"agent.max_tool_iterations": "12"}, "agent.max_tool_iterations"),
         ({"memory.min_confidence": 2}, "memory.min_confidence"),
         ({"embedding.dimensions": 3}, "embedding.dimensions"),

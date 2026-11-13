@@ -142,6 +142,24 @@ connectivity. Changed environment overrides remain visibly identified even
 when the active process matches. Listener edits remain loopback-only;
 `agent_port` does not create an independent Agent listener.
 
+`model.max_output_tokens` is a user-configurable output budget per model request,
+not a whole-task quota. It defaults to 2048 and accepts positive integers without
+a Shovel-imposed maximum. Choose a budget within your deployed model's output
+and context limits; reasoning tokens may consume this budget too. Larger budgets
+can increase latency and cost, and unsupported values can be rejected by the
+provider. An independently configured `memory.llm.max_output_tokens` follows the
+same rules; when Memory has no configured model, it uses the Main Agent settings.
+
+`model.max_input_chars` is Shovel's local input character budget, not the model's
+token context window or an API parameter. It defaults to 24000, retains a minimum
+of 2000, and has no fixed Shovel configuration maximum. The runtime still bounds
+context assembly and rejects requests exceeding the configured budget; removing
+the configuration ceiling does not disable these guards. Characters do not map
+one-to-one to tokens, so leave room for output and check the deployed model's
+actual context limits. Independently configured `memory.llm.max_input_chars`
+uses the same configuration rules and retains its extraction/summary guards.
+Embedding input budgets and attachment size/count limits are separate.
+
 The chat editor offers the tested Azure OpenAI, DeepSeek, QianWen and Ollama
 scope independently for Main Agent and Memory LLM. Embedding offers Azure
 OpenAI, QianWen with an explicit embedding endpoint, and Ollama; DeepSeek chat

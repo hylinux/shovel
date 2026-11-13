@@ -559,6 +559,18 @@ class AttachmentService:
         self, session: AsyncSession, identifier: str, ids: list[str], message_id: str
     ) -> list[dict[str, Any]]:
         metadata = []
+        rows = await self.selected(session, identifier, ids)
+        for row in rows:
+            if row.message_id is None:
+                row.message_id = message_id
+                row.expires_at = now_ts() + ATTACHED_TTL
+            metadata.append(attachment_view(row))
+        return metadata
+
+    async def selected(
+        self, session: AsyncSession, identifier: str, ids: list[str]
+    ) -> list[SessionAttachment]:
+        rows = []
         for attachment_id in ids:
             row = await session.get(SessionAttachment, attachment_id)
             if row is None or row.conversation_id != identifier:
@@ -567,11 +579,8 @@ class AttachmentService:
                 partial(self._available, identifier, attachment_id)
             ):
                 raise _failure("Attachment has expired or is no longer available.", 410)
-            if row.message_id is None:
-                row.message_id = message_id
-                row.expires_at = now_ts() + ATTACHED_TTL
-            metadata.append(attachment_view(row))
-        return metadata
+            rows.append(row)
+        return rows
 
     async def contents(self, identifier: str, metadata: list[dict[str, Any]]) -> list[Content]:
         if not metadata:

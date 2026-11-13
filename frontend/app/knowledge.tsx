@@ -17,6 +17,7 @@ import { MessageAttachments, UploadList, useAttachments, type Attachment, type A
 import { useSessionScroll } from "./session-scroll";
 import type { SessionDraft, SessionDrafts } from "./session-drafts";
 import { UserAvatar, useUserProfile } from "./user-profile";
+import { SendBudgetNotice, useSendBudget } from "./send-budget";
 
 export function Knowledge({ status, sessionId, onSessionChanged, drafts }: { status?: Status; sessionId: string; onSessionChanged: () => void; drafts: SessionDrafts }) {
   const { t } = useI18n();
@@ -62,7 +63,11 @@ function Chat({ sessionId, status, onActivity, draft }: { sessionId: string; sta
   }, [action.busy]);
   const outgoing = content.trim() ? formattedMessage(content, format) : "";
   const tooLong = outgoing.length > 16000;
-  const sendDisabled = action.busy || attachments.uploading || attachments.invalid || tooLong || (!content.trim() && !attachments.completed.length) || !status?.model_configured || !status?.memory_configured || history.loading || Boolean(history.error) || workingUnavailable;
+  const budgetInput = !tooLong && !attachments.uploading && !attachments.invalid && !workingUnavailable && (outgoing || attachments.completed.length)
+    ? { content: outgoing, resource_ids: [], memory_enabled: true, search_mode: "auto", working_task_id: chosenTask,
+      attachment_ids: attachments.completed.map(item => item.id) } : null;
+  const budget = useSendBudget(sessionId, budgetInput, history.data?.items.at(-1)?.id ?? "");
+  const sendDisabled = action.busy || budget.blocked || attachments.uploading || attachments.invalid || tooLong || (!content.trim() && !attachments.completed.length) || !status?.model_configured || !status?.memory_configured || history.loading || Boolean(history.error) || workingUnavailable;
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (sendDisabled) return;
@@ -135,6 +140,8 @@ function Chat({ sessionId, status, onActivity, draft }: { sessionId: string; sta
     {attachments.error && <p className="warning" role="alert">{t(attachments.error)}</p>}
     {attachments.notice && <p className="muted" role="status">{t(attachments.notice)}</p>}
     {tooLong && <p className="warning" role="alert">{t("The formatted message exceeds 16,000 characters. Shorten it or attach a text file.")}</p>}
+    {(content.length > 0 || attachments.uploads.length > 0) && <small className="muted">{t("Drafts stay in page memory. Refreshing or closing can discard text and uploads; your browser may ask before leaving.")}</small>}
+    {budgetInput && <SendBudgetNotice budget={budget} />}
     <div className="composer-footer"><div className="composer-attach"><input ref={fileRef} type="file" multiple accept={attachmentStatus.data?.limits.extensions.join(",")} className="sr-only" tabIndex={-1} aria-label={t("Attach files")} disabled={action.busy || !attachmentStatus.data || Boolean(attachmentStatus.error)} onChange={event => { attachments.add(Array.from(event.target.files || [])); event.target.value = ""; }} />
       <button type="button" disabled={action.busy || attachments.uploading || !attachmentStatus.data || Boolean(attachmentStatus.error)} onClick={() => fileRef.current?.click()}>{t("Attach files")}</button><span className="muted" id="message-shortcuts">{t("Ctrl + Enter to send · Enter for a new line")}</span></div>
       <button className="primary" aria-keyshortcuts="Control+Enter" disabled={sendDisabled}>{action.busy ? t("Waiting for model…") : t("Send Message")}</button></div>

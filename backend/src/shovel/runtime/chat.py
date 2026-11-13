@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from collections.abc import AsyncGenerator
 from contextlib import suppress
 from time import perf_counter
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import structlog
 from ag_ui.core import BaseEvent, CustomEvent, EventType, RunErrorEvent, RunFinishedEvent, RunStartedEvent
@@ -23,8 +24,21 @@ from shovel.protection.egress import (
     enterprise_active,
     require_ordinary,
 )
-from shovel.runtime.agent import EventSink, ShovelAgent
-from shovel.runtime.agent_instructions import AgentInstructionsView
+from shovel.runtime.agent import (
+    ContextSize,
+    EventSink,
+    ShovelAgent,
+    evidence_size,
+    history_size,
+    profile_context,
+    request_context_size,
+)
+from shovel.runtime.agent_instructions import (
+    PROFILE_INSTRUCTIONS,
+    AgentInstructionsView,
+    compose_instructions,
+)
+from shovel.runtime.attachments import attachment_view
 from shovel.runtime.diagnostics import trace, trace_context
 from shovel.runtime.errors import NotFound, RuntimeFailure
 from shovel.runtime.schemas import AgentInstructionsInput, MessageInput, WorkingMemoryInput
@@ -208,6 +222,72 @@ class ChatService:
                 raise RuntimeFailure("Enterprise data egress denied.", status=403) from None
             finally:
                 self._active_runs -= 1
+
+    async def preview(self, identifier: str, request: MessageInput) -> dict[str, Any]:
+        """Measure local inputs only; never bind files, retrieve evidence or call a model."""
+        require_ordinary(EgressChannel.DISPLAY, request)
+        lock = self.session_lock(identifier)
+        if lock.locked() or self._restarting or self._restart_failed:
+            raise RuntimeFailure("Agent 正忙或需要重启,请稍后重新预估。", status=409)
+        async with lock:
+            await self.conversation(identifier)
+            async with self.runtime.attachments.lock, self.runtime.sessions() as session:
+                rows = await self.runtime.attachments.selected(session, identifier, request.attachment_ids)
+                metadata = [attachment_view(row) for row in rows]
+                history = list(
+                    await session.scalars(
+                        select(ChatMessage)
+                        .where(ChatMessage.conversation_id == identifier, ChatMessage.state == "completed")
+                        .order_by(ChatMessage.sequence.desc())
+                        .limit(self.runtime.settings.memory.history_messages)
+                    )
+                )
+            request._attachment_contents = await self.runtime.attachments.contents(identifier, metadata)
+            profile = await self.runtime.user_profile.read()
+            if self.agent.instructions_revision is None:
+                configuration = await asyncio.to_thread(self.runtime.instructions.read)
+                self.runtime.instructions.validate(configuration["content"])
+                instructions = compose_instructions(configuration["content"])
+            else:
+                instructions = self.agent.instructions
+            if profile["revision"]:
+                instructions += PROFILE_INSTRUCTIONS
+            measured = request_context_size(request, instructions, profile_context(profile))
+            working_chars = 0
+            if request.working_task_id is not None:
+                working = await self.runtime.memory.working.context(identifier, request.working_task_id)
+                working_chars = evidence_size(json.dumps({"working_memory": working}, ensure_ascii=False))
+            measured += ContextSize(working_chars + 500)
+            history_measured = ContextSize()
+            for message in history:
+                contents = await self.runtime.attachments.contents(identifier, message.attachments)
+                history_measured += history_size(Message(message.role, [message.content, *contents]))
+            settings = self.runtime.settings.model
+            reasons = []
+            if measured.chars > settings.max_input_chars:
+                reasons.append("text")
+            if measured.images > settings.max_input_images:
+                reasons.append("images")
+            if measured.image_bytes > settings.max_input_image_bytes:
+                reasons.append("image_bytes")
+            return {
+                "estimated_chars": measured.chars,
+                "max_chars": settings.max_input_chars,
+                "remaining_chars": max(0, settings.max_input_chars - measured.chars),
+                "reserved_chars": 1012,
+                "images": measured.images,
+                "max_images": settings.max_input_images,
+                "image_bytes": measured.image_bytes,
+                "max_image_bytes": settings.max_input_image_bytes,
+                "history": {
+                    "messages": len(history),
+                    "chars": history_measured.chars,
+                    "images": history_measured.images,
+                    "image_bytes": history_measured.image_bytes,
+                },
+                "exceeded": reasons,
+                "estimate_only": True,
+            }
 
     async def stream(self, identifier: str, request: MessageInput, run_id: str) -> AsyncGenerator[BaseEvent]:
         # Backpressure bounds memory while retaining cancellation and durable failure handling.

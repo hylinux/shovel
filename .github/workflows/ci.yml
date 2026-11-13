@@ -219,6 +219,8 @@ jobs:
           npm run typecheck
           npm test
           npm run build
+          npx playwright install --with-deps chromium
+          npm run test:browser
           mkdir -p ../backend/src/shovel/static
           cp -R out/. ../backend/src/shovel/static/
 

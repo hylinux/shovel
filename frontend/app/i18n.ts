@@ -5,6 +5,18 @@ export const defaultLocale: Locale = "en";
 export type TranslationValues = Record<string, string | number | boolean | null | undefined>;
 
 export const chinese: Readonly<Record<string, string>> = {
+  "Send budget estimate": "发送预算预估",
+  "Estimating send budget…": "正在预估发送预算…",
+  "Retry budget estimate": "重新预估预算",
+  "Estimated base text: {p0} / {p1} characters; {p2} reserved for framing and context.": "基础文本预估：{p0} / {p1} 个字符；其中为消息封装和上下文预留 {p2} 个字符。",
+  "Current images: {p0} / {p1}; {p2} / {p3} MiB.": "本次图片：{p0} / {p1} 张；{p2} / {p3} MiB。",
+  "Candidate history: {p0} messages, {p1} characters, {p2} images. Not all history will be included.": "候选历史：{p0} 条消息、{p1} 个字符、{p2} 张图片；不保证全部纳入上下文。",
+  "This input exceeds the budget. Shorten the message or remove attachments; no content is changed automatically.": "本次输入超过预算。请缩短正文或移除附件；不会自动修改内容。",
+  "Text character limit exceeded.": "超过文本字符上限。",
+  "Image count limit exceeded.": "超过图片数量上限。",
+  "Image byte limit exceeded.": "超过图片字节上限。",
+  "Local estimate only: includes instructions, current profile, selected working context and prepared attachments. Recalled Memory, retrieval, tool schemas/results and final history selection can change the total. The server rechecks before every model call.": "仅为本地预估：包含指令、当前资料、所选工作上下文及准备的附件。Memory 召回、检索、工具声明/结果及最终历史选择仍会改变总量；服务端会在每次模型调用前重新检查。",
+  "Drafts stay in page memory. Refreshing or closing can discard text and uploads; your browser may ask before leaving.": "草稿仅保留在页面内存。刷新或关闭可能丢失文本和上传状态；离开前浏览器可能提示确认。",
   "Back to bottom": "回到底部",
   "New reply · Back to bottom": "有新回复 · 回到底部",
   "A new reply is available below.": "下方有新回复。",

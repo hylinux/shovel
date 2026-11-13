@@ -118,10 +118,58 @@ clear only the unchanged originating draft, and deleting a Session discards
 its draft and cancels outstanding uploads. Expired attachments block sending
 and must be removed/re-attached. Drafts are not written to browser storage;
 reloading or closing the page discards them.
+While any retained Session has text or attachments (including cancelled/failed
+uploads), the page registers a native refresh/close warning. Clearing or
+successfully sending the last unchanged draft removes that listener; navigating
+between Sessions or workbench views does not discard drafts or show a warning.
+This is not persistence: browsers control the wording and may suppress the
+dialog without prior interaction, on mobile app termination or on a crash.
 Both user messages and replies render Markdown/GFM tables, highlighted code and
 LaTeX. **View source / Preview** switches preserve the original message, and
 **Copy source** copies it without copying rendered markup. Streaming replies
 render Markdown incrementally; HTML/CSV/Mermaid block previews wait for completion.
+
+The composer requests a debounced, cancellable send-budget estimate through
+`POST /api/v1/conversations/{id}/budget-preview`. It uses the same server-side
+attachment preparation, media counting and initial text reservation as a send:
+formatted message, loaded instructions, current profile, selected Working Memory,
+prepared excerpts, image bytes, and 1,012 characters of framing/context reserve.
+Candidate history counts are shown separately, not added as mandatory input.
+Memory recall, RAG, tool declarations/results and final history selection remain
+dynamic; a passing estimate is not a promise that a later model call will fit.
+No model/embedding requests, evidence retrieval, message writes, file binding
+or TTL extension happen during preview. Only aggregate counts leave the server.
+Changing text, format, attachments or selected context invalidates the displayed
+estimate immediately. Pending/failed estimates and known excess input disable
+send; retry is explicit. Shorten text or remove files using the existing controls.
+There is no silent truncation/downsampling and no bypass of the final model gate.
+
+### Browser regression checks
+
+From `frontend\`, with the locked dependencies installed:
+
+```powershell
+npm run build
+npx playwright install chromium
+npm run test:browser
+# Alternatively use an existing local Edge installation:
+$env:PLAYWRIGHT_CHANNEL = "msedge"
+npm run test:browser
+Remove-Item Env:\PLAYWRIGHT_CHANNEL
+```
+
+The Playwright runner starts its own loopback-only static-export fixture server
+on port 59992 and stops it after the run. An occupied port is an error; it never
+reuses an existing Host. Each browser context has independent synthetic Sessions,
+files and API/SSE responses held only in server memory. No real configuration,
+user stores, external model services or upstream network requests are used.
+The same tests run in desktop Chromium and mobile Chromium emulation. They cover
+native dirty-draft reload protection, successful/failed sends, budget changes and
+retry, mixed paste, upload cancellation/same-UUID recovery, reading scope,
+streaming/pagination/late-growth scrolling, clipboard failure, keyboard send and
+horizontal layout. These are frontend contract tests, not live model or full
+backend acceptance; backend regressions independently verify the real preview
+endpoint and quota/attachment isolation. CI runs both suites without paid calls.
 
 HTML is untrusted content, not an application: inline HTML is allowlist-sanitized;
 fenced HTML previews are sanitized inside sandboxed, opaque-origin frames with

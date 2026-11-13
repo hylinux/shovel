@@ -3,7 +3,7 @@ import { readFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import test from "node:test";
 import ts from "typescript";
-import { SessionDrafts } from "../app/session-drafts.ts";
+import { protectDrafts, SessionDrafts } from "../app/session-drafts.ts";
 import * as format from "../app/message-format.ts";
 import * as memory from "../app/memory-model.ts";
 
@@ -27,6 +27,7 @@ function composer(run = async () => false) {
   };
   function ComposerTools() { return null; }
   const dependencies = {
+    "./send-budget": { useSendBudget: () => ({ blocked: false }), SendBudgetNotice: () => null },
     "./session-scroll": { useSessionScroll: () => ({ paused: false, unread: false, navigate() {}, bottom() {} }) },
     react,
     "./locale-context": { useI18n: () => ({ t: key => key }) },
@@ -72,6 +73,27 @@ test("Session remount restores composer text, format and preview without leaking
   assert.equal(ui.tools(returned).props.format, "json");
   assert.equal(ui.input(ui.render("b")).props.value, "B draft");
   assert.equal(ui.input(ui.render("a", "another-workspace")).props.value, "");
+});
+
+test("Leave protection covers every retained draft, removes listeners when clean and never persists content", () => {
+  const drafts = new SessionDrafts();
+  const target = new EventTarget();
+  const cleanup = protectDrafts(drafts, target);
+  const blocked = () => !target.dispatchEvent(new Event("beforeunload", { cancelable: true }));
+  assert.equal(blocked(), false);
+  const first = drafts.get("workspace", "first");
+  first.update({ content: "Unsaved" });
+  assert.equal(blocked(), true);
+  const sent = first.getSnapshot();
+  drafts.get("workspace", "second").update({ uploads: [{ id: "upload", uploading: true }] });
+  first.clearAfterSend(sent);
+  assert.equal(blocked(), true, "Another Session's upload still needs protection");
+  drafts.delete("workspace", "second");
+  assert.equal(blocked(), false);
+  first.update({ content: " " });
+  assert.equal(blocked(), true);
+  cleanup();
+  assert.equal(blocked(), false);
 });
 
 test("A settled send clears only its unchanged Session draft, never another or a newer draft", async () => {

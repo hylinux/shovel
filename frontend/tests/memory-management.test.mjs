@@ -11,6 +11,7 @@ import * as messageFormat from "../app/message-format.ts";
 import { SessionDrafts } from "../app/session-drafts.ts";
 
 const messageComponents = {
+  "./send-budget": { useSendBudget: () => ({ blocked: false }), SendBudgetNotice: () => null },
   "./session-scroll": { useSessionScroll: () => ({ messages: { current: null }, content: { current: null }, paused: false, unread: false, navigate() {}, bottom() {} }) },
   "./user-profile": { useUserProfile: () => ({ error: "", refresh() {} }), UserAvatar: () => createElement("svg") },
   "./message-content": { MessageContent: () => null, RichText: () => null },

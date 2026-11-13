@@ -29,7 +29,15 @@ from shovel.db.model.retrieval import SchemaMigration
 from shovel.db.model.runtime import ChatMessage, SessionAttachment
 from shovel.protection.domain import ProtectionDeniedError
 from shovel.protection.egress import egress_scope, mark_enterprise
-from shovel.runtime.agent import AgentResult, ContextBudgetMiddleware, ShovelContextProvider, content_size
+from shovel.runtime.agent import (
+    AgentResult,
+    ContextBudgetMiddleware,
+    ShovelContextProvider,
+    content_size,
+    profile_context,
+    request_context_size,
+)
+from shovel.runtime.agent_instructions import compose_instructions
 from shovel.runtime.api import configure_api
 from shovel.runtime.attachments import ATTACHED_TTL, PENDING_TTL
 from shovel.runtime.errors import RuntimeFailure
@@ -297,6 +305,116 @@ async def test_valid_images_are_decoded_sanitized_and_forwarded_as_native_conten
     with pytest.raises(RuntimeFailure, match="上下文预算"):
         await provider.before_run(agent=None, session=None, context=context, state={})
     assert (await put(api, url(identifier), image.getvalue()[:-50], "picture.png")).status_code == 400
+
+
+async def test_budget_preview_uses_native_media_and_serialized_excerpts_without_sending_or_binding(
+    runtime: Runtime, api: httpx.AsyncClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    identifier = await session_id(api)
+    image = io.BytesIO()
+    Image.new("RGB", (120, 80), "red").save(image, format="PNG")
+    picture = (await put(api, url(identifier), image.getvalue(), "picture.png")).json()
+    note = (await put(api, url(identifier), ("😀\n" * 4500).encode(), "notes.txt")).json()
+
+    def forbidden(*args: object, **kwargs: object) -> None:
+        pytest.fail("A budget preview must not call models or retrieve evidence")
+
+    monkeypatch.setattr(runtime.chat.agent, "client", forbidden)
+    monkeypatch.setattr(runtime.memory, "search", forbidden)
+    monkeypatch.setattr(runtime.retrieval, "search", forbidden)
+    body = {"content": "Count 😀", "attachment_ids": [picture["id"], note["id"]], "memory_enabled": False}
+    response = await api.post(f"/api/v1/conversations/{identifier}/budget-preview", json=body)
+    assert response.status_code == 200
+    preview = response.json()
+    request = MessageInput.model_validate(body)
+    request._attachment_contents = await runtime.attachments.contents(identifier, [picture, note])
+    instructions = compose_instructions(runtime.instructions.read()["content"])
+    size = request_context_size(request, instructions, profile_context(await runtime.user_profile.read()))
+    assert preview["estimated_chars"] == size.chars + 500
+    assert preview["images"] == 1
+    assert preview["image_bytes"] == picture["size"]
+    assert preview["reserved_chars"] == 1012
+    assert preview["exceeded"] == []
+    assert preview["estimate_only"] is True
+    async with runtime.sessions() as database:
+        assert not list(await database.scalars(select(ChatMessage)))
+        for item in (picture, note):
+            stored = await database.get(SessionAttachment, item["id"])
+            assert stored is not None and stored.message_id is None
+            assert stored.expires_at == item["expires_at"]
+    assert runtime.chat.agent._client is None
+
+
+async def test_budget_preview_reports_text_and_media_limits_and_rechecks_attachment_scope(
+    runtime: Runtime, api: httpx.AsyncClient
+) -> None:
+    identifier = await session_id(api)
+    image = io.BytesIO()
+    Image.new("RGB", (80, 80), "blue").save(image, format="PNG")
+    pictures = [
+        (await put(api, url(identifier), image.getvalue(), f"image{index}.png")).json() for index in range(2)
+    ]
+    runtime.settings.model.max_input_images = 1
+    runtime.settings.model.max_input_image_bytes = pictures[0]["size"]
+    path = f"/api/v1/conversations/{identifier}/budget-preview"
+    payload = {"attachment_ids": [item["id"] for item in pictures], "memory_enabled": False}
+    preview = (await api.post(path, json=payload)).json()
+    assert preview["exceeded"] == ["images", "image_bytes"]
+    runtime.settings.model.max_input_chars = preview["estimated_chars"] - 1
+    assert (await api.post(path, json=payload)).json()["exceeded"] == ["text", "images", "image_bytes"]
+    other = await session_id(api)
+    assert (await api.post(f"/api/v1/conversations/{other}/budget-preview", json=payload)).status_code == 404
+    async with runtime.sessions() as database:
+        await database.execute(update(SessionAttachment).values(expires_at=1))
+        await database.commit()
+    assert (await api.post(path, json=payload)).status_code == 410
+    assert (await api.post(path, json={"content": ""})).status_code == 422
+    async with runtime.chat.session_lock(identifier):
+        assert (await api.post(path, json={"content": "new"})).status_code == 409
+
+
+async def test_budget_preview_includes_profile_working_context_and_candidate_history_without_media_rejection(
+    runtime: Runtime, api: httpx.AsyncClient
+) -> None:
+    identifier = await session_id(api)
+    path = f"/api/v1/conversations/{identifier}/budget-preview"
+    baseline = (await api.post(path, json={"content": "hello"})).json()
+    profile = await api.put(
+        "/api/v1/user/profile",
+        json={
+            "revision": 0,
+            "nickname": "Synthetic",
+            "gender": "",
+            "occupation": "",
+            "bio": "Local fixture",
+        },
+    )
+    assert profile.status_code == 200
+    working = await api.put(
+        f"/api/v1/conversations/{identifier}/working-memory/task",
+        json={
+            "expected_revision": 0,
+            "goal": "Test local context",
+        },
+    )
+    assert working.status_code == 200
+    image = io.BytesIO()
+    Image.new("RGB", (40, 40), "blue").save(image, format="PNG")
+    uploaded = (await put(api, url(identifier), image.getvalue(), "history.png")).json()
+    async with runtime.sessions() as database:
+        database.add(
+            ChatMessage(
+                conversation_id=identifier, role="user", content="History", sequence=1, attachments=[uploaded]
+            )
+        )
+        await database.commit()
+    runtime.settings.model.max_input_image_bytes = 1
+    preview = (await api.post(path, json={"content": "hello", "working_task_id": "task"})).json()
+    assert preview["estimated_chars"] > baseline["estimated_chars"]
+    assert preview["history"]["messages"] == 1 and preview["history"]["images"] == 1
+    assert preview["history"]["image_bytes"] == uploaded["size"]
+    assert preview["images"] == 0 and preview["exceeded"] == []
+    assert (await api.post(path, json={"content": "hello", "working_task_id": "missing"})).status_code == 404
 
 
 @pytest.mark.parametrize(

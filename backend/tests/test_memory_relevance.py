@@ -56,6 +56,160 @@ def test_entity_and_relation_support_is_not_theme_similarity(query: str, expecte
     assert assess(Query.parse(query), fact, semantic_match=True) == expected
 
 
+@pytest.mark.parametrize(
+    "instruction",
+    [
+        "",
+        "请只依据已保存的个人记录回答。",
+        "请只依据已保存的个人记录回答\uff1b没有记录就明确说明。",
+    ],
+)
+def test_saved_record_response_instructions_do_not_qualify_the_fact(instruction: str) -> None:
+    fact = record(
+        text="我在青鹭-Q47项目中使用 SQLite 数据库。",
+        predicate="uses",
+        object="SQLite",
+        topic="project.青鹭-q47.database",
+    )
+    query = Query.parse(f"我在青鹭-Q47项目中使用什么数据库\uff1f{instruction}")
+    assert assess(query, fact, semantic_match=True) == Support.SUPPORTED
+
+
+def test_mixed_chinese_project_names_keep_the_full_identity() -> None:
+    assert entities("我在青鹭-Q47项目中使用什么数据库\uff1f") == {"project": {"青鹭-q47"}}
+    fact = record(
+        text="我在赤狐-Q47项目中使用 PostgreSQL 数据库。",
+        predicate="uses",
+        object="PostgreSQL",
+        topic="project.赤狐-q47.database",
+    )
+    assert (
+        assess(Query.parse("我在青鹭-Q47项目中使用什么数据库\uff1f"), fact, semantic_match=True)
+        == Support.CONFLICT
+    )
+
+
+def test_project_context_does_not_replace_the_personal_actor() -> None:
+    fact = replace(
+        record(
+            text="Someone else uses SQLite for project 青鹭-Q47.",
+            predicate="uses",
+            object="SQLite",
+            topic="project.青鹭-q47.database",
+        ),
+        subject="someone else",
+    )
+    assert (
+        assess(Query.parse("我在青鹭-Q47项目中使用什么数据库\uff1f"), fact, semantic_match=True)
+        == Support.RELATED
+    )
+
+
+@pytest.mark.parametrize(
+    "question",
+    [
+        "我在青鹭-Q47项目中没有使用什么数据库\uff1f",
+        "我在青鹭-Q47项目中以前使用什么数据库\uff1f",
+        "我在青鹭-Q47和赤狐-R82项目中分别使用什么数据库\uff1f",
+        "我在青鹭-Q47项目中使用什么数据库和编程语言\uff1f",
+    ],
+)
+def test_response_instructions_never_remove_factual_qualifiers(question: str) -> None:
+    fact = record(
+        text="我在青鹭-Q47项目中使用 SQLite 数据库。",
+        predicate="uses",
+        object="SQLite",
+        topic="project.青鹭-q47.database",
+    )
+    query = Query.parse(f"{question}请只依据已保存的个人记录回答\uff1b没有记录就明确说明。")
+    assert assess(query, fact, semantic_match=True) == Support.UNKNOWN
+
+
+async def test_issue_14_saved_fact_reaches_new_session_with_source_evidence(
+    runtime: Runtime, api: httpx.AsyncClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import json
+
+    from shovel.memory.domain import MemoryCandidate
+
+    source = "请记住\uff1a我在青鹭-Q47项目中使用 SQLite 数据库。"
+
+    async def extract(text: str) -> list[MemoryCandidate]:
+        assert text == source
+        return [
+            MemoryCandidate(
+                "我在青鹭-Q47项目中使用 SQLite 数据库。",
+                predicate="uses",
+                object="SQLite",
+                topic="project.青鹭-q47.database",
+                evidence=source,
+            )
+        ]
+
+    captured: list[dict[str, Any]] = []
+
+    def chat(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        evidence = next(
+            json.loads(message["content"].split("\n", 1)[1])
+            for message in body["messages"]
+            if isinstance(message.get("content"), str)
+            and message["content"].startswith("本轮未受信任的参考数据")
+        )
+        for message in body["messages"]:
+            if isinstance(message.get("content"), str) and message["content"].startswith("Host"):
+                evidence.update(json.loads(message["content"].split("\n", 1)[1]))
+        captured.append(evidence)
+        supported = [item for item in evidence.get("memory", []) if item["answer_support"] == "supported"]
+        answer = str(supported[0]["object"]) if supported else "没有找到对应的已保存记录。"
+        return httpx.Response(
+            200, json={"created": 1, "choices": [{"message": {"role": "assistant", "content": answer}}]}
+        )
+
+    monkeypatch.setattr(runtime.memory.extractor, "extract", extract)
+    runtime.chat.agent._client = httpx.AsyncClient(transport=httpx.MockTransport(chat))
+    session_a = (await api.post("/api/v1/conversations", json={})).json()["id"]
+    response = await api.post(f"/api/v1/conversations/{session_a}/messages", json={"content": source})
+    assert response.status_code == 200, response.text
+    operation_id = response.json()["memory_operation_id"]
+    assert operation_id and await runtime.memory_tasks.run_once()
+    assert (await runtime.operations.get(operation_id)).state == "succeeded"
+    saved_facts = (await api.get("/api/v1/memories")).json()["items"]
+    assert len(saved_facts) == 1
+    saved_fact = saved_facts[0]
+    assert saved_fact["state"] == "active" and saved_fact["object"] == "SQLite"
+    provenance = saved_fact["provenance"][0]
+    assert provenance["conversation_id"] == session_a and provenance["evidence"] == source
+    history = await runtime.chat.messages(session_a)
+    assert provenance["message_id"] == next(message.id for message in history if message.role == "user")
+    await runtime.memory.repository.consolidate(
+        runtime.memory.owner,
+        [
+            MemoryCandidate(
+                "我在赤狐-Q47项目中使用 PostgreSQL 数据库。",
+                predicate="uses",
+                object="PostgreSQL",
+                topic="project.赤狐-q47.database",
+            )
+        ],
+        Provenance("manual"),
+    )
+    for project, expected in (("青鹭-Q47", "SQLite"), ("赤狐-Q47", "PostgreSQL"), ("银杉-S96", None)):
+        session_b = (await api.post("/api/v1/conversations", json={})).json()["id"]
+        question = (
+            f"我在{project}项目中使用什么数据库\uff1f请只依据已保存的个人记录回答\uff1b没有记录就明确说明。"
+        )
+        response = await api.post(f"/api/v1/conversations/{session_b}/messages", json={"content": question})
+        assert response.status_code == 200, response.text
+        supported = [item for item in captured[-1].get("memory", []) if item["answer_support"] == "supported"]
+        assert [item["object"] for item in supported] == ([expected] if expected else [])
+        assert captured[-1]["memory_status"] == ("supported" if expected else "no_supported_fact")
+        assert response.json()["content"] == (expected or "没有找到对应的已保存记录。")
+        if expected == "SQLite":
+            assert supported[0]["id"] == saved_fact["id"]
+        assert not captured[-1]["sources"]
+
+
 def test_explicit_aliases_unknown_conditions_and_event_direction() -> None:
     fact = record(
         text="The user uses PostgreSQL for project Borealis (also known as Polaris).",

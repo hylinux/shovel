@@ -87,11 +87,12 @@ _FUNCTION_WORDS = frozenset(
     }
 )
 _CHINESE_FUNCTIONS = re.compile(r"什么|哪个|哪些|哪种|我的|我在|我用|我|使用|喜欢|请问|告诉|记得|喝")
-_NAME = r"[a-z0-9][a-z0-9_.-]{0,63}"
+_NAME = r"(?:[\u3400-\u9fff]{1,32}-)?[a-z0-9][a-z0-9_.-]{0,63}"
+_CHINESE_ENTITY_CONTEXT = r"(?:(?:我(?:们)?|用户)(?:在|的)\s*)?"
 _ENTITY = re.compile(
     rf"\b(?P<kind>project|repository|repo|team|customer|client)\s+"
     rf"(?:(?:named|called|is)\s+)?[\"']?(?P<name>{_NAME})"
-    rf"|(?P<before>{_NAME})\s*(?P<chinese>项目|仓库|团队|客户)"
+    rf"|(?<![\w.-]){_CHINESE_ENTITY_CONTEXT}(?P<before>{_NAME})\s*(?P<chinese>项目|仓库|团队|客户)"
     rf"|[“「\"](?P<quoted>[^”」\"]{{1,32}})[”」\"]\s*(?P<quoted_kind>项目|仓库|团队|客户)",
     re.IGNORECASE,
 )
@@ -119,7 +120,8 @@ _SEPARATOR = r"(?:,\s*(?:(?:and|or)\s+)?|\s+(?:and|or)\s+|\s*[、和与及]\s*)"
 _NAMES = rf"{_NAME}(?:{_SEPARATOR}{_NAME})+"
 _ENTITY_LIST = re.compile(
     rf"\b(?P<kind>{_ENTITY_KIND})\s+(?P<after>{_NAMES})"
-    rf"|(?<![a-z0-9_.-])(?P<before>{_NAMES})\s*(?P<suffix>项目|仓库|团队|客户|\b(?:{_ENTITY_KIND})\b)",
+    rf"|(?<![\w.-]){_CHINESE_ENTITY_CONTEXT}(?P<before>{_NAMES})"
+    rf"\s*(?P<suffix>项目|仓库|团队|客户|\b(?:{_ENTITY_KIND})\b)",
     re.IGNORECASE,
 )
 _ALIAS = re.compile(rf"(?:also known as|aka|alias|别名(?:为|是)?)\s+[\"']?({_NAME})", re.IGNORECASE)
@@ -189,6 +191,20 @@ _CALENDAR = re.compile(
     re.IGNORECASE,
 )
 _QUESTION_WORD = re.compile(r"\b(?:what|which|when|who|why|how)\b|什么|何时|哪种|哪个|哪家|谁", re.I)
+_RESPONSE_DIRECTIVE = re.compile(
+    r"(?:请)?(?:只|仅)(?:依据|根据|基于)(?:已保存的)?(?:我的)?(?:个人)?(?:记忆|记录)(?:来)?(?:回答|作答)"
+    r"|(?:如果|若)?(?:没有|未找到|找不到)(?:对应的?|相关的?)?(?:记忆|记录)"
+    r"(?:就请|则请|就|则|请)(?:明确|直接|如实)?(?:说明|告知|回答)(?:没有(?:记录)?|不知道|未知)?"
+)
+
+
+def factual_query(text: str) -> str:
+    # Only complete response-policy clauses are excluded; factual qualifiers stay intact.
+    return "".join(
+        clause
+        for clause in re.split(r"([。\uff01\uff1f\uff1b;!?\n]+)", text)
+        if not _RESPONSE_DIRECTIVE.fullmatch(clause.strip())
+    )
 
 
 def relation_matches(text: str, patterns: dict[str, str]) -> frozenset[str]:
@@ -223,7 +239,9 @@ def literal_match(term: str, text: str) -> bool:
 def _topic_entities(topic: str, explicit: dict[str, set[str]]) -> dict[str, set[str]]:
     result: dict[str, set[str]] = {}
     for kind, value in re.findall(
-        r"(?:^|[.:/])(project|repository|team|customer)[.:/]([a-z0-9_-]+)", topic, re.I
+        r"(?:^|[.:/])(project|repository|team|customer)[.:/]((?:[\u3400-\u9fff]{1,32}-)?[a-z0-9_-]+)",
+        topic,
+        re.I,
     ):
         kind, value = kind.casefold(), value.casefold()
         names = explicit.get(kind, set())
@@ -266,6 +284,7 @@ def entities(text: str, topic: str = "", *, include_aliases: bool = True) -> dic
 
 
 def query_terms(query: str) -> list[str]:
+    query = factual_query(query)
     terms = [
         term for term in keyword_terms(_CHINESE_FUNCTIONS.sub(" ", query)) if term not in _FUNCTION_WORDS
     ]
@@ -293,6 +312,7 @@ class Query:
 
     @classmethod
     def parse(cls, text: str) -> Query:
+        text = factual_query(text)
         conditions = entities(text)
         entity_hint = bool(re.search(rf"\b(?:{_ENTITY_KIND})\b|项目|仓库|团队|客户", text, re.I))
         domains = frozenset(name for name, (pattern, _) in _DOMAINS.items() if re.search(pattern, text, re.I))
@@ -345,7 +365,14 @@ class Query:
             else "team"
             if re.search(r"\b(?:team|shared)\b|团队|共享", text, re.I)
             else None,
-            bool(re.search(r"\bi\s+(?:use|prefer|like|dislike)|我(?:使用|喜欢|用)", text, re.I)),
+            bool(
+                re.search(
+                    r"\bi\s+(?:use|prefer|like|dislike)|我(?:使用|喜欢|用)"
+                    rf"|我在\s*{_NAME}\s*(?:项目|仓库|团队|客户)(?:中|里)?(?:使用|喜欢|用)",
+                    text,
+                    re.I,
+                )
+            ),
             tuple(query_terms(text)),
         )
 

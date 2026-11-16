@@ -125,6 +125,21 @@ try {
         case "/api/v1/conversations/fixture-session/messages":
           body = { items: [], next_before: null };
           break;
+        case "/api/v1/conversations/fixture-session/attachments":
+          body = {
+            items: [],
+            limits: {
+              extensions: [".txt", ".png", ".pdf"], max_files: 5, max_file_bytes: 10485760,
+              max_text_chars: 8000, max_image_pixels: 16000000, max_image_edge: 2048,
+              max_input_images: 2, max_input_image_bytes: 10485760,
+              max_pdf_pages: 50, pdf_timeout_seconds: 15, max_pdf_memory_bytes: 536870912,
+            },
+            remaining: {
+              pending_files: 20, session_files: 100,
+              session_bytes: 104857600, store_bytes: 1073741824,
+            },
+          };
+          break;
         case "/api/v1/conversations/fixture-session/working-memory":
           body = { items: [] };
           break;

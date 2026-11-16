@@ -16,7 +16,8 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 from pydantic import SecretStr, ValidationError
 from sqlalchemy import func, select
-from starlette.types import ASGIApp, Receive, Scope, Send
+from starlette.datastructures import QueryParams
+from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from shovel.config.settings import AppSettings
 from shovel.db.model.config import Resource, ScanProfile
@@ -47,7 +48,10 @@ from shovel.runtime.schemas import (
     ConversationInput,
     CredentialInput,
     HistoryPruneInput,
+    MCPAuthCancelInput,
+    MCPAuthInput,
     MCPConfigurationInput,
+    MCPCredentialInput,
     MemoryInput,
     MemoryReviewInput,
     MessageInput,
@@ -66,6 +70,7 @@ from shovel.services.connector_base import ConnectorSpec
 from shovel.services.outlook import OutlookError
 
 _AGENT_HEARTBEAT_SECONDS = 10.0
+_MCP_CALLBACK = "/api/v1/agent/mcp/oauth/callback"
 
 
 async def _encode_agent_events(
@@ -216,6 +221,23 @@ class LocalAccessMiddleware:
             await self.app(scope, receive, send)
             return
         request = Request(scope)
+        callback = scope["path"] == _MCP_CALLBACK and scope["method"] == "GET"
+        if callback:
+            scope["shovel.oauth_query"] = scope.get("query_string", b"")
+            # Uvicorn access logging sees this same scope: never log authorization codes/state.
+            scope["query_string"] = b""
+            original_send = send
+
+            async def no_store(message: Message) -> None:
+                if message["type"] == "http.response.start":
+                    message["headers"] = [
+                        (key, value)
+                        for key, value in message.get("headers", [])
+                        if key.lower() not in {b"cache-control", b"referrer-policy"}
+                    ] + [(b"cache-control", b"no-store"), (b"referrer-policy", b"no-referrer")]
+                await original_send(message)
+
+            send = no_store
         hostname = request.url.hostname
         origin = request.headers.get("origin")
         invalid_origin = False
@@ -232,8 +254,8 @@ class LocalAccessMiddleware:
                 invalid_origin = True
         if (
             hostname not in {"127.0.0.1", "localhost", "::1"}
-            or invalid_origin
-            or request.headers.get("sec-fetch-site") == "cross-site"
+            or (not callback and invalid_origin)
+            or (not callback and request.headers.get("sec-fetch-site") == "cross-site")
         ):
             await JSONResponse(
                 {"error": {"code": "local_access_denied", "message": "仅允许本机 Shovel 界面访问。"}},
@@ -255,6 +277,51 @@ def configure_api(
         app.add_middleware(DevelopmentRequestLogging)
     app.state.runtime_provider = provider
     router = APIRouter(prefix="/api/v1")
+    host = settings.dev_http_host if development else settings.http_host
+    port = settings.dev_http_port if development else settings.http_port
+    callback_host = f"[{host}]" if ":" in host else host
+    callback_uri = f"http://{callback_host}:{port}{_MCP_CALLBACK}"
+
+    def auth_response(result: dict[str, Any]) -> JSONResponse:
+        return JSONResponse(result, headers={"Cache-Control": "no-store", "Referrer-Policy": "no-referrer"})
+
+    @router.get("/agent/mcp/oauth/callback")
+    async def mcp_oauth_callback(request: Request, rt: RuntimeDependency) -> JSONResponse:
+        raw = request.scope.pop("shovel.oauth_query", b"")
+        if len(raw) > 8192:
+            raise RuntimeFailure("OAuth callback is too large.", status=400)
+        query = QueryParams(raw)
+        if any(len(query.getlist(key)) != 1 for key in query):
+            raise RuntimeFailure("OAuth callback has duplicate parameters.", status=400)
+        actual_uri = str(request.url.replace(query=""))
+        if actual_uri != callback_uri:
+            raise RuntimeFailure("OAuth callback must use the configured Host address.", status=400)
+        return auth_response(await rt.mcp_auth.callback(dict(query), callback_uri))
+
+    @router.get("/agent/mcp/{server}/auth")
+    async def mcp_oauth_status(
+        server: str, rt: RuntimeDependency, revision: str | None = None
+    ) -> JSONResponse:
+        return auth_response(await rt.mcp_auth.status(server, revision))
+
+    @router.post("/agent/mcp/{server}/auth/start")
+    async def mcp_oauth_start(server: str, body: MCPAuthInput, rt: RuntimeDependency) -> JSONResponse:
+        return auth_response(await rt.mcp_auth.start(server, body.revision, callback_uri))
+
+    @router.post("/agent/mcp/{server}/auth/cancel")
+    async def mcp_oauth_cancel(server: str, body: MCPAuthCancelInput, rt: RuntimeDependency) -> JSONResponse:
+        return auth_response(await rt.mcp_auth.cancel(server, body.revision, body.authorization_id))
+
+    @router.post("/agent/mcp/{server}/auth/disconnect")
+    async def mcp_oauth_disconnect(server: str, body: MCPAuthInput, rt: RuntimeDependency) -> JSONResponse:
+        return auth_response(await rt.mcp_auth.disconnect(server, body.revision))
+
+    @router.put("/agent/mcp/{server}/credentials")
+    async def mcp_credential(server: str, body: MCPCredentialInput, rt: RuntimeDependency) -> JSONResponse:
+        result = await rt.mcp_auth.save_credential(
+            server, body.revision, body.reference, body.value.get_secret_value()
+        )
+        return auth_response(result)
 
     @router.get("/runtime/configuration")
     async def runtime_configuration(rt: RuntimeDependency) -> JSONResponse:
@@ -278,12 +345,21 @@ def configure_api(
         )
 
     def mcp_response(rt: Runtime, result: dict[str, Any]) -> JSONResponse:
-        loaded_revision = rt.chat.agent.extensions.mcp_revision
+        extensions = rt.chat.agent.extensions
+        loaded_revision = extensions.mcp_revision
+        for item in result["items"]:
+            connection = extensions.mcp_connections.get(item["name"])
+            item["connection_state"] = (
+                connection.connection_state
+                if connection is not None and extensions.mcp_attempt_revision == result["revision"]
+                else "not_connected"
+            )
         result.update(
             agent_loaded=rt.chat.agent_state == "loaded",
             agent_state=rt.chat.agent_state,
             restart_required=rt.chat.agent_state == "restart_failed"
-            or (loaded_revision is not None and loaded_revision != result["revision"]),
+            or (loaded_revision is not None and loaded_revision != result["revision"])
+            or any(item["connection_state"] == "restart_required" for item in result["items"]),
         )
         return JSONResponse(result, headers={"Cache-Control": "no-store"})
 
@@ -293,7 +369,7 @@ def configure_api(
 
     @router.put("/agent/mcp")
     async def save_mcp_configuration(body: MCPConfigurationInput, rt: RuntimeDependency) -> JSONResponse:
-        return mcp_response(rt, await asyncio.to_thread(rt.mcp.save, body.content, body.revision))
+        return mcp_response(rt, await rt.mcp_auth.save_configuration(body.content, body.revision))
 
     @router.post("/agent/restart")
     async def restart_agent(rt: RuntimeDependency) -> JSONResponse:

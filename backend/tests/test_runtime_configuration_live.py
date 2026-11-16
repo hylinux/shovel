@@ -340,8 +340,8 @@ async def test_live_runtime_configuration_host_restart_and_field_matrix(
                     "frontend_path": str(_REPO / "frontend" / "out"),
                     "agent.max_tool_iterations": max(1, settings.agent.max_tool_iterations - 1),
                     "performance.max_concurrent_scans": 2,
-                    "model.max_output_tokens": min(32768, settings.model.max_output_tokens + 1),
-                    "memory.llm.max_output_tokens": min(32768, settings.memory.llm.max_output_tokens + 1),
+                    "model.max_output_tokens": settings.model.max_output_tokens + 1,
+                    "memory.llm.max_output_tokens": settings.memory.llm.max_output_tokens + 1,
                 }
             )
             saved = await _save(client, view, changes)

@@ -54,7 +54,7 @@ export function Settings({ status, sessionId = "" }: { status?: Status; sessionI
     {settingsTabs.map((tab) => <div key={tab.id} className="settings-panel" id={`settings-panel-${tab.id}`} role="tabpanel" aria-labelledby={`settings-tab-${tab.id}`} hidden={active !== tab.id} tabIndex={0}>
       {visited.includes(tab.id) && (tab.id === "runtime" ? <RuntimeConfiguration status={status} />
         : tab.id === "memory" ? <MemoryManagement status={status} sessionId={sessionId} />
-          : tab.id === "mcp" ? <MCPManagement />
+          : tab.id === "mcp" ? <MCPManagement active={active === "mcp"} />
             : tab.id === "instructions" ? <AgentInstructionsManagement running={Boolean(status?.chat_capacity && (status.chat_capacity.running || status.chat_capacity.waiting))} />
               : <><LanguageSettings /><UserProfileSettings /></>)}
     </div>)}

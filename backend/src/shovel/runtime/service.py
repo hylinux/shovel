@@ -220,8 +220,11 @@ class Runtime:
         from shovel.runtime.attachments import AttachmentService
 
         self.attachments = AttachmentService(self)
-        self.chat: ChatService = ChatService(self)
         self.mcp: MCPConfigurationService = MCPConfigurationService(settings.agent.workspace)
+        from shovel.runtime.mcp_oauth import MCPOAuthService
+
+        self.mcp_auth = MCPOAuthService(self.mcp)
+        self.chat: ChatService = ChatService(self)
         self.warmup: RuntimeWarmup = RuntimeWarmup(self)
 
     def redact(self, message: str) -> str:
@@ -277,7 +280,10 @@ class Runtime:
                     await self.native_wam.close()
                 finally:
                     await self.execution_engine.close()
-                    await self.chat.close()
+                    try:
+                        await self.mcp_auth.close()
+                    finally:
+                        await self.chat.close()
         finally:
             try:
                 await self.memory.close()

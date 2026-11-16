@@ -59,6 +59,31 @@ npm run build
 
 This writes a static application to `frontend\out`. Serve those files from the backend host, with `/api/v1/*` handled by the backend on the same origin. No Node.js server, `next start`, server actions, runtime Next rewrites, external fonts, or server-rendered dynamic routes are needed in production. The build does not contact the Shovel API.
 
+## Validation
+
+```powershell
+npm run lint
+npm run typecheck
+npm test
+npm run build
+npm run test:smoke:edge
+```
+
+Typecheck first runs `next typegen`, so a clean checkout does not need a prior
+build to generate `next-env.d.ts`, SVG import declarations and route types.
+Keep generated Next.js declarations out of version control.
+
+The MCP authentication smoke requires installed Microsoft Edge and the built
+`out` directory. It uses pinned `playwright-core` tooling from `npm ci`, a fresh
+headless Edge context and an ephemeral loopback static server; no real backend,
+OAuth provider, existing browser profile or keyring is accessed. External and
+unexpected API requests fail the run. Ten scenario groups cover authorization,
+disconnect, write-only inputs, drafts, revisions and browser-storage containment.
+The Windows CI job `mcp-edge-smoke` runs the same command with Node 22 and uploads
+the sanitized `.tools\mcp-edge-smoke.json` receipt. See
+[MCP acceptance boundaries](../Documents/mcp_authentication.md#repeatable-acceptance-p6)
+for backend, controlled-keyring and separately approved real-provider checks.
+
 ## Workflows
 
 The sidebar has four groups in order: **Resource Management** (Resources,

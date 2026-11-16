@@ -208,7 +208,7 @@ async def test_upgrade_from_previous_schema_preserves_receipts_hashes_and_instal
     async with catalog.sessions() as session:
         assert list(
             await session.scalars(select(SchemaMigration.version).order_by(SchemaMigration.version))
-        ) == list(range(1, 26))
+        ) == list(range(1, 27))
         row = (
             await session.execute(
                 text("SELECT result,request_key,request_fingerprint FROM operation WHERE id='legacy-es3'")

@@ -14,6 +14,8 @@ const { outputText } = ts.transpileModule(source, {
 });
 const components = {};
 new Function("require", "exports", outputText)(id => {
+  if (id === "./media-viewer") return { MediaViewer: () => null };
+  if (id === "./preview-renderer") return { previewQueue: {} };
   if (id === "./message-format") return format;
   if (id === "./locale-context") return { useI18n: () => ({ t: (key, values) => key.replace(/\{p0\}/g, values?.p0 ?? "") }) };
   return require(id);
@@ -71,6 +73,23 @@ test("Code/source formatting cannot break out of a fence and toolbar insertion p
   const insertion = format.insertMarkup("hello world", 6, 11, { before: "**", after: "**", placeholder: "text" });
   assert.deepEqual(insertion, { value: "hello **world**", start: 8, end: 13 });
   assert.equal(format.formattedMessage(" \nraw\n ", "markdown"), " \nraw\n ");
+});
+
+test("JSON formatting preserves numeric lexemes, duplicate keys and strings; code language cannot inject a fence", () => {
+  const source = '{"n":900719925474099312345,"n":1e999,"a":[{},[],{"s":"x,:{}\\\\\\\""}],"__proto__":{}}';
+  const pretty = format.formatJson(source);
+  assert.ok(pretty.includes("900719925474099312345"));
+  assert.ok(pretty.includes("1e999"));
+  assert.equal((pretty.match(/"n"/g) || []).length, 2);
+  assert.ok(pretty.includes('"s": "x,:{}\\\\\\\""'));
+  assert.ok(pretty.includes('"__proto__": {}'));
+  assert.doesNotThrow(() => JSON.parse(pretty));
+  assert.throws(() => format.formatJson("{bad}"), /Invalid JSON/);
+  assert.throws(() => format.formatJson("[".repeat(65) + "0" + "]".repeat(65)), /64 nesting/);
+  assert.throws(() => format.formatJson(" ".repeat(100001)), /100 KB/);
+  assert.throws(() => format.formatJson("[".repeat(60) + Array(1000).fill("0").join(",") + "]".repeat(60)), /100,000 characters/);
+  assert.ok(format.formattedMessage("print(1)", "code", "python").startsWith("```python\n"));
+  assert.throws(() => format.formattedMessage("x", "code", "python\n```"), /Unsupported code language/);
 });
 
 test("External links, diagrams, isolated frames and parser work have explicit safety boundaries", () => {

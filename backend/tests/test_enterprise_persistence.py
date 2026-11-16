@@ -665,7 +665,7 @@ async def test_migration_seventeen_upgrades_old_store_repeatably_without_legacy_
     async with catalog.sessions() as session:
         assert list(
             await session.scalars(select(SchemaMigration.version).order_by(SchemaMigration.version))
-        ) == list(range(1, 26))
+        ) == list(range(1, 27))
         triggers = set(await session.scalars(text("SELECT name FROM sqlite_master WHERE type='trigger'")))
         assert {statement.split("EXISTS ", 1)[1].split()[0] for statement in PROTECTION_DDL} <= triggers
         assert (

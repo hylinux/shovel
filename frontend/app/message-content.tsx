@@ -1,6 +1,6 @@
 "use client";
 
-import { Children, isValidElement, memo, useEffect, useId, useState, type ReactNode } from "react";
+import { Children, isValidElement, memo, useEffect, useRef, useState, type ReactNode } from "react";
 import Markdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import remarkMath from "remark-math";
@@ -9,7 +9,9 @@ import rehypeSanitize, { defaultSchema } from "rehype-sanitize";
 import rehypeKatex from "rehype-katex";
 import rehypeHighlight from "rehype-highlight";
 import { useI18n } from "./locale-context";
-import { csvTable, isolatedDocument, safeHttpUrl, safeImageUrl, validateDiagram } from "./message-format";
+import { csvTable, formatJson, safeHttpUrl, safeImageUrl } from "./message-format";
+import { previewQueue } from "./preview-renderer";
+import { MediaViewer } from "./media-viewer";
 
 const schema = {
   ...defaultSchema,
@@ -43,60 +45,47 @@ function ImageContent({ src, alt, sessionId }: { src?: string; alt?: string; ses
   const { t } = useI18n();
   const safe = safeImageUrl(src, sessionId);
   if (!safe) return <span className="blocked-image"><ExternalLink href={src}>{alt || t("External image (not loaded)")}</ExternalLink><small> {t("Remote images are not loaded automatically.")}</small></span>;
-  return <a className="message-image-link" href={safe} target="_blank" rel="noopener noreferrer" referrerPolicy="no-referrer">
+  return <><a className="message-image-link" href={safe} target="_blank" rel="noopener noreferrer" referrerPolicy="no-referrer">
     {/* Uploaded raster images use the local API, not the Next.js image optimizer. */}
     {/* eslint-disable-next-line @next/next/no-img-element */}
     <img className="message-image" src={safe} alt={alt || t("Uploaded image")} loading="lazy" />
-  </a>;
+  </a><MediaViewer>{zoom =>
+    // eslint-disable-next-line @next/next/no-img-element
+    <img src={safe} alt={alt || t("Uploaded image")} style={{ width: `${zoom}%` }} />
+  }</MediaViewer></>;
 }
 
 function IsolatedPreview({ source, kind }: { source: string; kind: "html" | "mermaid" }) {
   const { t } = useI18n();
-  const id = useId().replace(/[^a-zA-Z0-9]/g, "");
-  const [result, setResult] = useState<{ source: string; document?: string; error?: string }>();
+  const container = useRef<HTMLDivElement>(null);
+  const [visible, setVisible] = useState(false);
+  const [height, setHeight] = useState(340);
+  const key = JSON.stringify([kind, source]);
+  const [result, setResult] = useState<{ key: string; document?: string; error?: string }>();
   useEffect(() => {
-    let active = true;
-    async function render() {
-      try {
-        const { default: purifier } = await import("dompurify");
-        let body: string;
-        if (kind === "html") {
-          if (source.length > 100_000) throw new Error("HTML preview is limited to 100 KB.");
-          body = purifier.sanitize(source, {
-            USE_PROFILES: { html: true },
-            FORBID_TAGS: ["form", "input", "button", "textarea", "select", "iframe", "object", "embed", "base", "meta", "link", "video", "audio"],
-            FORBID_ATTR: ["href", "src", "srcset", "action", "formaction", "ping", "background"],
-          });
-        } else {
-          validateDiagram(source);
-          const { default: mermaid } = await import("mermaid");
-          if (!active) return;
-          mermaid.initialize({
-            startOnLoad: false, securityLevel: "strict", theme: "neutral",
-            maxTextSize: 12_000, maxEdges: 100, suppressErrorRendering: true,
-            flowchart: { htmlLabels: false }, htmlLabels: false,
-            secure: ["securityLevel", "startOnLoad", "maxTextSize", "maxEdges", "suppressErrorRendering", "htmlLabels"],
-          });
-          const { svg } = await mermaid.render(`diagram${id}`, source);
-          body = purifier.sanitize(svg, {
-            USE_PROFILES: { svg: true, svgFilters: true },
-            FORBID_TAGS: ["foreignObject", "a", "image", "script", "animate", "set"],
-            FORBID_ATTR: ["href", "xlink:href"],
-          });
-        }
-        if (active) setResult({ source, document: isolatedDocument(body) });
-      } catch (error) {
-        if (active) setResult({ source, error: error instanceof Error ? error.message : "Preview failed. View the source." });
-      }
-    }
-    void render();
-    return () => { active = false; };
-  }, [source, kind, id]);
-  if (result?.source !== source) return <p role="status">{t("Preparing preview…")}</p>;
-  if (result.error) return <p className="warning" role="status">{t("Preview unavailable. View the source.")} <span className="preserve">{t(result.error)}</span></p>;
-  return <div className="isolated-preview">
-    <iframe title={kind === "html" ? t("Isolated HTML preview") : t("Mermaid diagram")} sandbox="" referrerPolicy="no-referrer" srcDoc={result.document} />
-    <small className="muted">{t("Isolated preview: scripts, navigation and remote resources are disabled.")}</small>
+    const observer = new IntersectionObserver(entries => {
+      if (entries.some(entry => entry.isIntersecting)) { setVisible(true); observer.disconnect(); }
+    }, { rootMargin: "200px" });
+    if (container.current) observer.observe(container.current);
+    return () => observer.disconnect();
+  }, []);
+  useEffect(() => {
+    if (!visible) return;
+    const request = new AbortController();
+    void previewQueue.run(source, kind, request.signal).then(document => {
+      if (!request.signal.aborted) setResult({ key, document });
+    }, error => {
+      if (!request.signal.aborted) setResult({ key, error: error instanceof Error ? error.message : "Preview failed. View the source." });
+    });
+    return () => request.abort();
+  }, [source, kind, key, visible]);
+  return <div ref={container} className="isolated-preview">
+    {result?.key !== key ? <p role="status">{t("Preparing preview…")}</p>
+      : result.error ? <p className="warning" role="status">{t("Preview unavailable. View the source.")} <span className="preserve">{t(result.error)}</span></p>
+        : <><iframe title={kind === "html" ? t("Isolated HTML preview") : t("Mermaid diagram")} style={{ height }} sandbox="" referrerPolicy="no-referrer" srcDoc={result.document} />
+          <label className="preview-size">{t("Preview height")} <input type="range" min={160} max={800} step={20} value={height} onChange={event => setHeight(Number(event.target.value))} /><output>{t("{p0} pixels", { p0: height })}</output></label>
+          {kind === "mermaid" && result.document && <MediaViewer diagram>{zoom => <iframe title={t("Mermaid diagram")} sandbox="" referrerPolicy="no-referrer" srcDoc={result.document?.replace("</style>", `body{zoom:${zoom / 100}}</style>`)} />}</MediaViewer>}
+          <small className="muted">{t("Isolated preview: scripts, navigation and remote resources are disabled.")}</small></>}
   </div>;
 }
 
@@ -117,14 +106,23 @@ function CodeBlock({ children, className, streaming = false }: { children: React
   const language = /(?:^|\s)language-([\w-]+)/.exec(className || "")?.[1]?.toLowerCase() || "";
   const previewable = ["mermaid", "html", "csv", "latex", "tex"].includes(language);
   const [raw, setRaw] = useState(false);
+  const [json, setJson] = useState(false);
   return <div className="message-code">
-    <div className="message-code-toolbar"><span>{language || t("Code")}</span><div>{previewable && !streaming && <button type="button" aria-pressed={raw} onClick={() => setRaw(!raw)}>{raw ? t("Preview") : t("View source")}</button>}<CopyText text={source} /></div></div>
-    {!raw && !streaming && language === "mermaid" ? <IsolatedPreview source={source} kind="mermaid" />
+    <div className="message-code-toolbar"><span>{language || t("Code")}</span><div>{language === "json" && !streaming && <button type="button" aria-pressed={json} onClick={() => setJson(!json)}>{t(json ? "Original JSON" : "Format JSON")}</button>}{previewable && !streaming && <button type="button" aria-pressed={raw} onClick={() => setRaw(!raw)}>{raw ? t("Preview") : t("View source")}</button>}<CopyText text={source} /></div></div>
+    {json && language === "json" && !streaming ? <JsonPreview source={source} /> : !raw && !streaming && language === "mermaid" ? <IsolatedPreview source={source} kind="mermaid" />
       : !raw && !streaming && language === "html" ? <IsolatedPreview source={source} kind="html" />
         : !raw && !streaming && language === "csv" ? <CsvPreview source={source} />
           : !raw && !streaming && ["latex", "tex"].includes(language) ? <Markdown remarkPlugins={[remarkMath]} rehypePlugins={[[rehypeKatex, { trust: false, strict: "error", maxExpand: 100, maxSize: 20 }]]}>{`$$\n${source}\n$$`}</Markdown>
             : <pre tabIndex={0}><code className={className}>{children}</code></pre>}
   </div>;
+}
+
+function JsonPreview({ source }: { source: string }) {
+  const { t } = useI18n();
+  let text: string;
+  try { text = formatJson(source); }
+  catch (error) { return <><p className="warning" role="alert">{t(error instanceof Error ? error.message : "Invalid JSON. Check the source.")}</p><pre tabIndex={0}><code>{source}</code></pre></>; }
+  return <pre tabIndex={0}><code>{text}</code></pre>;
 }
 
 export const RichText = memo(function RichText({ content, sessionId, streaming = false }: { content: string; sessionId?: string; streaming?: boolean }) {
@@ -148,11 +146,11 @@ export const RichText = memo(function RichText({ content, sessionId, streaming =
   >{content}</Markdown></div>;
 });
 
-export function MessageContent({ content, sessionId, streaming = false }: { content: string; sessionId?: string; streaming?: boolean }) {
+export const MessageContent = memo(function MessageContent({ content, sessionId, streaming = false }: { content: string; sessionId?: string; streaming?: boolean }) {
   const { t } = useI18n();
   const [source, setSource] = useState(false);
   return <div className="message-content"><div className="message-display-toolbar">
     <button type="button" aria-pressed={source} onClick={() => setSource(!source)}>{source ? t("Preview") : t("View source")}</button>
     <CopyText text={content} />
   </div>{source ? <pre className="message-source" tabIndex={0}>{content}</pre> : <RichText content={content} sessionId={sessionId} streaming={streaming} />}</div>;
-}
+});

@@ -17,7 +17,7 @@ import { Feedback } from "./ui";
 import { ProactiveServices } from "./proactive";
 import { ApprovalCenter, ExecutionActivity } from "./platform-activity";
 import { CapabilityLibrary } from "./capabilities";
-import { SessionDrafts } from "./session-drafts";
+import { protectDrafts, SessionDrafts } from "./session-drafts";
 import { UserProfileProvider } from "./user-profile";
 
 const platformViews = ["Proactive Services", "Approval Center", "Activity", "Skills", "Workflows"] as const;
@@ -55,6 +55,7 @@ export default function Home() {
   const { t } = useI18n();
   const [view, setView] = useState<View>("Chat");
   const [drafts] = useState(() => new SessionDrafts());
+  useEffect(() => protectDrafts(drafts, window), [drafts]);
   const [visited, setVisited] = useState<Set<string>>(new Set());
   const [sessionsOpen, setSessionsOpen] = useState(true);
   const [selectedSession, setSelectedSession] = useState("");

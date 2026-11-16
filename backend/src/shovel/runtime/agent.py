@@ -128,6 +128,27 @@ def history_size(message: Message) -> ContextSize:
     )
 
 
+def profile_context(profile: dict[str, Any]) -> str:
+    return (
+        json.dumps(
+            {"user_profile": {key: profile[key] for key in ("nickname", "gender", "occupation", "bio")}},
+            ensure_ascii=False,
+        )
+        if profile["revision"]
+        else ""
+    )
+
+
+def evidence_size(evidence: str) -> int:
+    return len(evidence) + 150 if evidence else 0
+
+
+def request_context_size(request: MessageInput, instructions: str, profile_evidence: str) -> ContextSize:
+    return content_size(request._attachment_contents, serialized=True) + ContextSize(
+        len(instructions) + len(request.content) + 512 + evidence_size(profile_evidence)
+    )
+
+
 def tool_schema_size(tools: list[Any]) -> tuple[int, int]:
     schemas = [
         item.to_json_schema_spec() if isinstance(item, FunctionTool) else item
@@ -366,21 +387,12 @@ class ShovelContextProvider(ContextProvider):
         settings = self.runtime.settings.model
         attachment_size = content_size(request._attachment_contents, serialized=True)
         attachment_size.require_media(settings.max_input_images, settings.max_input_image_bytes)
-        budget = (
-            self.runtime.settings.model.max_input_chars
-            - len(self.instructions)
-            - len(request.content)
-            - attachment_size.chars
-            - 512
-        )
         profile = self.profile if self.profile is not None else await self.runtime.user_profile.read()
-        profile_evidence = ""
-        if profile["revision"]:
-            profile_evidence = json.dumps(
-                {"user_profile": {key: profile[key] for key in ("nickname", "gender", "occupation", "bio")}},
-                ensure_ascii=False,
-            )
-            budget -= len(profile_evidence) + 150
+        profile_evidence = profile_context(profile)
+        budget = (
+            settings.max_input_chars
+            - request_context_size(request, self.instructions, profile_evidence).chars
+        )
         if budget < 500:
             raise RuntimeFailure("问题超过此模型的上下文预算,请缩短问题或调整 model.max_input_chars。")
         memory_context: list[dict[str, Any]] = []
@@ -437,9 +449,9 @@ class ShovelContextProvider(ContextProvider):
         working_evidence = ""
         if working_task is not None:
             working_evidence = json.dumps({"working_memory": working_task.result()}, ensure_ascii=False)
-            if len(working_evidence) + 150 > budget - 500:
+            if evidence_size(working_evidence) > budget - 500:
                 raise RuntimeFailure("工作记忆超过本轮模型预算,请缩短任务备注或调整模型配置。", status=503)
-            budget -= len(working_evidence) + 150
+            budget -= evidence_size(working_evidence)
         if memory_task is not None:
             memories = memory_task.result()
             recalled_memories = len(memories)

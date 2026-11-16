@@ -10,14 +10,11 @@ import os
 import shutil
 import unicodedata
 import warnings
-import zipfile
-import zlib
 from collections.abc import AsyncIterator, Callable
 from functools import partial
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 from uuid import UUID, uuid4
-from xml.etree import ElementTree
 
 from agent_framework import Content
 from anyio import CancelScope
@@ -30,6 +27,8 @@ from shovel.db.model.runtime import Conversation, SessionAttachment
 from shovel.db.unit_of_work import sqlite_write
 from shovel.protection.egress import EgressChannel, require_ordinary
 from shovel.runtime.errors import NotFound, RuntimeFailure
+from shovel.runtime.office import OFFICE_EXCERPT_VERSION, office_text
+from shovel.runtime.pdf import MAX_PDF_MEMORY, MAX_PDF_PAGES, PDF_TIMEOUT, PDF_VERSION, pdf_excerpt
 
 if TYPE_CHECKING:
     from shovel.runtime.service import Runtime
@@ -38,6 +37,11 @@ MAX_FILE_BYTES = 10 * 1024 * 1024
 MAX_SESSION_BYTES = 100 * 1024 * 1024
 MAX_STORE_BYTES = 1024 * 1024 * 1024
 MAX_TEXT_CHARS = 8000
+MAX_MESSAGE_FILES = 5
+MAX_PENDING_FILES = 20
+MAX_SESSION_FILES = 100
+MAX_IMAGE_PIXELS = 16_000_000
+MAX_IMAGE_EDGE = 2048
 PENDING_TTL = 24 * 60 * 60
 ATTACHED_TTL = 7 * 24 * 60 * 60
 TEXT_TYPES = {
@@ -76,6 +80,7 @@ OFFICE_TYPES = {
     ".pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
     ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
 }
+PDF_TYPES = {".pdf": "application/pdf"}
 
 
 class AttachmentBound(RuntimeFailure):
@@ -97,60 +102,9 @@ def safe_name(name: str) -> str:
         or name.endswith(".")
     ):
         raise _failure("Invalid attachment filename.")
-    if Path(name).suffix.lower() not in TEXT_TYPES | IMAGE_TYPES | OFFICE_TYPES:
+    if Path(name).suffix.lower() not in TEXT_TYPES | IMAGE_TYPES | OFFICE_TYPES | PDF_TYPES:
         raise _failure("Unsupported attachment type.", 415)
     return name
-
-
-def _office_text(data: bytes, suffix: str) -> str:
-    try:
-        with zipfile.ZipFile(io.BytesIO(data)) as archive:
-            entries = archive.infolist()
-            if len(entries) > 1000 or sum(entry.file_size for entry in entries) > 20 * 1024 * 1024:
-                raise _failure("Office document expands beyond the safety limit.", 413)
-            for entry in entries:
-                if (
-                    entry.flag_bits & 1
-                    or "\\" in entry.filename
-                    or ":" in entry.filename
-                    or entry.filename.startswith("/")
-                    or ".." in entry.filename.split("/")
-                    or (entry.external_attr >> 16) & 0o170000 == 0o120000
-                    or entry.file_size > 4 * 1024 * 1024
-                    or entry.file_size > max(1, entry.compress_size) * 100
-                    or entry.filename.lower().endswith(("vbaproject.bin", ".exe", ".bin"))
-                ):
-                    raise _failure("Unsafe Office document.")
-            if "[Content_Types].xml" not in archive.namelist():
-                raise _failure("Invalid Office document.")
-            prefix = {".docx": "word/", ".pptx": "ppt/slides/", ".xlsx": "xl/"}[suffix]
-            output: list[str] = []
-            used = 0
-            for entry in entries:
-                if not entry.filename.startswith(prefix) or not entry.filename.endswith(".xml"):
-                    continue
-                source = archive.read(entry).decode("utf-8-sig")
-                if "\x00" in source or "<!DOCTYPE" in source.upper() or "<!ENTITY" in source.upper():
-                    raise _failure("Office entities are not permitted.")
-                root = ElementTree.fromstring(source)  # noqa: S314 -- bounded, DTD/entity-free XML
-                for element in root.iter():
-                    if element.tag.rsplit("}", 1)[-1] in {"t", "v"} and element.text:
-                        output.append(element.text[: MAX_TEXT_CHARS + 1 - used])
-                        used += len(output[-1]) + 1
-                        if used > MAX_TEXT_CHARS:
-                            return "\n".join(output)
-            return "\n".join(output)
-    except (
-        zipfile.BadZipFile,
-        ElementTree.ParseError,
-        OSError,
-        RuntimeError,
-        UnicodeError,
-        LookupError,
-        ValueError,
-        zlib.error,
-    ) as exc:
-        raise _failure("Invalid Office document.") from exc
 
 
 def prepare_file(name: str, data: bytes) -> tuple[bytes, str, str]:
@@ -162,7 +116,7 @@ def prepare_file(name: str, data: bytes) -> tuple[bytes, str, str]:
                 with Image.open(io.BytesIO(data)) as image:
                     if image.format != IMAGE_TYPES[suffix]:
                         raise _failure("Image format does not match the filename.")
-                    if image.width * image.height > 16_000_000:
+                    if image.width * image.height > MAX_IMAGE_PIXELS:
                         raise _failure("Images are limited to 16 million decoded pixels.", 413)
                     image.verify()
                 with Image.open(io.BytesIO(data)) as image:
@@ -170,7 +124,7 @@ def prepare_file(name: str, data: bytes) -> tuple[bytes, str, str]:
                     image.load()
                     # Strip metadata and animation; bound both native image input and browser decoding.
                     oriented = ImageOps.exif_transpose(image)
-                    oriented.thumbnail((2048, 2048))
+                    oriented.thumbnail((MAX_IMAGE_EDGE, MAX_IMAGE_EDGE))
                     rgba = oriented.convert("RGBA")
                     flattened = Image.new("RGB", oriented.size, "white")
                     flattened.paste(rgba, mask=rgba.getchannel("A"))
@@ -190,8 +144,11 @@ def prepare_file(name: str, data: bytes) -> tuple[bytes, str, str]:
         ) as exc:
             raise _failure("Invalid or oversized image.") from exc
     if suffix in OFFICE_TYPES:
-        _office_text(data, suffix)
+        office_text(data, suffix, MAX_TEXT_CHARS)
         return data, OFFICE_TYPES[suffix], "text"
+    if suffix in PDF_TYPES:
+        pdf_excerpt(data)
+        return data, PDF_TYPES[suffix], "text"
     try:
         text = data.decode("utf-8-sig")
     except UnicodeDecodeError as exc:
@@ -206,6 +163,35 @@ def prepare_file(name: str, data: bytes) -> tuple[bytes, str, str]:
     return data, TEXT_TYPES[suffix], "text"
 
 
+def reading_scope(name: str, original: bytes, prepared: bytes, context: str) -> dict[str, Any]:
+    scope: dict[str, Any] = {"original_bytes": len(original), "stored_bytes": len(prepared)}
+    if context == "image":
+        with Image.open(io.BytesIO(original)) as image:
+            scope.update(original_width=image.width, original_height=image.height)
+        with Image.open(io.BytesIO(prepared)) as image:
+            scope.update(width=image.width, height=image.height)
+    else:
+        pdf = pdf_excerpt(prepared) if Path(name).suffix.lower() in PDF_TYPES else None
+        text = pdf.text if pdf else extracted_text(name, prepared)
+        scope.update(excerpt_chars=min(len(text), MAX_TEXT_CHARS), truncated=len(text) > MAX_TEXT_CHARS)
+        if Path(name).suffix.lower() in OFFICE_TYPES:
+            scope["office_extraction"] = OFFICE_EXCERPT_VERSION
+        if pdf:
+            scope.update(pdf_extraction=PDF_VERSION, pages=pdf.pages, read_pages=pdf.read_pages)
+    return scope
+
+
+def extracted_text(name: str, data: bytes, *, legacy_office: bool = False) -> str:
+    suffix = Path(name).suffix.lower()
+    if suffix in PDF_TYPES:
+        return pdf_excerpt(data).text
+    return (
+        office_text(data, suffix, MAX_TEXT_CHARS, legacy=legacy_office)
+        if suffix in OFFICE_TYPES
+        else data.decode("utf-8-sig")
+    )
+
+
 def attachment_view(row: SessionAttachment) -> dict[str, Any]:
     return {
         "id": row.id,
@@ -215,6 +201,7 @@ def attachment_view(row: SessionAttachment) -> dict[str, Any]:
         "url": f"/api/v1/conversations/{row.conversation_id}/attachments/{row.id}",
         "expires_at": row.expires_at,
         "model_context": row.model_context,
+        "reading_scope": row.reading_scope,
     }
 
 
@@ -331,10 +318,11 @@ class AttachmentService:
             async with self._processing:
                 prepared, media_type, context = await _blocking(lambda: prepare_file(name, bytes(data)))
                 digest = await _blocking(lambda: hashlib.sha256(data).hexdigest())
+                scope = await _blocking(lambda: reading_scope(name, bytes(data), prepared, context))
             require_ordinary(EgressChannel.ARTIFACT, prepared)
             async with self.lock:
                 storing = asyncio.create_task(
-                    self._store(identifier, attachment_id, name, digest, prepared, media_type, context)
+                    self._store(identifier, attachment_id, name, digest, prepared, media_type, context, scope)
                 )
                 try:
                     return await asyncio.shield(storing)
@@ -352,6 +340,7 @@ class AttachmentService:
         prepared: bytes,
         media_type: str,
         context: str,
+        scope: dict[str, Any],
     ) -> dict[str, Any]:
         path = await _blocking(lambda: self._path(identifier, attachment_id))
         partial = path.with_name(f"{uuid4().hex[:16]}.part")
@@ -385,7 +374,7 @@ class AttachmentService:
                     or 0
                 )
                 if (
-                    count >= 100
+                    count >= MAX_SESSION_FILES
                     or total + len(prepared) > MAX_SESSION_BYTES
                     or store_total + len(prepared) > MAX_STORE_BYTES
                 ):
@@ -402,7 +391,7 @@ class AttachmentService:
                     )
                     or 0
                 )
-                if pending >= 20:
+                if pending >= MAX_PENDING_FILES:
                     raise _failure("Too many pending Session attachments.", 413)
                 await _blocking(lambda: self._install(identifier, path, partial, prepared))
                 installed = True
@@ -414,6 +403,7 @@ class AttachmentService:
                     size=len(prepared),
                     digest=digest,
                     model_context=context,
+                    reading_scope=scope,
                     expires_at=now_ts() + PENDING_TTL,
                 )
                 session.add(row)
@@ -452,6 +442,56 @@ class AttachmentService:
 
             return row, await _blocking(read)
 
+    async def status(self, identifier: str) -> dict[str, Any]:
+        require_ordinary(EgressChannel.DISPLAY)
+        async with self.lock, self.runtime.sessions() as session:
+            await self._conversation(session, identifier)
+            rows = list(
+                await session.scalars(
+                    select(SessionAttachment).where(
+                        SessionAttachment.conversation_id == identifier,
+                        SessionAttachment.expires_at > now_ts(),
+                    )
+                )
+            )
+            store_bytes = int(
+                await session.scalar(
+                    select(func.coalesce(func.sum(SessionAttachment.size), 0)).where(
+                        SessionAttachment.expires_at > now_ts()
+                    )
+                )
+                or 0
+            )
+            items = await _blocking(
+                lambda: [
+                    {**attachment_view(row), "available": self._available(identifier, row.id)} for row in rows
+                ]
+            )
+        pending = sum(row.message_id is None for row in rows)
+        model = self.runtime.settings.model
+        return {
+            "items": items,
+            "limits": {
+                "extensions": sorted(TEXT_TYPES | IMAGE_TYPES | OFFICE_TYPES | PDF_TYPES),
+                "max_pdf_pages": MAX_PDF_PAGES,
+                "pdf_timeout_seconds": PDF_TIMEOUT,
+                "max_pdf_memory_bytes": MAX_PDF_MEMORY,
+                "max_files": MAX_MESSAGE_FILES,
+                "max_file_bytes": MAX_FILE_BYTES,
+                "max_text_chars": MAX_TEXT_CHARS,
+                "max_image_pixels": MAX_IMAGE_PIXELS,
+                "max_image_edge": MAX_IMAGE_EDGE,
+                "max_input_images": model.max_input_images,
+                "max_input_image_bytes": model.max_input_image_bytes,
+            },
+            "remaining": {
+                "pending_files": max(0, MAX_PENDING_FILES - pending),
+                "session_files": max(0, MAX_SESSION_FILES - len(rows)),
+                "session_bytes": max(0, MAX_SESSION_BYTES - sum(row.size for row in rows)),
+                "store_bytes": max(0, MAX_STORE_BYTES - store_bytes),
+            },
+        }
+
     async def delete(self, identifier: str, attachment_id: str) -> None:
         require_ordinary(EgressChannel.ARTIFACT)
         async with self.lock, self.runtime.sessions() as session:
@@ -483,6 +523,18 @@ class AttachmentService:
         self, session: AsyncSession, identifier: str, ids: list[str], message_id: str
     ) -> list[dict[str, Any]]:
         metadata = []
+        rows = await self.selected(session, identifier, ids)
+        for row in rows:
+            if row.message_id is None:
+                row.message_id = message_id
+                row.expires_at = now_ts() + ATTACHED_TTL
+            metadata.append(attachment_view(row))
+        return metadata
+
+    async def selected(
+        self, session: AsyncSession, identifier: str, ids: list[str]
+    ) -> list[SessionAttachment]:
+        rows = []
         for attachment_id in ids:
             row = await session.get(SessionAttachment, attachment_id)
             if row is None or row.conversation_id != identifier:
@@ -491,11 +543,8 @@ class AttachmentService:
                 partial(self._available, identifier, attachment_id)
             ):
                 raise _failure("Attachment has expired or is no longer available.", 410)
-            if row.message_id is None:
-                row.message_id = message_id
-                row.expires_at = now_ts() + ATTACHED_TTL
-            metadata.append(attachment_view(row))
-        return metadata
+            rows.append(row)
+        return rows
 
     async def contents(self, identifier: str, metadata: list[dict[str, Any]]) -> list[Content]:
         if not metadata:
@@ -534,10 +583,11 @@ class AttachmentService:
                     ]
                 )
             else:
-                text = (
-                    _office_text(data, Path(name).suffix.lower())
-                    if Path(name).suffix.lower() in OFFICE_TYPES
-                    else data.decode("utf-8-sig")
+                text = extracted_text(
+                    name,
+                    data,
+                    legacy_office=item.get("reading_scope", {}).get("office_extraction")
+                    != OFFICE_EXCERPT_VERSION,
                 )
                 notice += "\n[Excerpt truncated to 8000 characters.]" if len(text) > MAX_TEXT_CHARS else ""
                 contents.append(Content.from_text(notice + "\n" + text[:MAX_TEXT_CHARS]))

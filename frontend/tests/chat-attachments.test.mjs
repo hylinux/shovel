@@ -5,12 +5,16 @@ import test from "node:test";
 import ts from "typescript";
 import * as format from "../app/message-format.ts";
 import { SessionDraft } from "../app/session-drafts.ts";
+import { translate } from "../app/i18n.ts";
+import { renderToStaticMarkup } from "react-dom/server";
+import { createElement } from "react";
 
 class ApiError extends Error {
   constructor(message, status, code) { super(message); this.status = status; this.code = code; }
 }
 
-function attachmentHook(api, draft = new SessionDraft()) {
+const status = { items: [], limits: { extensions: [".txt", ".png"], max_files: 5, max_file_bytes: 10 * 1024 * 1024 } };
+function attachmentHook(api, draft = new SessionDraft(), policy = status) {
   const slots = [];
   const cleanups = [];
   const timers = [];
@@ -39,16 +43,20 @@ function attachmentHook(api, draft = new SessionDraft()) {
   const require = createRequire(import.meta.url);
   const exports = {};
   const dependencies = {
+    "./media-viewer": { MediaViewer: () => null },
+    "./attachment-clock": { attachmentNow: () => Date.now() / 1000, attachmentServerNow: () => 0, subscribeAttachmentClock: () => () => {} },
     react,
-    "./api": { api, ApiError, errorText: error => error.message, segment: encodeURIComponent },
-    "./message-format": format, "./locale-context": {},
+    "./api": { api, ApiError, errorText: error => error.message, segment: encodeURIComponent,
+      uploadFile: (path, file, signal, onProgress) => api(path, { method: "PUT", headers: { "Content-Type": "application/octet-stream" }, body: file, signal, onProgress }) },
+    "./message-format": format, "./locale-context": { useI18n: () => ({ t: (key, values) => translate(key, "en", values) }) },
   };
   new Function("require", "exports", "setTimeout", "clearTimeout", outputText)(
     id => dependencies[id] ?? require(id), exports, callback => { timers.push(callback); return 0; }, () => {});
   return {
     draft,
     timers,
-    render() { index = 0; return exports.useAttachments("session/a", draft); },
+    exports,
+    render() { index = 0; return exports.useAttachments("session/a", draft, policy); },
     unmount() { cleanups.forEach(cleanup => cleanup?.()); },
   };
 }
@@ -67,7 +75,7 @@ test("Uploads are bounded before dispatch, use scoped binary requests, and block
   assert.equal(calls.length, 5);
   assert.equal(hook.render().uploading, true);
   assert.equal(hook.render().invalid, true);
-  assert.match(hook.render().error, /at most 5/);
+  assert.match(hook.render().error, /limit has been reached/);
   assert.ok(calls.every(call => call.path.startsWith("/conversations/session%2Fa/attachments/")));
   assert.ok(calls.every(call => call.options.method === "PUT" && call.options.body instanceof File && call.options.headers["Content-Type"] === "application/octet-stream"));
   releases.forEach(release => release());
@@ -111,7 +119,7 @@ test("File bounds and deletion errors remain visible; switching views preserves 
   });
   hook.render().add([file("empty.txt", 0), file("large.txt", 10 * 1024 * 1024 + 1)]);
   assert.equal(calls.length, 0);
-  assert.match(hook.render().error, /at most 10 MiB/);
+  assert.match(hook.render().error, /exceeds the server upload limit/);
   hook.render().add([file()]);
   const id = hook.render().uploads[0].id;
   await hook.render().remove(id);
@@ -175,4 +183,59 @@ test("Restored expired attachments block sending and are never included in compl
   assert.deepEqual(hook.render().completed, []);
   hook.timers[0]();
   assert.match(hook.render().uploads[0].error, /expired/);
+});
+
+test("Progress, cancellation and retry preserve UUID and fence stale callbacks without losing the file", async () => {
+  const calls = [];
+  const releases = [];
+  const hook = attachmentHook((path, options) => {
+    calls.push({ path, options });
+    return new Promise(resolve => releases.push(() => resolve(metadata(path))));
+  });
+  hook.render().add([file()]);
+  const first = calls[0];
+  const id = hook.render().uploads[0].id;
+  first.options.onProgress(0.45);
+  assert.equal(hook.render().uploads[0].progress, 0.45);
+  first.options.onProgress(1);
+  assert.equal(hook.render().uploading, true, "Transfer completion is not server acknowledgement");
+  hook.render().cancel(id);
+  assert.equal(first.options.signal.aborted, true);
+  assert.equal(hook.render().uploads[0].uploading, false);
+  assert.match(hook.render().uploads[0].error, /cancelled/);
+  assert.equal(hook.render().invalid, true);
+  const retry = hook.render().retry(id, hook.render().uploads[0].file);
+  assert.equal(calls[1].path, calls[0].path);
+  first.options.onProgress(0.9);
+  releases[0]();
+  await settle();
+  assert.equal(hook.render().uploads[0].progress, 0);
+  assert.equal(hook.draft.requests.get(id).signal, calls[1].options.signal);
+  calls[1].options.onProgress(1);
+  releases[1]();
+  await retry;
+  assert.equal(hook.render().completed[0].id, id);
+});
+
+test("Server capabilities govern admission and unavailable files cannot be sent", async () => {
+  const unavailable = attachmentHook(() => assert.fail("Cannot upload without server limits"), new SessionDraft(), null);
+  unavailable.render().add([file()]);
+  assert.match(unavailable.render().error, /limits are unavailable/);
+  const policy = { ...status, items: [] };
+  const hook = attachmentHook(async path => metadata(path), new SessionDraft(), policy);
+  hook.render().add([file("bad.exe")]);
+  assert.match(hook.render().error, /Unsupported/);
+  hook.render().add([file()]);
+  await settle();
+  policy.items = [{ ...hook.render().completed[0], available: false }];
+  assert.equal(hook.render().invalid, true);
+  assert.deepEqual(hook.render().completed, []);
+});
+
+test("Reading scope distinguishes truncated excerpts, sanitized image dimensions and unknown legacy details", () => {
+  const { AttachmentScope } = attachmentHook(() => {}).exports;
+  const render = item => renderToStaticMarkup(createElement(AttachmentScope, { item }));
+  assert.match(render({ reading_scope: { original_bytes: 9000, stored_bytes: 9000, excerpt_chars: 8000, truncated: true } }), /8000.*Truncated/);
+  assert.match(render({ reading_scope: { original_width: 3000, original_height: 1200, width: 2048, height: 819 } }), /3000.*1200.*2048.*819/);
+  assert.match(render({ reading_scope: {} }), /unavailable for this older attachment/);
 });

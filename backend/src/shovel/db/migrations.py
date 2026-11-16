@@ -493,6 +493,16 @@ def _upgrade(connection: Connection) -> None:
             )
         )
 
+    if 26 not in versions:
+        columns = {row[1] for row in connection.exec_driver_sql("PRAGMA table_info(session_attachment)")}
+        if "reading_scope" not in columns:
+            connection.exec_driver_sql(
+                "ALTER TABLE session_attachment ADD COLUMN reading_scope TEXT NOT NULL DEFAULT '{}'"
+            )
+        connection.execute(
+            insert(SchemaMigration).values(version=26, name="attachment_reading_scope", applied_at=now_ts())
+        )
+
 
 async def upgrade_database(engine: AsyncEngine) -> None:
     async with engine.begin() as connection:

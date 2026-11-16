@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import asyncio
 from collections import defaultdict
-from dataclasses import dataclass
+from collections.abc import Iterator
+from contextlib import contextmanager
+from dataclasses import dataclass, field
 from time import perf_counter
 from typing import TYPE_CHECKING, Any
 
-from sqlalchemy import and_, column, or_, select, table, text, tuple_
+from sqlalchemy import and_, column, func, or_, select, table, text, tuple_
 
 from shovel.db.model.config import Resource
 from shovel.db.model.content import Chunk, Document
@@ -23,6 +25,7 @@ from shovel.domain.enums import (
 )
 from shovel.pipeline.embedder import Embedder, build_embedder
 from shovel.pipeline.embedding_cache import EmbeddingCache
+from shovel.pipeline.sink import VectorSearchTimings
 from shovel.protection.egress import EgressChannel, require_ordinary
 from shovel.runtime.diagnostics import trace, trace_duration
 from shovel.runtime.errors import RuntimeFailure
@@ -41,6 +44,25 @@ _FTS = table("chunk_search", column("chunk_id"), column("rank"))
 class _EmbeddingRead:
     task: asyncio.Task[list[float]]
     readers: int = 0
+
+
+@dataclass
+class RetrievalMeasurement:
+    phases_ms: dict[str, float] = field(default_factory=dict)
+    native: VectorSearchTimings = field(default_factory=VectorSearchTimings)
+    vector: list[float] | None = field(default=None, repr=False)
+    model_version: str | None = None
+    scope: list[str] | None = None
+
+
+@contextmanager
+def _measure(measurement: RetrievalMeasurement | None, phase: str) -> Iterator[None]:
+    started = perf_counter()
+    try:
+        yield
+    finally:
+        if measurement is not None:
+            measurement.phases_ms[phase] = (perf_counter() - started) * 1000
 
 
 class RetrievalService:
@@ -137,6 +159,46 @@ class RetrievalService:
             )
         )
 
+    async def revalidate_vector_ids(
+        self, scope: list[str], identifiers: list[str], model_version: str
+    ) -> set[str]:
+        async with self.runtime.sessions() as session:
+            return set(
+                await session.scalars(
+                    self._chunks(scope)
+                    .with_only_columns(Chunk.id)
+                    .where(
+                        Chunk.id.in_(identifiers),
+                        Chunk.vector_state == VectorState.INDEXED,
+                        Chunk.model_version == model_version,
+                        Document.pipe_state == DocumentPipeState.INDEXED,
+                        Document.indexed_hash == Document.content_hash,
+                    )
+                )
+            )
+
+    async def diagnostic_counts(self, scope: list[str], model_version: str) -> dict[str, Any]:
+        async with self.runtime.sessions() as session:
+            states = await session.execute(
+                self._chunks(scope)
+                .with_only_columns(Chunk.vector_state, func.count())
+                .group_by(Chunk.vector_state)
+            )
+            current = await session.scalar(
+                self._chunks(scope)
+                .with_only_columns(func.count(), maintain_column_froms=True)
+                .where(
+                    Chunk.vector_state == VectorState.INDEXED,
+                    Chunk.model_version == model_version,
+                    Document.pipe_state == DocumentPipeState.INDEXED,
+                    Document.indexed_hash == Document.content_hash,
+                )
+            )
+            return {
+                "eligible_chunks_by_vector_state": {state.value: count for state, count in states},
+                "current_model_indexed_chunks": current,
+            }
+
     async def _keyword(self, request: SearchInput, scope: list[str], limit: int) -> list[str]:
         terms = keyword_terms(request.query)
         if not terms:
@@ -167,14 +229,48 @@ class RetrievalService:
                 identifiers.extend(chunk.id for chunk in rows if chunk.id not in identifiers)
         return identifiers
 
-    async def search(self, request: SearchInput) -> dict[str, Any]:
+    async def search(
+        self,
+        request: SearchInput,
+        *,
+        allow_keyword_fallback: bool = False,
+        measurement: RetrievalMeasurement | None = None,
+    ) -> dict[str, Any]:
         require_ordinary(EgressChannel.PROCESS, request)
         started = perf_counter()
-        with trace_duration("retrieval.scope.completed"):
-            scope = await self._scope(request.resource_ids)
+        with trace_duration("retrieval.scope.completed"), _measure(measurement, "scope_ms"):
+            scope = await self._scope(
+                measurement.scope
+                if measurement is not None and measurement.scope is not None
+                else request.resource_ids
+            )
+        if measurement is not None:
+            measurement.scope = scope
         mode = request.mode
         if mode == "auto":
             mode = "hybrid" if self.runtime.settings.embedding.is_configured else "keyword"
+        ready_sink = None
+        reason = "no_resources" if not scope else None
+        degraded = False
+        index_state = None
+        warnings: list[str] = []
+        if scope and allow_keyword_fallback and request.mode == "auto" and mode == "hybrid":
+            ready_sink = self.runtime.ready_sink()
+            if ready_sink is None:
+                index_state = self.runtime.warmup.states["index"]["state"]
+                if index_state == "failed":
+                    raise RuntimeFailure(
+                        "Knowledge vector index initialization failed. Check runtime warmup status.",
+                        status=503,
+                    )
+                mode = "keyword"
+                reason = "index_not_ready"
+                degraded = True
+                warnings.append(
+                    "The knowledge vector index is not ready. Only keyword search was used; "
+                    "semantically related sources may be missing."
+                )
+                trace("retrieval.degraded", requested_mode=request.mode, effective_mode=mode, reason=reason)
         if mode in {"vector", "hybrid"} and not self.runtime.settings.embedding.is_configured:
             raise RuntimeFailure("向量检索需要配置 [embedding];可改用 keyword。", status=503)
         trace("retrieval.started", mode=mode, resource_count=len(scope), limit=request.limit)
@@ -186,30 +282,32 @@ class RetrievalService:
             trace("retrieval.keyword.completed", candidates=len(rankings[-1]))
         model_version: str | None = None
         if scope and mode in {"vector", "hybrid"}:
-            vector, model_version = await self.embed_query(request.query)
-            with trace_duration("retrieval.index.ready"):
-                sink = await self.runtime.sink()
-            with trace_duration("retrieval.vector.search.completed"):
-                matches = await sink.search(
-                    vector, resource_ids=scope, model_version=model_version, limit=candidate_count
-                )
+            with _measure(measurement, "embedding_ms"):
+                vector, model_version = await self.embed_query(request.query)
+            if measurement is not None:
+                measurement.vector, measurement.model_version = vector, model_version
+            with trace_duration("retrieval.index.ready"), _measure(measurement, "index_ready_ms"):
+                sink = ready_sink if ready_sink is not None else await self.runtime.sink()
+            with (
+                trace_duration("retrieval.vector.search.completed"),
+                _measure(measurement, "vector_search_ms"),
+            ):
+                if measurement is None:
+                    matches = await sink.search(
+                        vector, resource_ids=scope, model_version=model_version, limit=candidate_count
+                    )
+                else:
+                    matches = await sink.search(
+                        vector,
+                        resource_ids=scope,
+                        model_version=model_version,
+                        limit=candidate_count,
+                        measurement=measurement.native,
+                    )
             identifiers = [identifier for identifier, _score in matches]
             # Vectors are an acceleration structure, never an authority or permission source.
-            async with self.runtime.sessions() as session:
-                with trace_duration("retrieval.vector.revalidated"):
-                    valid = set(
-                        await session.scalars(
-                            self._chunks(scope)
-                            .with_only_columns(Chunk.id)
-                            .where(
-                                Chunk.id.in_(identifiers),
-                                Chunk.vector_state == VectorState.INDEXED,
-                                Chunk.model_version == model_version,
-                                Document.pipe_state == DocumentPipeState.INDEXED,
-                                Document.indexed_hash == Document.content_hash,
-                            )
-                        )
-                    )
+            with trace_duration("retrieval.vector.revalidated"), _measure(measurement, "revalidation_ms"):
+                valid = await self.revalidate_vector_ids(scope, identifiers, model_version)
             rankings.append([identifier for identifier in identifiers if identifier in valid])
             trace("retrieval.vector.completed", candidates=len(rankings[-1]))
         with trace_duration("retrieval.ranks.completed"):
@@ -309,6 +407,8 @@ class RetrievalService:
                 candidates=len(chunks),
                 hits=len(hits),
             )
+            if measurement is not None:
+                measurement.phases_ms["hydration_ms"] = (perf_counter() - hydration_started) * 1000
         async with self.runtime.sessions() as session:
             log = RetrievalLog(
                 query_text=request.query,
@@ -316,12 +416,20 @@ class RetrievalService:
                 route=RetrievalRoute.HYBRID
                 if mode == "hybrid"
                 else (RetrievalRoute.SEMANTIC if mode == "vector" else RetrievalRoute.STRUCTURED),
-                filters={"resource_ids": scope, "mode": mode, "model_version": model_version},
+                filters={
+                    "resource_ids": scope,
+                    "mode": mode,
+                    "model_version": model_version,
+                    "requested_mode": request.mode,
+                    "degraded": degraded,
+                    "reason": reason,
+                    "index_state": index_state,
+                },
                 returned=[{"chunk_id": hit["chunk_id"], "score": hit["score"]} for hit in hits],
                 top_score=hits[0]["score"] if hits else None,
             )
             session.add(log)
-            with trace_duration("retrieval.log.persisted"):
+            with trace_duration("retrieval.log.persisted"), _measure(measurement, "log_ms"):
                 await session.commit()
         trace(
             "retrieval.completed",
@@ -330,4 +438,16 @@ class RetrievalService:
             hits=len(hits),
             elapsed_ms=round((perf_counter() - started) * 1000, 2),
         )
-        return {"mode": mode, "items": hits, "retrieval_id": log.id}
+        if measurement is not None:
+            measurement.phases_ms["total_ms"] = (perf_counter() - started) * 1000
+        return {
+            "mode": mode,
+            "items": hits,
+            "retrieval_id": log.id,
+            "requested_mode": request.mode,
+            "effective_mode": mode,
+            "degraded": degraded,
+            "reason": reason,
+            "index_state": index_state,
+            "warnings": warnings,
+        }

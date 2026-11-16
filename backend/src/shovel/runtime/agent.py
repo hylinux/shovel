@@ -42,6 +42,7 @@ from agent_framework.openai import OpenAIChatCompletionClient
 from openai import APIError, AsyncAzureOpenAI, AsyncOpenAI
 
 from shovel.config.model_settings import DefaultAgentModelSettings, ModelProviderType
+from shovel.exceptions.pipeline import VectorSinkError
 from shovel.memory.domain import PROFILE_TOPICS
 from shovel.memory.service import context_entry
 from shovel.platform.agent_tools import agent_tools
@@ -212,11 +213,7 @@ def normalize_local_citations(content: str, available: set[int]) -> tuple[str, s
 
 
 def standalone_greeting(request: MessageInput, history: list[Message]) -> bool:
-    if (
-        request.search_mode != "auto"
-        or request.resource_ids
-        or not _GREETING.fullmatch(request.content.strip())
-    ):
+    if request.requires_knowledge or not _GREETING.fullmatch(request.content.strip()):
         return False
     # A short answer to a contextual question may be a name or preference, not small talk.
     return all(
@@ -235,9 +232,7 @@ def _personal_memory_text(content: str) -> bool:
 
 
 def personal_memory_question(request: MessageInput) -> bool:
-    return (
-        request.search_mode == "auto" and not request.resource_ids and _personal_memory_text(request.content)
-    )
+    return not request.requires_knowledge and _personal_memory_text(request.content)
 
 
 def text_within_json_budget(value: str, limit: int) -> str:
@@ -334,23 +329,34 @@ class ShovelContextProvider(ContextProvider):
         self.instructions = instructions + (PROFILE_INSTRUCTIONS if profile and profile["revision"] else "")
         self.result = AgentResult()
         self.has_retrieval_matches = False
+        self.search_completed = False
         self.standalone_greeting = standalone_greeting(request, history)
         self.personal_memory_question = personal_memory_question(request)
-        self.automatic_search = bool(request.content.strip()) and not (
-            self.standalone_greeting or self.personal_memory_question
-        )
+        self.prefetch_knowledge = request.requires_knowledge
 
     async def search(self, query: str) -> dict[str, Any]:
         """Search accessible local knowledge within this request's resource scope."""
-        found = await self.runtime.retrieval.search(
-            SearchInput(
-                query=query,
-                resource_ids=self.request.resource_ids,
-                mode=self.request.search_mode,
-                limit=6,
+        if self.request.knowledge_policy == "disabled":
+            raise RuntimeFailure("Knowledge search is disabled for this request.", status=403)
+        try:
+            found = await self.runtime.retrieval.search(
+                SearchInput(
+                    query=query,
+                    resource_ids=self.request.resource_ids,
+                    mode=self.request.search_mode,
+                    limit=6,
+                ),
+                allow_keyword_fallback=not self.request.requires_knowledge,
             )
-        )
-        self.has_retrieval_matches |= bool(found["items"])
+        except RuntimeFailure, VectorSinkError:
+            warning = (
+                "Knowledge search failed. Retrieval is incomplete; "
+                "do not treat this answer as fully grounded in local sources."
+            )
+            if warning not in self.result.warnings:
+                self.result.warnings.append(warning)
+            raise
+        self._record_search(found)
         # Tool searches share the citation registry with automatic RAG grounding.
         budget = min(8000, self.runtime.settings.model.max_input_chars // 3)
         items: list[dict[str, Any]] = []
@@ -369,7 +375,18 @@ class ShovelContextProvider(ContextProvider):
             budget -= len(json.dumps(candidate, ensure_ascii=False)) + 50
             self.result.sources.append(candidate)
             items.append(candidate)
-        return {"items": items, "untrusted_data": True}
+        return {
+            **{key: value for key, value in found.items() if key != "items"},
+            "items": items,
+            "untrusted_data": True,
+        }
+
+    def _record_search(self, found: dict[str, Any]) -> None:
+        self.search_completed = True
+        self.has_retrieval_matches |= bool(found["items"])
+        for warning in found.get("warnings", []):
+            if warning not in self.result.warnings:
+                self.result.warnings.append(warning)
 
     async def before_run(
         self,
@@ -435,7 +452,7 @@ class ShovelContextProvider(ContextProvider):
                     )
                 )
             )
-            if self.automatic_search
+            if self.prefetch_knowledge
             else None
         )
         tasks = [task for task in (memory_task, search_task, summary_task, working_task) if task is not None]
@@ -471,15 +488,17 @@ class ShovelContextProvider(ContextProvider):
                 used = len(json.dumps(entry, ensure_ascii=False)) + 20
                 budget -= used
                 memory_budget -= used
-        if not self.automatic_search:
+        if not self.prefetch_knowledge:
             trace(
                 "retrieval.skipped",
-                reason="standalone_greeting" if self.standalone_greeting else "personal_memory_question",
+                reason="disabled" if request.knowledge_policy == "disabled" else "on_demand",
             )
             sources = []
         else:
             assert search_task is not None
-            sources = search_task.result()["items"]
+            found = search_task.result()
+            self._record_search(found)
+            sources = found["items"]
         self.has_retrieval_matches |= bool(sources)
         source_budget = budget * 3 // 4
         if compact:
@@ -581,6 +600,7 @@ class ShovelContextProvider(ContextProvider):
         evidence = json.dumps(
             {
                 "sources": self.result.sources,
+                "knowledge_policy": "required" if request.requires_knowledge else request.knowledge_policy,
                 "session_summary": summary,
                 **({"memory_status": memory_status} if request.memory_enabled else {}),
             },
@@ -648,7 +668,7 @@ class ShovelContextProvider(ContextProvider):
         self.result.content, references = normalize_local_citations(
             self.result.content, {source["index"] for source in self.result.sources}
         )
-        if not self.result.sources and (self.automatic_search or self.has_retrieval_matches):
+        if not self.result.sources and self.search_completed:
             self.result.warnings.append(
                 "已检索到本地资料,但上下文预算不足以提供可引用内容;回答不能视为有本地来源支持的结论。"
                 if self.has_retrieval_matches
@@ -1083,7 +1103,7 @@ class ShovelAgent:
             name="shovel",
             instructions=knowledge.instructions,
             tools=[
-                knowledge.search,
+                *([knowledge.search] if request.knowledge_policy != "disabled" else []),
                 list_resources,
                 list_extensions,
                 *agent_tools(self.runtime.platform),

@@ -1,9 +1,11 @@
 import type { Upload } from "./chat-attachments";
 import type { MessageFormat } from "./message-format";
+import type { KnowledgePolicy } from "./agent-client";
 
 type DraftState = {
   content: string; format: MessageFormat; preview: boolean;
   codeLanguage?: string;
+  knowledgePolicy?: KnowledgePolicy;
   uploads: Upload[]; error: string; notice: string;
   selection?: { start: number; end: number; direction: "forward" | "backward" | "none" };
 };

@@ -42,7 +42,11 @@ export function SendBudgetNotice({ budget }: { budget: ReturnType<typeof useSend
   return <section className="attachment-budget" aria-label={t("Send budget estimate")} aria-busy={budget.pending}>
     {budget.pending && <small role="status">{t("Estimating send budget…")}</small>}
     {budget.error && <div role="alert"><small>{budget.error}</small>{" "}<button type="button" onClick={budget.retry}>{t("Retry budget estimate")}</button></div>}
-    {data && <><small>{t("Estimated base text: {p0} / {p1} characters; {p2} reserved for framing and context.", {
+    {data && <>
+      {data.exceeded.length > 0 && <p className="warning" role="alert">{t("This input exceeds the budget. Shorten the message or remove attachments; no content is changed automatically.")}{" "}
+        {data.exceeded.map(reason => t(reason === "text" ? "Text character limit exceeded." : reason === "images" ? "Image count limit exceeded." : "Image byte limit exceeded.")).join(" ")}</p>}
+      <details className="send-budget-details"><summary>{t("Context budget · {p0} / {p1} characters", { p0: data.estimated_chars, p1: data.max_chars })}</summary>
+      <small>{t("Estimated base text: {p0} / {p1} characters; {p2} reserved for framing and context.", {
       p0: data.estimated_chars, p1: data.max_chars, p2: data.reserved_chars,
     })}</small>
       <small>{t("Current images: {p0} / {p1}; {p2} / {p3} MiB.", {
@@ -51,9 +55,8 @@ export function SendBudgetNotice({ budget }: { budget: ReturnType<typeof useSend
       <small>{t("Candidate history: {p0} messages, {p1} characters, {p2} images. Not all history will be included.", {
         p0: data.history.messages, p1: data.history.chars, p2: data.history.images,
       })}</small>
-      {data.exceeded.length > 0 && <p className="warning" role="alert">{t("This input exceeds the budget. Shorten the message or remove attachments; no content is changed automatically.")}{" "}
-        {data.exceeded.map(reason => t(reason === "text" ? "Text character limit exceeded." : reason === "images" ? "Image count limit exceeded." : "Image byte limit exceeded.")).join(" ")}</p>}
       <small>{t("Local estimate only: includes instructions, current profile, selected working context and prepared attachments. Recalled Memory, retrieval, tool schemas/results and final history selection can change the total. The server rechecks before every model call.")}</small>
+      </details>
     </>}
   </section>;
 }

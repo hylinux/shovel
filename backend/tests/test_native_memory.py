@@ -367,7 +367,7 @@ async def test_personal_memory_questions_route_reads_without_disabling_agent_too
     result = await runtime.chat.agent.respond(
         "new-session", MessageInput(content=query, resource_ids=["archive"] if scoped else []), []
     )
-    assert bool(searches) == automatic
+    assert bool(searches) == scoped
     assert bool(model_calls) == automatic
     assert result.extract_long_term == automatic
 

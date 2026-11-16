@@ -16,6 +16,7 @@ function elements(tree) {
 function composer(run = async () => false) {
   const drafts = new SessionDrafts();
   const added = [];
+  const budgets = [];
   const source = readFileSync(new URL("../app/knowledge.tsx", import.meta.url), "utf8");
   const { outputText } = ts.transpileModule(source, {
     compilerOptions: { module: ts.ModuleKind.CommonJS, jsx: ts.JsxEmit.ReactJSX, target: ts.ScriptTarget.ES2022 },
@@ -28,7 +29,7 @@ function composer(run = async () => false) {
   };
   function ComposerTools() { return null; }
   const dependencies = {
-    "./send-budget": { useSendBudget: () => ({ blocked: false }), SendBudgetNotice: () => null },
+    "./send-budget": { useSendBudget: (_session, input) => { budgets.push(input); return { blocked: false }; }, SendBudgetNotice: () => null },
     "./session-scroll": { useSessionScroll: () => ({ paused: false, unread: false, navigate() {}, bottom() {} }) },
     react,
     "./locale-context": { useI18n: () => ({ t: key => key }) },
@@ -50,6 +51,7 @@ function composer(run = async () => false) {
   return {
     drafts,
     added,
+    budgets,
     render(session, workspace = "workspace") {
       const root = exports.Knowledge({ sessionId: session, status: { workspace_id: workspace, model_configured: true, memory_configured: true },
         drafts, onSessionChanged() {} });
@@ -74,6 +76,28 @@ test("Session remount restores composer text, format and preview without leaking
   assert.equal(ui.tools(returned).props.format, "json");
   assert.equal(ui.input(ui.render("b")).props.value, "B draft");
   assert.equal(ui.input(ui.render("a", "another-workspace")).props.value, "");
+});
+
+test("Knowledge policy stays Session/workspace scoped and is identical in budget preview and send", async () => {
+  const sent = [];
+  const ui = composer(async (_session, input) => { sent.push(input); return true; });
+  const policy = nodes => nodes.find(node => node.props?.id === "knowledge-policy");
+  assert.equal(policy(ui.render("a")).props.value, "auto");
+  for (const value of ["required", "disabled", "auto"]) {
+    policy(ui.render("a")).props.onChange({ target: { value } });
+    ui.input(ui.render("a")).props.onChange({ target: { value: "A question" } });
+    const nodes = ui.render("a");
+    const budget = ui.budgets.at(-1);
+    await ui.send(nodes);
+    assert.equal(budget.knowledge_policy, value);
+    assert.deepEqual(sent.at(-1), budget);
+    assert.equal(policy(ui.render("a")).props.value, value, "Sending retains the selected policy.");
+    assert.equal(policy(ui.render("b")).props.value, "auto");
+    assert.equal(policy(ui.render("a", "other-workspace")).props.value, "auto");
+  }
+  policy(ui.render("a")).props.onChange({ target: { value: "disabled" } });
+  ui.drafts.delete("workspace", "a");
+  assert.equal(policy(ui.render("a")).props.value, "auto");
 });
 
 test("Leave protection covers every retained draft, removes listeners when clean and never persists content", () => {

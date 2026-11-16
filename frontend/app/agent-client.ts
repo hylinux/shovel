@@ -6,11 +6,14 @@ export function chatTrace(event: string, fields: Record<string, string | number 
   }
 }
 
+export type KnowledgePolicy = "auto" | "required" | "disabled";
+
 export type AgentMessageInput = {
   content: string;
   resource_ids: string[];
   memory_enabled: boolean;
   search_mode: string;
+  knowledge_policy?: KnowledgePolicy;
   working_task_id?: string | null;
   attachment_ids?: string[];
 };

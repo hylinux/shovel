@@ -98,6 +98,113 @@ MCP management, Agent instructions, and Language. Choose English or Simplified
 Chinese in **Settings → Language**; English is the default and the preference is
 saved in the browser. See the [frontend guide](frontend/README.md) for UI details.
 
+### Chat knowledge retrieval
+
+The composer separates knowledge intent from the search algorithm:
+**Automatic** lets the Agent call built-in knowledge search when needed, without
+prefetching on every message; **Always search knowledge** retrieves before
+answering; **Do not search knowledge** removes and rejects built-in knowledge
+search for that request. Memory, profile, history, attachments and external
+tools remain independent. Natural-language routing in Automatic is a model
+decision; choose Always search for a hard retrieval requirement.
+
+REST messages, budget previews and AG-UI forwarded properties accept
+`knowledge_policy: "auto" | "required" | "disabled"` (default `"auto"`).
+Existing explicit `resource_ids` or non-`auto` `search_mode` still require
+retrieval; combining these with `disabled` is rejected. Required retrieval
+needs a text query, including when attachments are present. No matches or
+unusable citations produce explicit answer warnings, not invented evidence.
+
+Optional Automatic tool searches use keyword search immediately if the
+configured vector index is not ready, **before** generating a query embedding.
+Tool results report requested/effective modes, degradation reason and warnings;
+the warning is also saved with the answer and sent in the final stream event.
+Known index warmup failures and embedding/query errors are not keyword fallbacks.
+Direct Search Documents and explicit vector/hybrid requests keep strict
+behavior. With no embedding configured, `auto` normally uses keywords.
+
+Background warmup still owns index opening. Optional searches do not start or
+cancel it; if `performance.warm_index` is off, they remain keyword-only until
+an explicit search or another index user opens the index. This boundary avoids
+cold-index waits, **not** slow queries against an already-open native index.
+Strict retrieval may still wait for initialization/native I/O; no unsafe native
+query timeout has been added.
+
+### Same-Host Zvec performance diagnostics
+
+Keep the existing Web Host running and use a separate terminal:
+
+```powershell
+uv run shovel diagnose retrieval "Your knowledge query" --repetitions 3 --budget-seconds 180 --output .\zvec-first.json
+uv run shovel diagnose retrieval "Your knowledge query" --compare-query "Another knowledge query" --repetitions 10 --budget-seconds 300 --output .\zvec-repeat.json
+```
+
+These are **explicit real searches** and can call the configured, possibly paid
+embedding provider. They do not invoke the chat model. Tests use synthetic
+collections and fixture embeddings; diagnostics never run automatically.
+The CLI must discover a running Host with the same workspace and non-secret
+retrieval configuration (Zvec, embedding and performance settings). It never
+falls back to a one-shot Runtime. A missing/mismatched Host is an error.
+
+Each query case first runs strict `vector` retrieval, recording scope,
+embedding, index readiness, native search, SQLite revalidation, hydration when
+applicable, and retrieval-log persistence. It then reuses that **same in-memory
+vector and collection** for serial native repeats, including SQLite candidate
+revalidation. Resource selection is frozen and rechecked between samples;
+revocation aborts the run. Only one diagnostic batch can run per Host.
+Metadata is inspected **after** the queries so it cannot warm the first sample.
+
+The report contains a stable `host_id` for this Runtime, a per-run diagnostic
+ID, scope/configuration fingerprints, UTC-second query timestamps, individual
+samples and repeat median/maximum query times. Native timing separates worker
+queue, collection lock, `collection.query()`, result conversion and total sink
+time. Query-call time includes SDK processing, not just internal C++ execution.
+Process CPU time includes other threads. Activity snapshots identify observed
+foreground/warmup/legacy-operation interference but can miss brief activity.
+
+Actual SDK metadata includes document count, index completeness, vector
+dimension/metric/HNSW settings and the three production filter indexes.
+Segment counts are explicitly unavailable with the current SDK. SQLite counts
+cover eligible CHUNK states and the current model's indexed chunks; they are
+not expected to equal collection totals, which include other resources and
+potentially stale vectors.
+
+For scope comparisons, repeat the command with `--resource <resource-id>`
+(repeatable), then with no selection for all readable resources. For candidate
+comparisons, vary `--limit`: the native candidate count remains
+`min(300, limit * 10)`, so the default result limit of 6 searches 60 candidates.
+These options affect only that diagnostic request, not production defaults.
+Never remove authorization filters for a real-library comparison. Any
+unfiltered control belongs in an independent synthetic collection.
+
+Use the **same `host_id`** when comparing reports. A first observed query is
+not proof of cold OS/disk caches. If readiness approaches zero and repeats
+become much faster, investigate first-access costs. If query-call time stays
+around ten seconds while queue/lock waits are low, investigate actual index,
+filtering and storage rather than index initialization. If only full retrieval
+is slow, inspect embedding, revalidation and hydration phases separately.
+
+The sample budget defaults to 180 seconds (maximum 600); repetitions default
+to 3 after each full retrieval (maximum 10), with at most two comparison queries.
+It stops **subsequent** samples, not in-flight native work or final metadata
+inspection. Disconnect/shutdown also prevent later samples, while cancellation
+drains native work before releasing the diagnostic gate. Partial batches have
+`status: "partial"` and CLI exit code 1. The transport has a 600-second read
+timeout; a lost connection yields no complete report and is never auto-retried.
+
+Reports omit query text, vectors, source excerpts, resource names and paths;
+query text still appears in shell history and normal SQLite RetrievalLogs.
+Treat reports as private operational metadata. `--output` requires a new file
+and never overwrites an existing report; omit it to print JSON. The HTTP route
+is `POST /api/v1/diagnostics/retrieval`, uses workspace/configuration binding,
+and returns `Cache-Control: no-store`.
+
+Physical disk I/O, hard page faults, storage medium and architecture emulation
+are explicitly marked uncollected/undetermined. Correlate report timestamps with
+Windows Performance Monitor or an independently approved OS trace when needed;
+process I/O is not physical disk I/O. Diagnostics do not clear OS caches,
+compact/rebuild collections, change HNSW parameters or stop other tasks.
+
 ### Python-only local production serving
 
 ```powershell

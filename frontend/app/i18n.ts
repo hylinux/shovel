@@ -5,6 +5,23 @@ export const defaultLocale: Locale = "en";
 export type TranslationValues = Record<string, string | number | boolean | null | undefined>;
 
 export const chinese: Readonly<Record<string, string>> = {
+  "Formatting": "格式",
+  "Formatting · {p0}": "格式 · {p0}",
+  "Write a message, paste an image, or attach a file…": "输入消息，粘贴图片或添加附件…",
+  "Attach": "附件",
+  "Knowledge: auto": "知识库：自动",
+  "Knowledge: required": "知识库：必检索",
+  "Knowledge: off": "知识库：关闭",
+  "Input details and privacy": "输入说明与隐私",
+  "Context budget · {p0} / {p1} characters": "上下文预算 · {p0} / {p1} 字符",
+  "Knowledge search": "知识库检索",
+  "Knowledge search failed. Retrieval is incomplete; do not treat this answer as fully grounded in local sources.": "知识库检索失败，检索覆盖不完整，不能将本次回答视为有完整本地资料支持的结论。",
+  "Required knowledge search needs a text query.": "必须检索知识库时，请输入用于检索的文字。",
+  "Automatic · search when needed": "自动 · 按需检索",
+  "Always search knowledge": "必须检索知识库",
+  "Do not search knowledge": "不检索知识库",
+  "Controls built-in knowledge search, not Memory, attachments or external tools. Automatic search uses keywords while the vector index is not ready.": "仅控制内置知识库检索，不关闭 Memory、附件或外部工具。自动模式下向量索引未就绪时使用关键词检索。",
+  "The knowledge vector index is not ready. Only keyword search was used; semantically related sources may be missing.": "知识库向量索引尚未就绪，本次仅使用关键词检索，可能遗漏语义相关资料。",
   "Formatting would exceed 16,000 characters. Shorten the message first.": "插入格式后将超过 16,000 个字符，请先缩短正文。",
   "Message preview": "消息预览",
   "Preview height": "预览高度",

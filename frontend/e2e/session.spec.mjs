@@ -10,6 +10,10 @@ async function setDraft(page, text) {
   await input(page).fill(text);
   await expect(estimate(page)).toContainText("Estimated base text:");
 }
+async function openFormatting(page) {
+  const toggle = page.locator(".composer-format-toggle");
+  if (await toggle.getAttribute("aria-expanded") !== "true") await toggle.click();
+}
 async function cancelReload(page) {
   const dialog = page.waitForEvent("dialog");
   const reload = page.evaluate(() => { location.reload(); });
@@ -30,6 +34,52 @@ test.beforeEach(async ({ page }) => {
   await page.goto("/");
   await expect(input(page)).toBeVisible();
   await expect(page.locator(".composer-attach button")).toBeEnabled();
+});
+
+test("Compact composer reveals tools and limits on demand without changing drafts or knowledge intent", async ({ page, isMobile }) => {
+  const formatting = page.locator(".composer-format-toggle");
+  const details = page.locator(".attachment-policy");
+  await expect(formatting).toHaveAttribute("aria-expanded", "false");
+  await expect(page.getByLabel("Message format", { exact: true })).toBeHidden();
+  await expect(details.getByText(/Remaining:/)).toBeHidden();
+  expect((await page.locator(".composer").boundingBox()).height).toBeLessThan(isMobile ? 300 : 230);
+  const screenshot = test.info().outputPath("compact-composer.png");
+  await page.locator(".composer").screenshot({ path: screenshot });
+  await test.info().attach("compact-composer", { path: screenshot, contentType: "image/png" });
+  await input(page).fill("Keep this draft");
+  await formatting.focus();
+  await formatting.press("Enter");
+  await expect(page.getByLabel("Message format", { exact: true })).toBeVisible();
+  await formatting.click();
+  await expect(input(page)).toHaveValue("Keep this draft");
+  await page.getByLabel("Knowledge search", { exact: true }).selectOption("required");
+  await expect.poll(async () => (await fixture(page)).previews.at(-1)?.knowledge_policy).toBe("required");
+  await expect(estimate(page).locator(".send-budget-details")).not.toHaveAttribute("open");
+  await expect(estimate(page).getByText(/Candidate history:/)).toBeHidden();
+  await estimate(page).locator("summary").click();
+  await expect(estimate(page).getByText(/Candidate history:/)).toBeVisible();
+  await details.locator("summary").click();
+  await expect(details.getByText(/Remaining:/)).toBeVisible();
+  await expect(details).toContainText("Only attach content you are allowed to share.");
+  await details.locator("summary").click();
+  await expect(input(page)).toHaveValue("Keep this draft");
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+});
+
+test("Compact controls and expanded tools fit a narrow Chinese Session", async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.evaluate(() => localStorage.setItem("shovel.locale", "zh-CN"));
+  await page.reload();
+  await expect(page.getByRole("textbox", { name: "消息", exact: true })).toBeVisible();
+  await expect(page.getByLabel("知识库检索", { exact: true })).toHaveValue("auto");
+  const screenshot = test.info().outputPath("compact-composer-zh.png");
+  await page.locator(".composer").screenshot({ path: screenshot });
+  await test.info().attach("compact-composer-zh", { path: screenshot, contentType: "image/png" });
+  await openFormatting(page);
+  await expect(page.getByLabel("消息格式", { exact: true })).toBeVisible();
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+  const composer = page.locator(".composer");
+  expect(await composer.evaluate(element => element.scrollWidth <= element.clientWidth)).toBe(true);
 });
 
 test("Dirty drafts prompt on reload even when another Session is selected; clearing the last draft removes the prompt", async ({ page }) => {
@@ -85,6 +135,7 @@ test("Budget estimates block excess input, never reuse stale success, surface fa
   await expect(send(page)).toBeEnabled();
   const snapshots = await fixture(page);
   expect(snapshots.previews.at(-1).content).toBe("Recoverable draft");
+  await openFormatting(page);
   await page.getByLabel("Message format", { exact: true }).selectOption("json");
   await input(page).fill('{"safe":"😀"}');
   await expect(send(page)).toBeEnabled();
@@ -124,7 +175,7 @@ test("Mixed paste preserves selection and file order; cancelled uploads retry th
 });
 
 test("Media count overflow is visible before sending and removing an image recalculates the budget", async ({ page }) => {
-  await page.getByLabel("Attach files", { exact: true }).setInputFiles([0, 1, 2].map(index => ({
+  await page.locator('input[type="file"]').setInputFiles([0, 1, 2].map(index => ({
     name: `picture-${index}.png`, mimeType: "image/png", buffer: Buffer.from(png, "base64"),
   })));
   await expect(estimate(page)).toContainText("Image count limit exceeded.");
@@ -194,6 +245,7 @@ test("Late content growth preserves the visible anchor; copy failure is explicit
 });
 
 test("Composer preview restores focus and selection; code disables spelling and oversized insertions report an error", async ({ page, isMobile }) => {
+    await openFormatting(page);
     await input(page).fill("Before selected after");
     await input(page).evaluate(element => { element.focus(); element.setSelectionRange(7, 15, "backward"); });
     await page.locator(".composer-modes").getByRole("button", { name: "Preview", exact: true }).click();
@@ -243,6 +295,7 @@ test("Offscreen rich previews defer work, duplicate diagrams reuse output and he
 
 test("JSON tools preserve exact numbers and duplicate keys; invalid input is not silently rewritten", async ({ page }) => {
   const source = '{"n":900719925474099312345,"n":1e999,"a":[]}';
+  await openFormatting(page);
   await page.getByLabel("Message format", { exact: true }).selectOption("json");
   await input(page).fill("{bad}");
   await page.getByRole("button", { name: "Format JSON", exact: true }).click();
@@ -275,12 +328,15 @@ test("JSON tools preserve exact numbers and duplicate keys; invalid input is not
 });
 
 test("Code language survives Session navigation and reaches preview, send budget and saved source", async ({ page }) => {
+  await openFormatting(page);
   await page.getByLabel("Message format", { exact: true }).selectOption("code");
   await page.getByLabel("Code language", { exact: true }).selectOption("python");
   await input(page).fill("print(1)");
   await page.getByRole("button", { name: "New Session", exact: true }).click();
   await expect(input(page)).toHaveValue("");
   await page.getByRole("button", { name: /Fixture Session/ }).click();
+  await expect(page.locator(".composer-format-toggle")).toHaveText("Formatting · Code");
+  await openFormatting(page);
   await expect(page.getByLabel("Code language", { exact: true })).toHaveValue("python");
   await expect(input(page)).toHaveValue("print(1)");
   await expect(send(page)).toBeEnabled();

@@ -517,7 +517,11 @@ async def test_dev_diagnostics_trace_runtime_without_logging_payloads(
             conversation = (await client.post("/api/v1/conversations", json={})).json()["id"]
             answer = await client.post(
                 f"/api/v1/conversations/{conversation}/messages?private-query-value",
-                json={"content": "Shovel private-user-message", "memory_enabled": True},
+                json={
+                    "content": "Shovel private-user-message",
+                    "memory_enabled": True,
+                    "knowledge_policy": "required",
+                },
             )
             assert answer.status_code == 200, answer.text
             assert answer.json()["citations"]
@@ -2009,7 +2013,8 @@ async def test_independent_greetings_keep_recall_without_unnecessary_fact_extrac
             },
         )
     assert '"RUN_FINISHED"' in response.text, response.text
-    assert len(searches) == (0 if fast_path else 1)
+    retrieves = bool(resource_ids) or mode != "auto"
+    assert len(searches) == int(retrieves)
     assert recalls == [content.strip()]
     assert writes == []
     saved = (await runtime.chat.messages(identifier))[-1]
@@ -2018,10 +2023,10 @@ async def test_independent_greetings_keep_recall_without_unnecessary_fact_extrac
         assert await runtime.memory_tasks.run_once()
     assert writes == ([] if fast_path else [content.strip()])
     assert saved.state == "completed" and saved.content == "Hello!"
-    assert any("本地资料" in warning for warning in saved.warnings) is not fast_path
+    assert any("本地资料" in warning for warning in saved.warnings) is retrieves
     assert (await runtime.chat.conversation(identifier)).has_short_memory
     output = capsys.readouterr().out
-    assert ("retrieval.skipped" in output) is fast_path
+    assert ("retrieval.skipped" in output) is not retrieves
     assert ("memory.long_term.skipped" in output) is fast_path
     assert "private-tea" not in output
 
@@ -2495,7 +2500,8 @@ async def test_context_budget_counts_escaped_evidence_and_bounds_history(
     ):
         for _ in range(3):
             answer = await runtime.chat.send(
-                conversation.id, MessageInput(content="Shovel", memory_enabled=False)
+                conversation.id,
+                MessageInput(content="Shovel", memory_enabled=False, knowledge_policy="required"),
             )
             assert answer.citations
         assert all(sum(len(message["content"]) for message in prompt) <= 2000 for prompt in prompts)

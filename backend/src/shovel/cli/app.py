@@ -6,6 +6,7 @@ import typer
 
 from shovel.cli.commands import platform
 from shovel.cli.commands.config import app as config_app
+from shovel.cli.commands.diagnose import app as diagnose_app
 from shovel.cli.commands.history import app as history_app
 from shovel.cli.commands.init import app as init_app
 from shovel.cli.commands.operation import app as operation_app
@@ -86,6 +87,9 @@ app.add_typer(
 app.add_typer(operation_app, name="operation", help="Inspect and recover durable background operations.")
 app.add_typer(profile_app, name="profile", help="Manage persisted scan profiles.")
 app.add_typer(history_app, name="history", help="Explicitly prune terminal task history.")
+app.add_typer(
+    diagnose_app, name="diagnose", help="Profile retrieval in the existing Host without index tuning."
+)
 app.add_typer(platform.capability, name="capability", help="Discover registered capabilities.")
 app.add_typer(platform.skill, name="skill", help="Inspect, validate and explicitly publish Skills.")
 app.add_typer(platform.workflow, name="workflow", help="Validate, publish and run Workflows.")

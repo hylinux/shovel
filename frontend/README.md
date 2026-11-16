@@ -51,6 +51,18 @@ Settings shows startup warmup states and foreground chat capacity from status.
 Only loopback Ollama models are automatically warmed with synthetic input;
 remote providers are untouched. Background extraction waits for foreground idle.
 
+The composer offers **Knowledge: auto**, **Knowledge: required**, and
+**Knowledge: off**. Automatic does not prefetch on every message: the Agent
+chooses when to search, using a disclosed keyword-only result if the vector
+index is not ready. Always search requires a text query and retrieves before
+answering without that readiness fallback. Do not search disables the built-in
+knowledge tool, not Memory, attachments or independently configured external
+tools. The choice is retained with the workspace/Session draft in page memory
+(including across navigation and language changes), not browser storage.
+Budget preview and send carry the same policy. Final answer warnings disclose
+limited retrieval even if the model fails to mention it. Deploy the frontend
+and Host together: older Hosts do not understand `knowledge_policy`.
+
 ## Production
 
 ```powershell
@@ -129,6 +141,13 @@ while user messages have a person icon and a shaded background. Pending and stre
 replies use the same role styling, and source excerpts remain expandable.
 
 ### Message formats and attachments
+
+The input and its Attach, Formatting, Knowledge and Send controls share one
+compact card. **Formatting** expands the toolbar without changing the draft;
+non-Markdown formats and active preview remain identified when it is collapsed.
+**Input details and privacy** contains retrieval explanations, attachment quotas
+and retention information. Send-budget details also expand on demand; upload
+errors, budget failures and exceeded limits remain visible without expansion.
 
 The Markdown composer provides heading, emphasis, list, quote, link, table,
 code, formula and Mermaid insertion tools, plus an **Edit / Preview** switch.

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, SecretStr, field_validator, model_validator
@@ -253,6 +253,23 @@ class ConversationInput(InputModel):
     title: str = Field(default="新对话", min_length=1, max_length=200)
 
 
+class RetrievalDiagnosticInput(SearchInput):
+    mode: Literal["vector"] = "vector"
+    workspace_id: str = Field(min_length=64, max_length=64)
+    configuration_id: str = Field(min_length=64, max_length=64)
+    repetitions: int = Field(default=3, ge=0, le=10)
+    budget_seconds: float = Field(default=180, ge=1, le=600)
+    comparison_queries: list[Annotated[str, Field(min_length=1, max_length=8000)]] = Field(
+        default_factory=list, max_length=2
+    )
+
+    @model_validator(mode="after")
+    def nonblank_queries(self) -> RetrievalDiagnosticInput:
+        if not self.query.strip() or any(not query.strip() for query in self.comparison_queries):
+            raise ValueError("Diagnostic queries must contain non-whitespace text.")
+        return self
+
+
 class MessageInput(InputModel):
     content: str = Field(default="", max_length=16000)
     attachment_ids: list[str] = Field(default_factory=list, max_length=5)
@@ -260,10 +277,21 @@ class MessageInput(InputModel):
     resource_ids: list[str] = Field(default_factory=list, max_length=200)
     memory_enabled: bool = True
     search_mode: SearchMode = "auto"
+    knowledge_policy: Literal["auto", "required", "disabled"] = "auto"
     working_task_id: str | None = Field(default=None, min_length=1, max_length=200)
+
+    @property
+    def requires_knowledge(self) -> bool:
+        return self.knowledge_policy == "required" or bool(self.resource_ids) or self.search_mode != "auto"
 
     @model_validator(mode="after")
     def working_requires_memory(self) -> MessageInput:
+        if self.knowledge_policy == "disabled" and self.requires_knowledge:
+            raise ValueError(
+                "Disabled knowledge conflicts with selected resources or an explicit search mode."
+            )
+        if self.requires_knowledge and not self.content.strip():
+            raise ValueError("Knowledge search requires a text query.")
         if not self.content.strip() and not self.attachment_ids:
             raise ValueError("A message needs text or an attachment.")
         if len(set(self.attachment_ids)) != len(self.attachment_ids):

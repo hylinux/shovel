@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, type RefObject } from "react";
-import { codeLanguages, formatJson, insertMarkup, type EditorInsertion, type MessageFormat, messageFormats } from "./message-format";
+import { codeLanguages, formatJson, formatLabels, insertMarkup, type EditorInsertion, type MessageFormat, messageFormats } from "./message-format";
 import { useI18n } from "./locale-context";
 
 const tools: { label: string; symbol: string; insertion: EditorInsertion }[] = [
@@ -18,7 +18,6 @@ const tools: { label: string; symbol: string; insertion: EditorInsertion }[] = [
   { label: "Formula", symbol: "∑", insertion: { before: "\n$$\n", after: "\n$$\n", placeholder: "E = mc^2" } },
   { label: "Mermaid diagram", symbol: "◇", insertion: { before: "\n```mermaid\n", after: "\n```\n", placeholder: "flowchart LR\n  A --> B" } },
 ];
-const formatLabels: Record<MessageFormat, string> = { markdown: "Markdown", text: "Plain text", json: "JSON", csv: "CSV", html: "HTML", latex: "LaTeX", mermaid: "Mermaid", code: "Code" };
 
 export function ComposerTools({ value, onChange, textarea, disabled, format, onFormat, language, onLanguage, preview, onPreview }: {
   value: string; onChange: (value: string) => void; textarea: RefObject<HTMLTextAreaElement | null>; disabled: boolean;

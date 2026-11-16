@@ -21,7 +21,14 @@ from shovel.runtime.locking import endpoint_file
 from shovel.runtime.operation_reads import OperationQueries, operation_view
 from shovel.runtime.operations import TERMINAL
 from shovel.runtime.requests import request_operation_id
-from shovel.runtime.schemas import CleanupInput, HistoryPruneInput, ProfileInput, ResourceInput, ScanInput
+from shovel.runtime.schemas import (
+    CleanupInput,
+    HistoryPruneInput,
+    ProfileInput,
+    ResourceInput,
+    RetrievalDiagnosticInput,
+    ScanInput,
+)
 from shovel.runtime.service import Runtime
 from shovel.services.credentials import CredentialRef, build_credential_store
 
@@ -35,6 +42,45 @@ def workspace_id(settings: AppSettings) -> str:
         ]
     )
     return hashlib.sha256(identity.encode()).hexdigest()
+
+
+def diagnostic_configuration_id(settings: AppSettings) -> str:
+    identity = {
+        "workspace_id": workspace_id(settings),
+        "zvec": settings.zvec.model_dump(mode="json"),
+        "embedding": settings.embedding.model_dump(mode="json", exclude={"api_key"}),
+        "performance": settings.performance.model_dump(mode="json"),
+    }
+    return hashlib.sha256(json.dumps(identity, sort_keys=True).encode()).hexdigest()
+
+
+async def diagnose_retrieval(settings: AppSettings, request: RetrievalDiagnosticInput) -> dict[str, Any]:
+    async with httpx.AsyncClient(timeout=httpx.Timeout(600, connect=5), trust_env=False) as client:
+        url = await _remote(settings, client)
+        if url is None:
+            raise RuntimeFailure(
+                "Retrieval diagnostics require an already running, matching Web Host.",
+                hint="Start shovel run dev or prd with the same configuration. No one-shot Host is used.",
+                status=503,
+            )
+        try:
+            response = await client.post(f"{url}/api/v1/diagnostics/retrieval", json=request.model_dump())
+        except httpx.TransportError as exc:
+            raise RuntimeFailure(
+                "Diagnostic connection lost; no complete report was received. Do not automatically retry.",
+                status=503,
+            ) from exc
+        report = _decode(response)
+        if (
+            report.get("report_version") != 1
+            or report.get("workspace_id") != workspace_id(settings)
+            or report.get("configuration_id") != diagnostic_configuration_id(settings)
+            or not isinstance(report.get("host_id"), str)
+            or not isinstance(report.get("samples"), list)
+            or report.get("status") not in {"complete", "partial"}
+        ):
+            raise RuntimeFailure("Host returned an invalid diagnostic report.", status=502)
+        return report
 
 
 async def save_credential(secret: SecretStr, identity_ref: str | None = None) -> str:

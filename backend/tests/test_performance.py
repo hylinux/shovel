@@ -22,9 +22,285 @@ from shovel.runtime.schemas import MessageInput
 from shovel.runtime.service import Runtime
 from shovel.vector.store import init_vector_store
 from test_hosted_runtime import api as api
+from test_hosted_runtime import index_notes, streamed_completion
 from test_hosted_runtime import runtime as runtime
-from test_hosted_runtime import streamed_completion
 from test_memory_tasks import enqueue
+
+
+@pytest.mark.parametrize("policy", ["auto", "disabled"])
+async def test_chat_does_not_wait_for_knowledge_index_without_required_policy(
+    runtime: Runtime, monkeypatch: pytest.MonkeyPatch, policy: str
+) -> None:
+    import json
+
+    def forbidden(*_args: Any, **_kwargs: Any) -> Any:
+        pytest.fail("Ordinary chat must not start retrieval, knowledge embedding or index initialization.")
+
+    monkeypatch.setattr(runtime.retrieval, "search", forbidden)
+    monkeypatch.setattr(runtime.retrieval, "embed_query", forbidden)
+    monkeypatch.setattr(runtime, "sink", forbidden)
+
+    def answer(request: httpx.Request) -> httpx.Response:
+        tools = json.loads(request.content)["tools"]
+        assert ("search" in {tool["function"]["name"] for tool in tools}) == (policy == "auto")
+        return httpx.Response(
+            200, json={"created": 1, "choices": [{"message": {"role": "assistant", "content": "Answer"}}]}
+        )
+
+    runtime.chat.agent._client = httpx.AsyncClient(transport=httpx.MockTransport(answer))
+    async with runtime._sink_lock:
+        result = await asyncio.wait_for(
+            runtime.chat.agent.respond(
+                "test",
+                MessageInput.model_validate(
+                    {
+                        "content": "Explain a general programming concept",
+                        "knowledge_policy": policy,
+                        "memory_enabled": False,
+                    }
+                ),
+                [],
+            ),
+            3,
+        )
+    assert result.content == "Answer"
+    assert result.warnings == []
+
+
+@pytest.mark.parametrize("protocol", ["rest", "agui"])
+async def test_optional_tool_search_discloses_keyword_fallback_in_model_and_history(
+    runtime: Runtime, api: httpx.AsyncClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, protocol: str
+) -> None:
+    import json
+
+    from shovel.config.embedding_config import EmbeddingSettings
+
+    await index_notes(runtime, tmp_path / "notes")
+    runtime.settings.embedding = EmbeddingSettings(provider="openai", model="test")
+    calls = 0
+
+    def forbidden(*_args: Any, **_kwargs: Any) -> Any:
+        pytest.fail("A cold optional search must not embed the query or await/open the vector sink.")
+
+    monkeypatch.setattr(runtime, "sink", forbidden)
+    monkeypatch.setattr(runtime.retrieval, "embed_query", forbidden)
+
+    def answer(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        body = json.loads(request.content)
+        if calls == 1:
+            tool = {
+                "id": "search-call",
+                "type": "function",
+                "function": {"name": "search", "arguments": '{"query":"Shovel"}'},
+            }
+            if body.get("stream"):
+                frames = [
+                    {"index": 0, "delta": {"role": "assistant", "tool_calls": [{"index": 0, **tool}]}},
+                    {"index": 0, "delta": {}, "finish_reason": "tool_calls"},
+                ]
+                content = "".join(
+                    "data: "
+                    + json.dumps(
+                        {
+                            "id": "tool-response",
+                            "object": "chat.completion.chunk",
+                            "created": 1,
+                            "model": "test",
+                            "choices": [frame],
+                        }
+                    )
+                    + "\n\n"
+                    for frame in frames
+                )
+                return httpx.Response(
+                    200, content=content + "data: [DONE]\n\n", headers={"content-type": "text/event-stream"}
+                )
+            return httpx.Response(
+                200,
+                json={
+                    "created": 1,
+                    "choices": [
+                        {
+                            "message": {"role": "assistant", "tool_calls": [tool]},
+                            "finish_reason": "tool_calls",
+                        }
+                    ],
+                },
+            )
+        tool_result = json.loads(
+            next(message["content"] for message in body["messages"] if message["role"] == "tool")
+        )
+        assert tool_result["degraded"] is True and tool_result["reason"] == "index_not_ready"
+        assert tool_result["requested_mode"] == "auto" and tool_result["effective_mode"] == "keyword"
+        assert tool_result["warnings"] and tool_result["items"][0]["index"] == 1
+        if body.get("stream"):
+            return streamed_completion("Keyword-only local evidence [1].")
+        return httpx.Response(
+            200,
+            json={
+                "created": 1,
+                "choices": [
+                    {"message": {"role": "assistant", "content": "Keyword-only local evidence [1]."}}
+                ],
+            },
+        )
+
+    runtime.chat.agent._client = httpx.AsyncClient(transport=httpx.MockTransport(answer))
+    conversation = (await api.post("/api/v1/conversations", json={})).json()["id"]
+    # Holding the same lock as warmup proves the request cannot wait for index opening.
+    async with runtime._sink_lock:
+        if protocol == "rest":
+            response = await asyncio.wait_for(
+                api.post(
+                    f"/api/v1/conversations/{conversation}/messages",
+                    json={"content": "Search Shovel knowledge", "memory_enabled": False},
+                ),
+                5,
+            )
+            assert response.status_code == 200, response.text
+        else:
+            response = await asyncio.wait_for(
+                api.post(
+                    "/api/v1/agent",
+                    json={
+                        "threadId": conversation,
+                        "runId": "keyword-fallback",
+                        "messages": [
+                            {"id": "question", "role": "user", "content": "Search Shovel knowledge"}
+                        ],
+                        "forwardedProps": {"memory_enabled": False},
+                        "tools": [],
+                        "context": [],
+                    },
+                ),
+                5,
+            )
+            assert "RUN_FINISHED" in response.text, response.text
+            assert "index is not ready" in response.text
+    saved = (await runtime.chat.messages(conversation))[-1]
+    assert saved.state == "completed" and len(saved.citations) == 1 and calls == 2
+    assert any("Only keyword search" in warning for warning in saved.warnings)
+
+
+@pytest.mark.parametrize("mode", ["auto", "vector", "hybrid"])
+async def test_strict_search_never_uses_cold_index_fallback(
+    runtime: Runtime, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mode: str
+) -> None:
+    from shovel.config.embedding_config import EmbeddingSettings
+    from shovel.runtime.schemas import SearchInput
+
+    await index_notes(runtime, tmp_path / "notes")
+    runtime.settings.embedding = EmbeddingSettings(provider="openai", model="test")
+    embedded: list[str] = []
+
+    async def embed(query: str) -> tuple[list[float], str]:
+        embedded.append(query)
+        return [1.0, 0.0, 0.0, 0.0], "test"
+
+    async def unavailable() -> Any:
+        raise RuntimeFailure("strict index unavailable", status=503)
+
+    monkeypatch.setattr(runtime.retrieval, "embed_query", embed)
+    monkeypatch.setattr(runtime, "sink", unavailable)
+    with pytest.raises(RuntimeFailure, match="strict index unavailable"):
+        await runtime.retrieval.search(SearchInput.model_validate({"query": "Shovel", "mode": mode}))
+    assert embedded == ["Shovel"]
+
+
+async def test_ready_optional_search_uses_hybrid_and_propagates_errors(
+    runtime: Runtime, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from shovel.config.embedding_config import EmbeddingSettings
+    from shovel.runtime.schemas import SearchInput
+
+    await index_notes(runtime, tmp_path / "notes")
+    runtime.settings.embedding = EmbeddingSettings(provider="openai", model="test")
+    searched: list[dict[str, Any]] = []
+
+    class Sink:
+        async def search(self, _vector: list[float], **kwargs: Any) -> list[Any]:
+            searched.append(kwargs)
+            return []
+
+    async def embed(_query: str) -> tuple[list[float], str]:
+        return [1.0, 0.0, 0.0, 0.0], "test"
+
+    monkeypatch.setattr(runtime, "ready_sink", lambda: Sink())
+    monkeypatch.setattr(runtime.retrieval, "embed_query", embed)
+    result = await runtime.retrieval.search(SearchInput(query="Shovel"), allow_keyword_fallback=True)
+    assert result["mode"] == "hybrid" and result["degraded"] is False
+    assert searched and result["items"] and result["warnings"] == []
+
+    async def rejected(_query: str) -> tuple[list[float], str]:
+        raise RuntimeFailure("embedding authentication rejected", status=503)
+
+    monkeypatch.setattr(runtime.retrieval, "embed_query", rejected)
+    with pytest.raises(RuntimeFailure, match="authentication rejected"):
+        await runtime.retrieval.search(SearchInput(query="Shovel"), allow_keyword_fallback=True)
+
+
+async def test_optional_search_does_not_hide_failed_index_warmup(runtime: Runtime, tmp_path: Path) -> None:
+    from shovel.config.embedding_config import EmbeddingSettings
+    from shovel.runtime.schemas import SearchInput
+
+    await index_notes(runtime, tmp_path / "notes")
+    runtime.settings.embedding = EmbeddingSettings(provider="openai", model="test")
+    runtime.warmup.states["index"] = {"state": "failed", "error_type": "VectorSinkError"}
+    with pytest.raises(RuntimeFailure, match="initialization failed"):
+        await runtime.retrieval.search(SearchInput(query="Shovel"), allow_keyword_fallback=True)
+
+
+async def test_disabled_search_is_guarded_server_side(runtime: Runtime) -> None:
+    from shovel.runtime.agent import ShovelContextProvider
+
+    provider = ShovelContextProvider(
+        runtime, "test", MessageInput(content="Search", knowledge_policy="disabled"), []
+    )
+    with pytest.raises(RuntimeFailure, match="disabled") as error:
+        await provider.search("Shovel")
+    assert error.value.status == 403
+
+
+async def test_failed_tool_search_retains_a_warning_without_claiming_no_matches(
+    runtime: Runtime, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from shovel.runtime.agent import ShovelContextProvider
+
+    async def failed(*_args: Any, **_kwargs: Any) -> Any:
+        raise RuntimeFailure("Index initialization failed.", status=503)
+
+    monkeypatch.setattr(runtime.retrieval, "search", failed)
+    provider = ShovelContextProvider(runtime, "test", MessageInput(content="Search"), [])
+    with pytest.raises(RuntimeFailure, match="initialization failed"):
+        await provider.search("Shovel")
+    assert provider.result.warnings == [
+        "Knowledge search failed. Retrieval is incomplete; "
+        "do not treat this answer as fully grounded in local sources."
+    ]
+    assert not provider.search_completed and not provider.result.sources
+
+
+@pytest.mark.parametrize(
+    "extra",
+    [
+        {"resource_ids": ["notes"]},
+        {"search_mode": "keyword"},
+        {"search_mode": "vector"},
+        {"search_mode": "hybrid"},
+    ],
+)
+async def test_disabled_knowledge_conflicts_are_rejected_before_chat(
+    runtime: Runtime, api: httpx.AsyncClient, extra: dict[str, Any]
+) -> None:
+    conversation = (await api.post("/api/v1/conversations", json={})).json()["id"]
+    response = await api.post(
+        f"/api/v1/conversations/{conversation}/messages",
+        json={"content": "Shovel", "knowledge_policy": "disabled", **extra},
+    )
+    assert response.status_code == 422
+    assert await runtime.chat.messages(conversation) == []
 
 
 @pytest.mark.parametrize("provider", [ModelProviderType.OPENAI, ModelProviderType.OLLAMA])
@@ -60,7 +336,10 @@ async def test_context_reads_start_together_and_preserve_budgeted_response(
 
     runtime.chat.agent._client = httpx.AsyncClient(transport=httpx.MockTransport(respond))
     result = await asyncio.wait_for(
-        runtime.chat.agent.respond("test", MessageInput(content="A document question"), []), 3
+        runtime.chat.agent.respond(
+            "test", MessageInput(content="A document question", knowledge_policy="required"), []
+        ),
+        3,
     )
     assert result.content == "Answer"
 
@@ -86,7 +365,10 @@ async def test_context_failure_cancels_the_other_read(
     monkeypatch.setattr(runtime.retrieval, "search", retrieval)
     with pytest.raises(RuntimeFailure, match="retrieval unavailable"):
         await asyncio.wait_for(
-            runtime.chat.agent.respond("test", MessageInput(content="A document question"), []), 3
+            runtime.chat.agent.respond(
+                "test", MessageInput(content="A document question", knowledge_policy="required"), []
+            ),
+            3,
         )
     assert cancelled.is_set()
 
@@ -262,25 +544,49 @@ def test_remote_models_are_never_automatically_warmed(runtime: Runtime) -> None:
 
 
 async def test_warmup_worker_and_foreground_share_one_real_index(
-    runtime: Runtime, monkeypatch: pytest.MonkeyPatch
+    runtime: Runtime, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    from shovel.pipeline.sink import open_chunk_sink
+    import threading
 
+    from shovel.pipeline.sink import open_chunk_sink
+    from shovel.runtime.schemas import SearchInput
+
+    await index_notes(runtime, tmp_path / "notes")
     init_vector_store(runtime.settings.zvec)
     runtime.settings.performance.warm_local_models = False
     runtime.settings.embedding.provider = "ollama"
     runtime.settings.embedding.model = "embedding"
     runtime.warmup = RuntimeWarmup(runtime)
     opened = []
+    started, release = asyncio.Event(), threading.Event()
+    loop = asyncio.get_running_loop()
 
     def open_index(path: str) -> Any:
+        loop.call_soon_threadsafe(started.set)
+        if not release.wait(10):
+            raise TimeoutError("Test did not release index initialization.")
         sink = open_chunk_sink(path)
         opened.append(sink)
         return sink
 
+    async def forbidden(_query: str) -> Any:
+        pytest.fail("A warming index must be detected before query embedding.")
+
     monkeypatch.setattr("shovel.runtime.service.open_chunk_sink", open_index)
+    monkeypatch.setattr(runtime.retrieval, "embed_query", forbidden)
     worker = RuntimeWarmupWorker(lambda: runtime)
-    _, sink = await asyncio.gather(worker.execute_async(runtime.stopping), runtime.sink())
+    warming = asyncio.create_task(worker.execute_async(runtime.stopping))
+    try:
+        await asyncio.wait_for(started.wait(), 3)
+        result = await asyncio.wait_for(
+            runtime.retrieval.search(SearchInput(query="Shovel"), allow_keyword_fallback=True), 3
+        )
+        assert result["mode"] == "keyword" and result["items"] and result["degraded"]
+        assert result["index_state"] == "warming" and not warming.done()
+        assert runtime.ready_sink() is None
+    finally:
+        release.set()
+        _, sink = await asyncio.gather(warming, runtime.sink())
     assert opened == [sink] and await runtime.sink() is sink
     assert runtime.warmup.states["index"]["state"] == "ready"
     assert (
@@ -442,7 +748,7 @@ async def test_unified_agent_keeps_tools_retrieval_memory_and_history_for_rest_a
     )
     assert stream.status_code == 200 and "RUN_FINISHED" in stream.text
     assert len(requests) == 2 and recalled == ["First question", "Second question"]
-    assert searched == recalled
+    assert searched == [], "Automatic chat must not prefetch local knowledge."
     assert runtime.chat.agent.extensions._stack is not None
     assert "First question" in json.dumps(requests[1])
 

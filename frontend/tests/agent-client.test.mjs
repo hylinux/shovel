@@ -42,6 +42,21 @@ test("AG-UI terminal failure is not treated as a saved answer", async (t) => {
     () => {}, () => {}), /Citation validation failed/);
 });
 
+test("AG-UI forwards every explicit knowledge policy without changing it", async (t) => {
+  const received = [];
+  t.mock.method(globalThis, "fetch", async (_url, options) => {
+    const body = JSON.parse(options.body);
+    received.push(body.forwardedProps.knowledge_policy);
+    return response(body);
+  });
+  for (const knowledge_policy of ["auto", "required", "disabled"]) {
+    await runAgentMessage("/api/v1/agent", "session",
+      { content: "Question", resource_ids: [], memory_enabled: true, search_mode: "auto", knowledge_policy },
+      new AbortController().signal, () => {}, () => {});
+  }
+  assert.deepEqual(received, ["auto", "required", "disabled"]);
+});
+
 test("default Agent request enables Memory and retrieval without a session mode", async (t) => {
   let captured;
   t.mock.method(globalThis, "fetch", async (_url, options) => {

@@ -2,6 +2,7 @@ import Papa from "papaparse";
 
 export type MessageFormat = "markdown" | "text" | "json" | "csv" | "html" | "latex" | "mermaid" | "code";
 export const messageFormats: MessageFormat[] = ["markdown", "text", "json", "csv", "html", "latex", "mermaid", "code"];
+export const formatLabels: Record<MessageFormat, string> = { markdown: "Markdown", text: "Plain text", json: "JSON", csv: "CSV", html: "HTML", latex: "LaTeX", mermaid: "Mermaid", code: "Code" };
 export const codeLanguages = ["", "python", "javascript", "typescript", "json", "bash", "powershell", "sql", "html", "css", "cpp", "csharp", "go", "rust", "yaml"] as const;
 
 export function formattedMessage(source: string, format: MessageFormat, language = ""): string {

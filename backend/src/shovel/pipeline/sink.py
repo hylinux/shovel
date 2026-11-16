@@ -31,9 +31,10 @@ from __future__ import annotations
 import asyncio
 import threading
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass
-from time import perf_counter
+from dataclasses import dataclass, field
+from time import perf_counter, process_time
 from typing import Any, Protocol
+from uuid import uuid4
 
 from shovel.db.base import now_ts
 from shovel.exceptions.pipeline import VectorSinkError
@@ -100,6 +101,24 @@ class NullVectorSink:
         return None
 
 
+@dataclass
+class VectorSearchTimings:
+    operation_id: str = field(default_factory=lambda: uuid4().hex)
+    queue_ms: float = 0
+    lock_wait_ms: float = 0
+    native_ms: float = 0
+    query_ms: float = 0
+    query_started_at: float = 0
+    query_completed_at: float = 0
+    conversion_ms: float = 0
+    total_ms: float = 0
+    process_cpu_ms: float = 0
+    native_topk: int = 0
+    filter_chars: int = 0
+    resource_count: int = 0
+    returned_count: int = 0
+
+
 class _ZvecIO:
     """Serialize native work and wait for cancellation before closing a collection."""
 
@@ -107,18 +126,47 @@ class _ZvecIO:
         self._collection = collection
         self._io_lock = threading.RLock()
 
-    async def _io[T](self, action: Callable[[], T]) -> T:
+    async def _io[T](
+        self,
+        action: Callable[[], T],
+        *,
+        operation: str = "other",
+        measurement: VectorSearchTimings | None = None,
+    ) -> T:
         from shovel.runtime.diagnostics import trace, trace_duration
 
         queued = perf_counter()
+        operation_id = measurement.operation_id if measurement is not None else uuid4().hex
 
         def locked() -> T:
-            trace("index.io.worker.started", queue_ms=round((perf_counter() - queued) * 1000, 2))
+            queue_ms = (perf_counter() - queued) * 1000
+            trace(
+                "index.io.worker.started",
+                queue_ms=round(queue_ms, 2),
+                operation=operation,
+                operation_id=operation_id,
+            )
             locking = perf_counter()
             with self._io_lock:
-                trace("index.io.lock.acquired", wait_ms=round((perf_counter() - locking) * 1000, 2))
-                with trace_duration("index.io.native.completed"):
-                    return action()
+                lock_ms = (perf_counter() - locking) * 1000
+                trace(
+                    "index.io.lock.acquired",
+                    wait_ms=round(lock_ms, 2),
+                    operation=operation,
+                    operation_id=operation_id,
+                )
+                started, cpu = perf_counter(), process_time()
+                try:
+                    with trace_duration(
+                        "index.io.native.completed", operation=operation, operation_id=operation_id
+                    ):
+                        return action()
+                finally:
+                    if measurement is not None:
+                        measurement.queue_ms = queue_ms
+                        measurement.lock_wait_ms = lock_ms
+                        measurement.native_ms = (perf_counter() - started) * 1000
+                        measurement.process_cpu_ms = (process_time() - cpu) * 1000
 
         task = asyncio.create_task(asyncio.to_thread(locked))
         try:
@@ -127,12 +175,15 @@ class _ZvecIO:
             # A cancelled coroutine must not leave native I/O racing collection.close().
             await task
             raise
+        finally:
+            if measurement is not None:
+                measurement.total_ms = (perf_counter() - queued) * 1000
 
     async def aclose(self) -> None:
         if self._collection is None:
             return
         collection, self._collection = self._collection, None
-        await self._io(collection.close)
+        await self._io(collection.close, operation="close")
 
 
 class ZvecChunkSink(_ZvecIO):
@@ -154,7 +205,7 @@ class ZvecChunkSink(_ZvecIO):
             # flush 之后才算真的落盘。不 flush 的话, 进程正常退出时这批
             # 向量可能还在内存里, 而 SQLite 那边已经标成 indexed —— 得到
             # 一个"标着已索引却搜不到"的状态, 且没有任何自动发现途径。
-            await self._io(write)
+            await self._io(write, operation="upsert_flush")
         except Exception as exc:
             raise VectorSinkError(f"写入 {len(docs)} 条向量失败: {exc}") from exc
 
@@ -167,6 +218,7 @@ class ZvecChunkSink(_ZvecIO):
         resource_ids: Sequence[str],
         model_version: str,
         limit: int,
+        measurement: VectorSearchTimings | None = None,
     ) -> list[tuple[str, float]]:
         if not resource_ids:
             return []
@@ -177,20 +229,77 @@ class ZvecChunkSink(_ZvecIO):
             f'resource_id in ({identifiers}) and granularity = "chunk" '
             f'and model_version = "{_escape(model_version)}"'
         )
+        measurement = measurement if measurement is not None else VectorSearchTimings()
+        measurement.native_topk = limit
+        measurement.filter_chars = len(expression)
+        measurement.resource_count = len(resource_ids)
 
         def query() -> list[tuple[str, float]]:
+            from shovel.runtime.diagnostics import trace
+
+            started = perf_counter()
+            measurement.query_started_at = now_ts()
             rows = self._collection.query(
                 queries=Query(field_name=DENSE_VECTOR, vector=vector),
                 topk=limit,
                 filter=expression,
                 output_fields=["resource_id"],
             )
-            return [(str(row.id), float(row.score or 0)) for row in rows]
+            measurement.query_ms = (perf_counter() - started) * 1000
+            measurement.query_completed_at = now_ts()
+            trace(
+                "index.query.call.completed",
+                operation_id=measurement.operation_id,
+                elapsed_ms=round(measurement.query_ms, 2),
+                native_topk=limit,
+                filter_chars=measurement.filter_chars,
+                resource_count=len(resource_ids),
+            )
+            converting = perf_counter()
+            matches = [(str(row.id), float(row.score or 0)) for row in rows]
+            measurement.conversion_ms = (perf_counter() - converting) * 1000
+            measurement.returned_count = len(matches)
+            trace(
+                "index.query.conversion.completed",
+                operation_id=measurement.operation_id,
+                elapsed_ms=round(measurement.conversion_ms, 2),
+                returned_count=len(matches),
+            )
+            return matches
 
         try:
-            return await self._io(query)
+            return await self._io(query, operation="search", measurement=measurement)
         except Exception as exc:
             raise VectorSinkError(f"检索知识向量失败: {exc}") from exc
+
+    async def diagnostic_snapshot(self) -> dict[str, Any]:
+        def inspect() -> dict[str, Any]:
+            schema, stats = self._collection.schema, self._collection.stats
+            vector = schema.vector(DENSE_VECTOR)
+            if vector is None:
+                raise VectorSinkError("Knowledge collection has no dense vector field.")
+            index = vector.index_param
+            return {
+                "doc_count": int(stats.doc_count),
+                "index_completeness": stats.index_completeness,
+                "dimension": vector.dimension,
+                "vector_index": str(index.type) if index is not None else None,
+                "metric": str(metric)
+                if (metric := getattr(index, "metric_type", None)) is not None
+                else None,
+                "hnsw_m": getattr(index, "m", None),
+                "hnsw_ef_construction": getattr(index, "ef_construction", None),
+                "filter_indexes": {
+                    name: str(item.index_param.type)
+                    if (item := schema.field(name)) is not None and item.index_param is not None
+                    else None
+                    for name in ("resource_id", "granularity", "model_version")
+                },
+                "segment_count": None,
+                "segment_count_available": False,
+            }
+
+        return await self._io(inspect, operation="metadata")
 
     async def delete_document(self, resource_id: str, doc_uri: str) -> int:
         # 比较符是单个 ``=`` (SQL 风格), 不是 ``==``。写成 ``==`` 会被
@@ -214,7 +323,7 @@ class ZvecChunkSink(_ZvecIO):
             self._collection.flush()
 
         try:
-            await self._io(remove)
+            await self._io(remove, operation="delete_flush")
         except Exception as exc:
             raise VectorSinkError(f"按条件删除向量失败 ({expression}): {exc}") from exc
 

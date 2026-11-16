@@ -67,6 +67,7 @@ if TYPE_CHECKING:
     from shovel.runtime.operations import OperationService
     from shovel.runtime.performance import RuntimePerformance, RuntimeWarmup
     from shovel.runtime.retrieval import RetrievalService
+    from shovel.runtime.retrieval_diagnostics import RetrievalDiagnostics
 
 
 class Runtime:
@@ -84,6 +85,7 @@ class Runtime:
         from shovel.runtime.operations import OperationService
         from shovel.runtime.performance import RuntimePerformance, RuntimeWarmup
         from shovel.runtime.retrieval import RetrievalService
+        from shovel.runtime.retrieval_diagnostics import RetrievalDiagnostics
         from shovel.runtime.runtime_config import RuntimeConfigurationService
         from shovel.runtime.user_profile import UserProfileService
 
@@ -212,6 +214,7 @@ class Runtime:
         )
         self.operations: OperationService = OperationService(self)
         self.retrieval: RetrievalService = RetrievalService(self)
+        self.retrieval_diagnostics: RetrievalDiagnostics = RetrievalDiagnostics(self)
         self.memory_tasks: MemoryTaskService = MemoryTaskService(self)
         self.user_profile = UserProfileService(sessions, self.memory.owner)
         self.instructions: AgentInstructionsService = AgentInstructionsService(
@@ -238,6 +241,9 @@ class Runtime:
             if key:
                 message = message.replace(key, "[redacted]")
         return message[:4000]
+
+    def ready_sink(self) -> ZvecChunkSink | None:
+        return self._sink
 
     async def sink(self) -> ZvecChunkSink:
         started = perf_counter()

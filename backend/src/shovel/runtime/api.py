@@ -59,6 +59,7 @@ from shovel.runtime.schemas import (
     ReasonInput,
     ResourceInput,
     ResourceUpdate,
+    RetrievalDiagnosticInput,
     ScanInput,
     SearchInput,
     WorkingMemoryInput,
@@ -812,6 +813,19 @@ def configure_api(
     async def search(body: SearchInput, rt: RuntimeDependency) -> dict[str, Any]:
         return await rt.retrieval.search(body)
 
+    @router.post("/diagnostics/retrieval")
+    async def retrieval_diagnostics(
+        body: RetrievalDiagnosticInput, request: Request, rt: RuntimeDependency
+    ) -> JSONResponse:
+        from shovel.runtime.client import diagnostic_configuration_id, workspace_id
+
+        if body.workspace_id != workspace_id(rt.settings) or (
+            body.configuration_id != diagnostic_configuration_id(rt.settings)
+        ):
+            raise RuntimeFailure("Diagnostic Host workspace or configuration does not match.", status=409)
+        report = await rt.retrieval_diagnostics.run(body, disconnected=request.is_disconnected)
+        return JSONResponse(report, headers={"Cache-Control": "no-store"})
+
     @router.get("/conversations")
     async def conversations(
         rt: RuntimeDependency,
@@ -976,6 +990,7 @@ def configure_api(
             resource_count=len(request.resource_ids),
             memory_enabled=request.memory_enabled,
             search_mode=request.search_mode,
+            knowledge_policy=request.knowledge_policy,
         )
 
         return StreamingResponse(

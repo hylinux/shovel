@@ -15,6 +15,7 @@ from shovel.db.model.memory import MemoryBelief, MemoryIndexOutbox, MemoryIndexS
 from shovel.db.model.runtime import ChatMessage, Conversation
 from shovel.memory.domain import (
     MemoryCandidate,
+    MemoryExtractionError,
     MemoryState,
     MemoryType,
     Provenance,
@@ -409,8 +410,9 @@ async def test_real_extractor_rejects_paraphrased_evidence_before_partial_commit
     extractor._sdk, extractor._framework = create_framework_client(
         runtime.settings.model, extractor._http, max_iterations=1
     )
-    with pytest.raises(ValueError, match="evidence not present"):
+    with pytest.raises(MemoryExtractionError, match="evidence not present") as failure:
         await runtime.memory.application.extract(source, Provenance("user_message"))
+    assert failure.value.code == "evidence_mismatch"
     assert await runtime.memory.list() == []
 
 
@@ -506,8 +508,11 @@ async def test_compatible_memory_extractor_rejects_invalid_output(provider: str,
     )
     extractor = AgentFrameworkMemoryExtractor(settings, lambda: httpx.MockTransport(respond))
     try:
-        with pytest.raises(ValueError):
+        with pytest.raises(MemoryExtractionError) as failure:
             await extractor.extract("I prefer green tea.")
+        assert failure.value.code == (
+            "evidence_mismatch" if invalid_output == "unrelated-evidence" else "invalid_output"
+        )
     finally:
         await extractor.close()
 

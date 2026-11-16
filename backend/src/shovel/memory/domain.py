@@ -170,6 +170,31 @@ class ExtractionCancelled(Exception):
     """Source, ownership or generation changed before an atomic write."""
 
 
+class MemoryExtractionError(ValueError):
+    """A known validation failure with a content-free diagnostic code."""
+
+    def __init__(
+        self,
+        code: Literal[
+            "model_not_configured",
+            "input_budget",
+            "reference_budget",
+            "invalid_response",
+            "invalid_output",
+            "evidence_mismatch",
+            "invalid_episode_date",
+            "unsupported_merge",
+            "unsupported_predicate",
+            "summary_input_budget",
+            "empty_summary",
+            "summary_output_budget",
+        ],
+        message: str,
+    ) -> None:
+        super().__init__(message)
+        self.code = code
+
+
 _SECRET = re.compile(
     r"(?i)(?:api[_ -]?key|password|passwd|secret|access[_ -]?token|bearer|密码|密钥|令牌)"
     r"|(?:sk-[a-zA-Z0-9_-]{12,})|-----BEGIN [A-Z ]*PRIVATE KEY"

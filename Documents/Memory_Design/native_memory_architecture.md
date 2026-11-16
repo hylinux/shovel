@@ -815,10 +815,19 @@ assistant 标记 completed
 
 ### 13.4 失败重试
 
-一般 Memory Operation 在尝试次数不足 3 时自动重新排队，
+只有明确的临时故障（连接/超时，以及模型 HTTP 408/409/429/500/502/503/504）
+才在尝试次数不足 3 时自动重新排队；
+校验失败、配置/认证错误和未识别异常直接保留 failed，不反复调用模型。
 `retry_at = now + 2**attempts`，通常为第一次失败后约 2 秒、第二次后约 4 秒。
 第三次仍失败则保留 failed 状态供查看和显式重试。
 摘要正常分批续跑与失败重试不是同一概念。
+
+失败回执的 `result` 保留安全的 `error_type`、`cause_type`、`retryable`，
+已知校验失败另含固定 `error_code`，模型 HTTP 错误另含 `http_status`。
+例如 `invalid_output`、`evidence_mismatch`、`unsupported_merge` 分别表示
+模型 JSON/字段无效、证据不在用户原文、合并目标不受支持。
+新增诊断字段不保存原始异常消息、模型响应或校验输入；
+旧回执中仅有的 `ValueError` 无法还原具体原因。
 
 显式重试还检查 Scope、generation、源消息是否仍存在。
 对旧的失败提取，若数据库中已有较新的成功提取，当前实现保守拒绝重放，
@@ -831,12 +840,14 @@ HTTP 接口或运行权限；原有索引故障 warning/error 仍保留安全的
 
 | 事件 | 判断用途与字段边界 |
 |---|---|
+| `memory.operation.started` | 尝试次数、入队以来的秒数 `queued_age_seconds`，配合完成事件分离等待与执行；后续尝试的入队年龄还包含之前尝试及退避 |
+| `memory.extraction.related` / `memory.model.completed` / `memory.extraction.proposed` / `memory.extraction.persisted` | 关联记忆查询、模型请求、模型提议及本地解析、SQLite 提交各自的耗时/异常类型。模型耗时包含在提议阶段内，不应相加；`purpose` 区分提取与摘要 |
 | `memory.extraction.committed` | `source_eligible`、`proposed_candidates`、`admitted_candidates`、`committed_records`、`pending_review` 区分源过滤、模型提议、本地准入与提交。提交数是返回记录数，可能包含幂等复用，不等于新插入数 |
 | `memory.index.completed` | `attempted`、`upserted`、`deleted`、`failed`、`pending_batch`、`expired` 及耗时；只有 sink 成功且 Outbox 已确认才计成功。`pending_batch` 是一次有界查询的数量，不保证是总积压 |
 | `memory.index.failed` | 初始化/维护无法完成时仅记异常类型；不是成功回执 |
 | `memory.recall.completed` | 复用领域层阈值、无效向量、支持性及预算计数，另带 `vector_enabled`、`vector_fallback`。索引失败后的关键词降级也输出完成事件；没有配置索引不等于发生故障降级 |
 | `agent.context.ready` | `recalled_memories` 与 `memory_budget_skipped` 区分领域召回和最终 Agent 预算；`memories`/`memory_status` 仍表示实际保留的上下文 |
-| `memory.operation.completed` | 使用数据库实际状态及尝试次数；可重试失败显示 `queued`，耗尽重试才显示 `failed`，已原子提交的回执优先 |
+| `memory.operation.completed` | 数据库实际状态、尝试次数、本次耗时、安全失败字段与下一次退避秒数；临时失败显示 `queued`，不可重试或耗尽重试显示 `failed`，已原子提交的回执优先 |
 
 索引没有待处理项/过期项时不反复输出成功事件。
 诊断只含固定事件、ID、枚举、数量和时间，不包含事实、消息、文档正文、路径或凭据。

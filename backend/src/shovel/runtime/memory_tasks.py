@@ -2,22 +2,65 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import replace
+from time import perf_counter
 from typing import TYPE_CHECKING, Any
 
+import httpx
 from anyio import CancelScope
+from ollama import ResponseError
+from openai import APIConnectionError, APIStatusError
 from sqlalchemy import func, select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.sql.elements import ColumnElement
 
 from shovel.db.base import now_ts
 from shovel.db.model.runtime import ChatMessage, MemoryEpoch, Operation
-from shovel.memory.domain import EXTRACTION_VERSION, ExtractionCancelled
+from shovel.memory.domain import EXTRACTION_VERSION, ExtractionCancelled, MemoryExtractionError
 from shovel.runtime.diagnostics import trace, trace_context
 from shovel.runtime.errors import RuntimeFailure
 from shovel.runtime.requests import request_fingerprint, request_operation_id
 
 if TYPE_CHECKING:
     from shovel.runtime.service import Runtime
+
+
+def _failure_details(exc: Exception) -> dict[str, Any]:
+    chain: list[BaseException] = []
+    cause: BaseException | None = exc
+    while cause is not None and all(cause is not item for item in chain):
+        chain.append(cause)
+        cause = cause.__cause__ or (None if cause.__suppress_context__ else cause.__context__)
+    details: dict[str, Any] = {
+        "error_type": type(exc).__name__,
+        "cause_type": type(chain[-1]).__name__,
+        "retryable": False,
+    }
+    for cause in chain:
+        if isinstance(cause, MemoryExtractionError):
+            details["error_code"] = cause.code
+            return details
+    for cause in chain:
+        if isinstance(cause, APIStatusError | ResponseError | httpx.HTTPStatusError):
+            status = (
+                cause.response.status_code if isinstance(cause, httpx.HTTPStatusError) else cause.status_code
+            )
+            details["http_status"] = status
+            details["retryable"] = status in {408, 409, 429, 500, 502, 503, 504}
+            return details
+    if not any(isinstance(cause, RuntimeFailure) for cause in chain):
+        details["retryable"] = any(
+            isinstance(
+                cause,
+                TimeoutError
+                | ConnectionError
+                | APIConnectionError
+                | httpx.TimeoutException
+                | httpx.NetworkError
+                | httpx.RemoteProtocolError,
+            )
+            for cause in chain
+        )
+    return details
 
 
 class MemoryTaskService:
@@ -190,10 +233,22 @@ class MemoryTaskService:
                 if operation.result.get("retry_at", 0) > now_ts():
                     return await self.runtime.memory.maintain()
                 operation.state, operation.started_at = "running", now_ts()
+                operation.result, operation.error = {}, None
                 operation.attempts += 1
                 await session.commit()
             self._active = operation
+            started = perf_counter()
+            trace(
+                "memory.operation.started",
+                operation_id=operation.id,
+                kind=operation.kind,
+                attempts=operation.attempts,
+                queued_age_seconds=max(0, operation.started_at - operation.queued_at),
+                run_id=operation.payload.get("run_id"),
+                conversation_id=operation.payload.get("conversation_id"),
+            )
             state, error, cancelled = "succeeded", None, False
+            failure: dict[str, Any] = {}
             try:
                 if respect_foreground:
                     await self.runtime.performance.wait_for_idle(self.runtime.stopping)
@@ -260,36 +315,47 @@ class MemoryTaskService:
                 error = "Memory 任务已停止。"
             except Exception as exc:
                 state = "failed"
+                failure = _failure_details(exc)
+                detail = failure.get("error_code") or (
+                    f"HTTP {failure['http_status']}" if failure.get("http_status") else None
+                )
                 error = self.runtime.redact(
                     exc.message
                     if isinstance(exc, RuntimeFailure)
-                    else f"Memory 处理失败 ({type(exc).__name__})。"
+                    else f"Memory 处理失败 ({type(exc).__name__}{'; ' + detail if detail else ''})。"
                 )
             finally:
                 self._active = None
             with CancelScope(shield=True):
-                state = await self._finish(operation.id, state, error)
+                state = await self._finish(operation.id, state, error, failure)
             trace(
                 "memory.operation.completed",
                 operation_id=operation.id,
                 kind=operation.kind,
                 state=state,
                 attempts=operation.attempts,
+                elapsed_ms=round((perf_counter() - started) * 1000, 2),
+                retry_delay_seconds=2**operation.attempts if state == "queued" and failure else 0,
+                run_id=operation.payload.get("run_id"),
+                conversation_id=operation.payload.get("conversation_id"),
+                **failure,
             )
             if cancelled:
                 raise asyncio.CancelledError
             return True
 
-    async def _finish(self, identifier: str, state: str, error: str | None) -> str:
+    async def _finish(self, identifier: str, state: str, error: str | None, failure: dict[str, Any]) -> str:
         async with self.runtime.sessions() as session:
             row = await session.get(Operation, identifier)
             assert row is not None
             # Extraction/consolidation may already have committed the receipt with the facts.
             if row.state != "running":
                 return row.state
-            if state == "failed" and row.attempts < 3:
-                state = "queued"
-                row.result = {"retry_at": now_ts() + 2**row.attempts}
+            if state == "failed":
+                row.result = failure
+                if failure.get("retryable") and row.attempts < 3:
+                    state = "queued"
+                    row.result = {**failure, "retry_at": now_ts() + 2**row.attempts}
             row.state, row.error = state, error
             row.finished_at = None if state == "queued" else now_ts()
             await session.commit()

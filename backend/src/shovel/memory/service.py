@@ -12,6 +12,7 @@ import structlog
 
 from shovel.memory.domain import (
     PROFILE_TOPICS,
+    MemoryExtractionError,
     MemoryRecord,
     MemoryScope,
     MemoryState,
@@ -24,6 +25,7 @@ from shovel.memory.domain import (
 )
 from shovel.memory.ports import MemoryExtractor, MemoryRepository, MemoryVectorIndex
 from shovel.memory.relevance import Query, Support, assess
+from shovel.runtime.diagnostics import trace_duration
 from shovel.runtime.errors import NotFound
 
 
@@ -119,15 +121,16 @@ class MemoryService:
         diagnostics: dict[str, int] | None = None,
     ) -> list[MemoryRecord]:
         eligible = eligible_source(source)
-        candidates = (
-            (
-                await self.extractor.extract(source, related)
-                if related
-                else await self.extractor.extract(source)
+        with trace_duration("memory.extraction.proposed"):
+            candidates = (
+                (
+                    await self.extractor.extract(source, related)
+                    if related
+                    else await self.extractor.extract(source)
+                )
+                if eligible
+                else []
             )
-            if eligible
-            else []
-        )
         accepted = []
         ignored_corrections = 0
         for candidate in candidates:
@@ -156,7 +159,9 @@ class MemoryService:
                     or target.predicate != candidate.predicate
                     or normalize(target.subject) != normalize(candidate.subject)
                 ):
-                    raise ValueError("Extractor proposed an unsupported semantic merge.")
+                    raise MemoryExtractionError(
+                        "unsupported_merge", "Extractor proposed an unsupported semantic merge."
+                    )
                 if (candidate.subject == "user" and candidate.predicate in PROFILE_TOPICS) or (
                     normalize(target.object) != normalize(candidate.object)
                     or normalize(target.topic) != normalize(candidate.topic)
@@ -188,15 +193,18 @@ class MemoryService:
             }
             for c in accepted
         ):
-            raise ValueError("Extractor returned an unsupported predicate.")
-        saved = await self.repository.consolidate(
-            self.scope,
-            accepted,
-            provenance,
-            operation_id=operation_id,
-            generation=generation,
-            review_required=self.review_required,
-        )
+            raise MemoryExtractionError(
+                "unsupported_predicate", "Extractor returned an unsupported predicate."
+            )
+        with trace_duration("memory.extraction.persisted"):
+            saved = await self.repository.consolidate(
+                self.scope,
+                accepted,
+                provenance,
+                operation_id=operation_id,
+                generation=generation,
+                review_required=self.review_required,
+            )
         if diagnostics is not None:
             diagnostics.update(
                 source_eligible=int(eligible),

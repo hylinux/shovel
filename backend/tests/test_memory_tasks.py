@@ -5,13 +5,15 @@ from typing import Any
 
 import httpx
 import pytest
+from openai import AuthenticationError, RateLimitError
 from sqlalchemy import select
 
 from shovel.db.model.memory import MemoryBelief, SessionSummary
 from shovel.db.model.runtime import ChatMessage, Conversation, Operation
-from shovel.memory.domain import MemoryCandidate
+from shovel.memory.domain import MemoryCandidate, MemoryExtractionError
 from shovel.runtime.agent import AgentResult
 from shovel.runtime.diagnostics import development_logging
+from shovel.runtime.errors import RuntimeFailure
 from shovel.runtime.schemas import MessageInput
 from shovel.runtime.service import Runtime
 from test_hosted_runtime import api as api
@@ -84,17 +86,24 @@ async def test_answer_and_memory_task_commit_or_rollback_together(
 
 
 async def test_native_facts_outbox_and_receipt_are_atomic(
-    runtime: Runtime, monkeypatch: pytest.MonkeyPatch
+    runtime: Runtime, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     monkeypatch.setattr(runtime.memory.extractor, "extract", extraction)
     identifier = await enqueue(runtime)
-    assert await runtime.memory_tasks.run_once()
+    with development_logging():
+        assert await runtime.memory_tasks.run_once()
     operation = await runtime.operations.get(identifier)
     assert operation.state == "succeeded" and operation.result["committed"]
     assert len(await runtime.memory.list()) == 1
     assert await runtime.memory.repository.pending(runtime.memory.owner, force=True)
     await runtime.operations.recover()
     assert (await runtime.operations.get(identifier)).state == "succeeded"
+    output = capsys.readouterr().out
+    for event in ("started", "completed"):
+        assert f"memory.operation.{event}" in output
+    for event in ("related", "proposed", "persisted", "committed"):
+        assert f"memory.extraction.{event}" in output
+    assert "green tea" not in output
 
 
 async def test_atomic_consolidation_rolls_back_all_candidates_on_failure(runtime: Runtime) -> None:
@@ -161,32 +170,128 @@ async def test_restart_recovers_uncommitted_native_extraction(
     assert len(await runtime.memory.list()) == 1
 
 
-async def test_extraction_failure_retries_without_lying_about_success(
-    runtime: Runtime, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+@pytest.mark.parametrize("failure_kind", ["value", "evidence", "authentication", "configuration", "unknown"])
+async def test_permanent_extraction_failure_is_visible_without_automatic_replay(
+    failure_kind: str, runtime: Runtime, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     async def invalid(_text: str) -> list[MemoryCandidate]:
+        if failure_kind == "evidence":
+            raise MemoryExtractionError("evidence_mismatch", "private-invalid-json")
+        if failure_kind == "authentication":
+            response = httpx.Response(401, request=httpx.Request("POST", "https://model.invalid"))
+            try:
+                raise AuthenticationError("private-invalid-json", response=response, body=None)
+            except AuthenticationError as exc:
+                raise RuntimeError("private-invalid-json") from exc
+        if failure_kind == "configuration":
+            raise RuntimeFailure("Azure CLI authentication failed.", status=503)
+        if failure_kind == "unknown":
+            raise RuntimeError("private-invalid-json")
         raise ValueError("private-invalid-json")
 
     monkeypatch.setattr(runtime.memory.extractor, "extract", invalid)
     identifier = await enqueue(runtime)
     with development_logging():
-        for _ in range(3):
-            async with runtime.sessions() as session:
-                operation = await session.get(Operation, identifier)
-                assert operation is not None
-                operation.result = {}
-                await session.commit()
-            assert await runtime.memory_tasks.run_once()
+        assert await runtime.memory_tasks.run_once()
     operation = await runtime.operations.get(identifier)
-    assert operation.state == "failed" and operation.attempts == 3
+    assert operation.state == "failed" and operation.attempts == 1
+    assert operation.result["retryable"] is False
+    assert "retry_at" not in operation.result
+    if failure_kind == "evidence":
+        assert operation.result["error_code"] == "evidence_mismatch"
+        assert "evidence_mismatch" in (operation.error or "")
+    elif failure_kind == "authentication":
+        assert operation.result["http_status"] == 401
+        assert operation.result["cause_type"] == "AuthenticationError"
+    assert "private-invalid-json" not in str(operation.result)
     assert "private-invalid-json" not in (operation.error or "")
     assert await runtime.memory.list() == []
+    output = capsys.readouterr().out
+    events = [line for line in output.splitlines() if "memory.operation.completed" in line]
+    assert len(events) == 1
+    assert "state=failed" in events[0] and "attempts=1" in events[0]
+    assert "error_type=" in events[0] and "elapsed_ms=" in events[0]
+    assert "private-invalid-json" not in output and "green tea" not in output
+
+
+@pytest.mark.parametrize("failure_kind", ["timeout", "connection", "wrapped-rate-limit"])
+async def test_transient_extraction_failure_keeps_bounded_backoff(
+    failure_kind: str,
+    runtime: Runtime,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from shovel.db.base import now_ts
+
+    calls = 0
+
+    async def unavailable(_text: str) -> list[MemoryCandidate]:
+        nonlocal calls
+        calls += 1
+        if failure_kind == "connection":
+            raise httpx.ConnectError("private-provider-details")
+        if failure_kind == "wrapped-rate-limit":
+            response = httpx.Response(429, request=httpx.Request("POST", "https://model.invalid"))
+            try:
+                raise RateLimitError("private-provider-details", response=response, body=None)
+            except RateLimitError as exc:
+                raise RuntimeError("private-provider-details") from exc
+        raise TimeoutError("private-provider-details")
+
+    monkeypatch.setattr(runtime.memory.extractor, "extract", unavailable)
+    identifier = await enqueue(runtime)
+    clock = [now_ts()]
+    monkeypatch.setattr("shovel.runtime.memory_tasks.now_ts", lambda: clock[0])
+    with development_logging():
+        for attempt, delay in ((1, 2), (2, 4), (3, 0)):
+            assert await runtime.memory_tasks.run_once()
+            operation = await runtime.operations.get(identifier)
+            assert operation.attempts == calls == attempt
+            assert operation.result["retryable"] is True
+            if delay:
+                assert operation.state == "queued"
+                assert operation.result["retry_at"] == clock[0] + delay
+                assert not await runtime.memory_tasks.run_once()
+                assert calls == attempt
+                clock[0] += delay
+            else:
+                assert operation.state == "failed"
+                assert "retry_at" not in operation.result
+    assert await runtime.memory.list() == []
+    assert "private-provider-details" not in str(operation.result) + (operation.error or "")
     output = capsys.readouterr().out
     events = [line for line in output.splitlines() if "memory.operation.completed" in line]
     assert len(events) == 3
     assert all("state=queued" in line for line in events[:2])
     assert "state=failed" in events[-1] and "attempts=3" in events[-1]
-    assert "private-invalid-json" not in output and "green tea" not in output
+    assert "private-provider-details" not in output and "green tea" not in output
+
+
+async def test_transient_failure_then_success_clears_failure_details(
+    runtime: Runtime, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls = 0
+
+    async def intermittent(source: str) -> list[MemoryCandidate]:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise TimeoutError("private-provider-details")
+        return await extraction(source)
+
+    monkeypatch.setattr(runtime.memory.extractor, "extract", intermittent)
+    identifier = await enqueue(runtime)
+    assert await runtime.memory_tasks.run_once()
+    operation = await runtime.operations.get(identifier)
+    assert operation.state == "queued"
+    retry_at = operation.result["retry_at"]
+    monkeypatch.setattr("shovel.runtime.memory_tasks.now_ts", lambda: retry_at)
+    assert await runtime.memory_tasks.run_once()
+    operation = await runtime.operations.get(identifier)
+    assert operation.state == "succeeded" and operation.attempts == calls == 2
+    assert operation.error is None and operation.result["committed"]
+    assert "error_type" not in operation.result and "retry_at" not in operation.result
+    assert len(await runtime.memory.list()) == 1
 
 
 async def test_forget_does_not_invalidate_other_workspace_tasks(runtime: Runtime) -> None:

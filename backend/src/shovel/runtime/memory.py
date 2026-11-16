@@ -38,7 +38,7 @@ from shovel.memory.working import WorkingMemoryService
 from shovel.memory.zvec_index import ZvecMemoryIndex
 from shovel.pipeline.embedder import build_embedder
 from shovel.protection.egress import EgressChannel, require_ordinary
-from shovel.runtime.diagnostics import trace
+from shovel.runtime.diagnostics import trace, trace_duration
 from shovel.runtime.errors import NotFound, RuntimeFailure
 
 __all__ = ["ExtractionCancelled", "MemoryService"]
@@ -256,7 +256,8 @@ class MemoryService:
         diagnostics: dict[str, int] = {}
         try:
             try:
-                related = await self.application.related(source)
+                with trace_duration("memory.extraction.related"):
+                    related = await self.application.related(source)
             except _INDEX_ERRORS as exc:
                 related = []
                 self._index_error = type(exc).__name__

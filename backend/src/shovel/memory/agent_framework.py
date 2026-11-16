@@ -11,12 +11,13 @@ from typing import Any, Literal
 
 import httpx
 from agent_framework import Agent, AgentResponse
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from shovel.config.model_settings import DefaultAgentModelSettings, ModelProviderType
-from shovel.memory.domain import MemoryCandidate, MemoryRecord, MemoryType
+from shovel.memory.domain import MemoryCandidate, MemoryExtractionError, MemoryRecord, MemoryType
 from shovel.protection.egress import EgressChannel, require_ordinary
 from shovel.runtime.agent import ModelOptions, create_framework_client
+from shovel.runtime.diagnostics import trace_duration
 
 EXTRACTION = """Extract only durable facts explicitly asserted by this user.
 Return candidates, never database operations. Greetings, questions, speculation, credentials,
@@ -98,7 +99,9 @@ class AgentFrameworkMemoryExtractor:
 
     def _client(self) -> Any:
         if not self.settings.is_configured:
-            raise ValueError("Configure [model] or [memory.llm] for memory extraction.")
+            raise MemoryExtractionError(
+                "model_not_configured", "Configure [model] or [memory.llm] for memory extraction."
+            )
         if self._framework is None:
             self._http = httpx.AsyncClient(
                 timeout=httpx.Timeout(self.settings.timeout_seconds, connect=10),
@@ -133,7 +136,9 @@ class AgentFrameworkMemoryExtractor:
     ) -> list[MemoryCandidate]:
         require_ordinary(EgressChannel.MODEL, (text, related))
         if len(text) > self.settings.max_input_chars - len(EXTRACTION) - 1000:
-            raise ValueError("Memory extraction input exceeds model.max_input_chars.")
+            raise MemoryExtractionError(
+                "input_budget", "Memory extraction input exceeds model.max_input_chars."
+            )
         options = self._options()
         schema = ExtractionOutput.model_json_schema()
         schema["$defs"]["CandidateOutput"]["properties"]["evidence"]["enum"] = source_evidence(text)
@@ -172,24 +177,44 @@ class AgentFrameworkMemoryExtractor:
             ensure_ascii=False,
         )
         if len(payload) + len(instructions) + schema_chars > self.settings.max_input_chars:
-            raise ValueError("Memory extraction references exceed model.max_input_chars.")
-        async with asyncio.timeout(self.settings.timeout_seconds):
-            response = await agent.run(payload)
+            raise MemoryExtractionError(
+                "reference_budget", "Memory extraction references exceed model.max_input_chars."
+            )
+        with trace_duration("memory.model.completed", purpose="extraction"):
+            async with asyncio.timeout(self.settings.timeout_seconds):
+                response = await agent.run(payload)
         if not isinstance(response, AgentResponse):
-            raise ValueError("Memory extractor returned no response.")
-        parsed = ExtractionOutput.model_validate_json(response.text)
+            raise MemoryExtractionError("invalid_response", "Memory extractor returned no response.")
+        try:
+            parsed = ExtractionOutput.model_validate_json(response.text)
+        except ValidationError:
+            raise MemoryExtractionError(
+                "invalid_output", "Memory extractor returned invalid JSON or candidate fields."
+            ) from None
         if any(candidate.evidence not in text for candidate in parsed.candidates):
-            raise ValueError("Memory extractor returned evidence not present in the user message.")
+            raise MemoryExtractionError(
+                "evidence_mismatch", "Memory extractor returned evidence not present in the user message."
+            )
         candidates = []
         for candidate in parsed.candidates:
             occurred_at = None
             if candidate.occurred_on is not None:
                 if candidate.kind != "episodic" or candidate.occurred_on not in candidate.evidence:
-                    raise ValueError("Episode date must be explicitly present in its user evidence.")
-                day = date.fromisoformat(candidate.occurred_on)
+                    raise MemoryExtractionError(
+                        "invalid_episode_date",
+                        "Episode date must be explicitly present in its user evidence.",
+                    )
+                try:
+                    day = date.fromisoformat(candidate.occurred_on)
+                except ValueError:
+                    raise MemoryExtractionError(
+                        "invalid_episode_date", "Episode date is not valid."
+                    ) from None
                 occurred_at = int(datetime.combine(day, datetime.min.time(), tzinfo=UTC).timestamp())
                 if occurred_at < 0:
-                    raise ValueError("Episode date must not precede the Unix epoch.")
+                    raise MemoryExtractionError(
+                        "invalid_episode_date", "Episode date must not precede the Unix epoch."
+                    )
             candidates.append(
                 MemoryCandidate(
                     **{**candidate.model_dump(exclude={"occurred_on"}), "kind": MemoryType(candidate.kind)},
@@ -203,7 +228,9 @@ class AgentFrameworkMemoryExtractor:
         require_ordinary(EgressChannel.MODEL, (previous, messages))
         payload = json.dumps({"previous_summary": previous, "messages": messages}, ensure_ascii=False)
         if len(payload) > self.settings.max_input_chars - 1000:
-            raise ValueError("Session summary input exceeds model.max_input_chars.")
+            raise MemoryExtractionError(
+                "summary_input_budget", "Session summary input exceeds model.max_input_chars."
+            )
         agent = Agent(
             client=self._client(),
             name="shovel-session-summary",
@@ -215,12 +242,15 @@ class AgentFrameworkMemoryExtractor:
             ),
             default_options=self._options(),
         )
-        async with asyncio.timeout(self.settings.timeout_seconds):
-            response = await agent.run(payload)
+        with trace_duration("memory.model.completed", purpose="summary"):
+            async with asyncio.timeout(self.settings.timeout_seconds):
+                response = await agent.run(payload)
         if not isinstance(response, AgentResponse) or not response.text.strip():
-            raise ValueError("Session summarizer returned no text.")
+            raise MemoryExtractionError("empty_summary", "Session summarizer returned no text.")
         if len(response.text) > limit:
-            raise ValueError("Session summary exceeded its configured budget.")
+            raise MemoryExtractionError(
+                "summary_output_budget", "Session summary exceeded its configured budget."
+            )
         return response.text.strip()
 
     async def close(self) -> None:

@@ -24,7 +24,14 @@ from shovel.pipeline.sink import NullVectorSink
 from shovel.runtime.diagnostics import trace, trace_context
 from shovel.runtime.errors import NotFound, RuntimeFailure
 from shovel.runtime.requests import request_fingerprint, request_operation_id
-from shovel.runtime.schemas import HistoryPruneInput, ProfileInput, ResourceInput, ResourceUpdate, ScanInput
+from shovel.runtime.schemas import (
+    HistoryPruneInput,
+    IndexOptimizeInput,
+    ProfileInput,
+    ResourceInput,
+    ResourceUpdate,
+    ScanInput,
+)
 from shovel.services import connector_registry
 from shovel.services.credentials import CredentialRef
 from shovel.services.resource_service import ResourceDraft
@@ -76,6 +83,16 @@ class OperationService:
             )
             self._identify(operation, request_key, fingerprint)
             async with self.runtime.sessions() as session:
+                if kind == "index.optimize":
+                    pending = await session.scalar(
+                        select(Operation.id)
+                        .where(Operation.kind == kind, Operation.state.in_(("queued", "running")))
+                        .limit(1)
+                    )
+                    if pending is not None:
+                        raise RuntimeFailure(
+                            "Knowledge index maintenance is already queued or running.", status=409
+                        )
                 if cancel_jobs:
                     await session.execute(
                         update(Job)
@@ -90,6 +107,17 @@ class OperationService:
         self.runtime.wake.set()
         trace("operation.queued", operation_id=operation.id, kind=kind, resource_id=resource_id)
         return operation
+
+    async def optimize_index(
+        self, request: IndexOptimizeInput, *, request_key: str | None = None
+    ) -> Operation:
+        from shovel.runtime.maintenance import knowledge_index_identity
+
+        return await self.enqueue(
+            "index.optimize",
+            {**request.model_dump(), "index_identity": knowledge_index_identity(self.runtime.settings)},
+            request_key=request_key,
+        )
 
     async def _replay(self, key: str | None, fingerprint: str) -> Operation | None:
         if key is None:
@@ -308,6 +336,11 @@ class OperationService:
             raise RuntimeFailure("Versioned executions cannot use legacy Operation retries.", status=409)
         if existing.kind.startswith("memory."):
             return await self.runtime.memory_tasks.retry(existing)
+        if existing.kind == "index.optimize":
+            raise RuntimeFailure(
+                "Inspect the maintenance receipt and index; retries require a new acknowledged request.",
+                status=409,
+            )
         async with self.runtime.sessions() as session:
             operation = await session.get(Operation, identifier)
             if operation is None:
@@ -339,6 +372,23 @@ class OperationService:
                 )
             )
             for operation in interrupted:
+                if operation.kind == "index.optimize":
+                    if operation.result.get("phase") == "completed":
+                        operation.state = "succeeded"
+                        operation.error = None
+                        operation.finished_at = now_ts()
+                    elif operation.result.get("phase") == "dispatched":
+                        operation.state = "failed"
+                        operation.error = (
+                            "Host exited during native maintenance; result is unknown. "
+                            "Inspect the index before submitting a new explicit request."
+                        )
+                        operation.result = {**operation.result, "reconciliation_required": True}
+                        operation.finished_at = now_ts()
+                    else:
+                        operation.state = "queued"
+                        operation.error = "Host exited before native maintenance dispatch; request retained."
+                    continue
                 job = await session.get(Job, operation.job_id) if operation.job_id else None
                 interrupted_shutdown = (
                     job is not None and job.state == JobState.CANCELLED and not job.is_cancel_requested
@@ -449,6 +499,24 @@ class OperationService:
         identifier = candidate.id
         if candidate.capability_version_id is not None:
             return await self.runtime.execution_engine.run_once(identifier)
+        if candidate.kind == "index.optimize":
+            cancellation = asyncio.Event()
+            task = asyncio.create_task(self._run_candidate(candidate, cancellation))
+            cancelled = False
+            while not task.done():
+                try:
+                    await asyncio.shield(task)
+                except asyncio.CancelledError:
+                    cancelled = True
+                    cancellation.set()
+            result = task.result()
+            if cancelled:
+                raise asyncio.CancelledError
+            return result
+        return await self._run_candidate(candidate)
+
+    async def _run_candidate(self, candidate: Operation, cancellation: asyncio.Event | None = None) -> bool:
+        identifier = candidate.id
         async with self.runtime.sessions() as session:
             claimed = await session.execute(
                 update(Operation)
@@ -503,6 +571,16 @@ class OperationService:
         async with self.runtime.sessions() as session:
             row = await session.get(Operation, identifier)
             if row is not None:
+                if operation.kind == "index.optimize":
+                    if row.result.get("phase") == "dispatched" and state != "succeeded":
+                        result["reconciliation_required"] = True
+                        if state in {"queued", "cancelled"}:
+                            state = "failed"
+                            error = (
+                                "Native maintenance result is unknown; inspect before a new explicit request."
+                            )
+                    if cancellation is not None and cancellation.is_set():
+                        result["cancel_requested"] = True
                 row.state = state
                 row.result = {**row.result, **result}
                 row.error = error
@@ -540,6 +618,10 @@ class OperationService:
     async def _execute(self, operation: Operation) -> tuple[dict[str, Any], str]:
         resources = self.runtime.resources
         ref = operation.resource_id or ""
+        if operation.kind == "index.optimize":
+            from shovel.runtime.maintenance import optimize_index
+
+            return await optimize_index(self.runtime, operation), "succeeded"
         if operation.kind.startswith("profile."):
             from shovel.runtime.profiles import change_profile
 

@@ -176,6 +176,17 @@ class VectorSinkError(PipelineError):
         )
 
 
+class KnowledgeIndexUnavailableError(VectorSinkError):
+    """Knowledge admission is closed for maintenance or shutdown."""
+
+    def __init__(self, state: str) -> None:
+        self.state = state
+        super().__init__(
+            f"Knowledge index is {state}; new vector operations are not accepted.",
+            hint="Inspect knowledge index status and the maintenance Operation before retrying.",
+        )
+
+
 class JobNotFoundError(PipelineError):
     def __init__(self, job_id: str) -> None:
         super().__init__(

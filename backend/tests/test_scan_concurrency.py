@@ -302,14 +302,17 @@ async def test_scans_arriving_after_an_empty_queue_read_still_run_concurrently(
         await stop_worker(runtime, worker)
 
 
-async def test_non_scan_operation_drains_scans_and_blocks_later_admission(runtime, tmp_path, monkeypatch):
+@pytest.mark.parametrize("barrier_kind", ["cleanup", "index.optimize"])
+async def test_non_scan_operation_drains_scans_and_blocks_later_admission(
+    runtime, tmp_path, monkeypatch, barrier_kind
+):
     resources = [
         await add_notes(runtime, tmp_path / f"notes-{index}", name=f"notes-{index}") for index in range(3)
     ]
     operations = [
         await runtime.operations.scan(resource, ScanInput(embed=False)) for resource in resources[:2]
     ]
-    barrier = await runtime.operations.enqueue("cleanup", {})
+    barrier = await runtime.operations.enqueue(barrier_kind, {})
     operations.append(await runtime.operations.scan(resources[2], ScanInput(embed=False)))
     started, release, _ = control_scans(monkeypatch, operations)
     barrier_started, barrier_release = asyncio.Event(), asyncio.Event()

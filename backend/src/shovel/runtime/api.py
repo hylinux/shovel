@@ -27,6 +27,7 @@ from shovel.db.model.retrieval import DeletionOutbox
 from shovel.db.model.runtime import ChatMessage, Conversation
 from shovel.domain.enums import ResourceState
 from shovel.exceptions.base import ShovelError
+from shovel.exceptions.pipeline import KnowledgeIndexUnavailableError
 from shovel.exceptions.resource import (
     DuplicateResourceNameError,
     InvalidResourceStateTransitionError,
@@ -48,6 +49,7 @@ from shovel.runtime.schemas import (
     ConversationInput,
     CredentialInput,
     HistoryPruneInput,
+    IndexOptimizeInput,
     MCPAuthCancelInput,
     MCPAuthInput,
     MCPConfigurationInput,
@@ -427,7 +429,7 @@ def configure_api(
             status = 404
         elif isinstance(exc, (DuplicateResourceNameError, InvalidResourceStateTransitionError)):
             status = 409
-        elif isinstance(exc, OutlookError):
+        elif isinstance(exc, (OutlookError, KnowledgeIndexUnavailableError)):
             status = 503
         return JSONResponse(
             {"error": {"code": type(exc).__name__, "message": exc.message, "hint": exc.hint}},
@@ -477,6 +479,7 @@ def configure_api(
             "host_id": rt.retrieval_diagnostics.host_id,
             "runtime_initialization": rt.initialization,
             "index_open": rt.index_open_snapshot(),
+            "knowledge_index": rt.knowledge_index_status(),
             "environment": rt.environment,
             "warmup": rt.warmup.states,
             "chat_capacity": rt.performance.snapshot(),
@@ -783,6 +786,16 @@ def configure_api(
     @router.post("/jobs/{identifier}/cancel")
     async def cancel(identifier: str, rt: RuntimeDependency) -> dict[str, Any]:
         return job_view(await rt.operations.cancel_job(identifier))
+
+    @router.get("/index/status")
+    async def index_status(rt: RuntimeDependency) -> dict[str, Any]:
+        return rt.knowledge_index_status()
+
+    @router.post("/index/optimize", status_code=202)
+    async def optimize_index(
+        body: IndexOptimizeInput, rt: RuntimeDependency, request_key: RequestKey = None
+    ) -> dict[str, Any]:
+        return operation_view(await rt.operations.optimize_index(body, request_key=request_key))
 
     @router.post("/index/cleanup", status_code=202)
     async def cleanup(

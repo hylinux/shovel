@@ -30,14 +30,14 @@ from __future__ import annotations
 
 import asyncio
 import threading
-from collections.abc import Callable, Sequence
+from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass, field
 from time import perf_counter, process_time, time
 from typing import Any, Literal, Protocol
 from uuid import uuid4
 
 from shovel.db.base import now_ts
-from shovel.exceptions.pipeline import VectorSinkError
+from shovel.exceptions.pipeline import KnowledgeIndexUnavailableError, VectorSinkError
 from shovel.protection.egress import EgressChannel, require_ordinary
 from shovel.vector.schema import DENSE_VECTOR, TEXT_FIELD
 
@@ -138,11 +138,25 @@ class VectorSearchTimings:
     query_completed_at: float = 0
     conversion_ms: float = 0
     total_ms: float = 0
+    admission_wait_ms: float = 0
     process_cpu_ms: float = 0
     native_topk: int = 0
     filter_chars: int = 0
     resource_count: int = 0
     returned_count: int = 0
+
+
+async def _drain_native[T](task: asyncio.Task[T]) -> T:
+    cancelled = False
+    while not task.done():
+        try:
+            await asyncio.shield(task)
+        except asyncio.CancelledError:
+            cancelled = True
+    result = task.result()
+    if cancelled:
+        raise asyncio.CancelledError
+    return result
 
 
 class _ZvecIO:
@@ -196,11 +210,7 @@ class _ZvecIO:
 
         task = asyncio.create_task(asyncio.to_thread(locked))
         try:
-            return await asyncio.shield(task)
-        except asyncio.CancelledError:
-            # A cancelled coroutine must not leave native I/O racing collection.close().
-            await task
-            raise
+            return await _drain_native(task)
         finally:
             if measurement is not None:
                 measurement.total_ms = (perf_counter() - queued) * 1000
@@ -214,6 +224,127 @@ class _ZvecIO:
 
 class ZvecChunkSink(_ZvecIO):
     """Write personal knowledge vectors outside the event loop."""
+
+    def __init__(self, collection: Any) -> None:
+        super().__init__(collection)
+        self._admission = asyncio.Lock()
+        self._closing = False
+        self._close_task: asyncio.Task[None] | None = None
+        self._maintenance: str | None = None
+        self._pending = 0
+        self._active = False
+        self._metadata: dict[str, Any] | None = None
+
+    def check_available(self) -> None:
+        if self._closing or self._collection is None:
+            raise KnowledgeIndexUnavailableError("closing" if self._collection is not None else "closed")
+        if self._maintenance is not None:
+            raise KnowledgeIndexUnavailableError("maintenance")
+
+    def admission_snapshot(self) -> dict[str, Any]:
+        return {
+            "admission": "closed"
+            if self._collection is None
+            else "closing"
+            if self._closing
+            else "maintenance"
+            if self._maintenance is not None
+            else "open",
+            "maintenance": self._maintenance,
+            "pending_io": self._pending,
+            "active_io": self._active,
+            "collection": self._metadata,
+            "ann_complete": (
+                self._metadata["index_completeness"].get(DENSE_VECTOR) == 1.0
+                if self._metadata is not None
+                else None
+            ),
+        }
+
+    async def _io[T](
+        self,
+        action: Callable[[], T],
+        *,
+        operation: str = "other",
+        measurement: VectorSearchTimings | None = None,
+    ) -> T:
+        self.check_available()
+        queued = perf_counter()
+        self._pending += 1
+        try:
+            # Wait asynchronously, not by occupying default-executor threads with an RLock.
+            async with self._admission:
+                if measurement is not None:
+                    measurement.admission_wait_ms = (perf_counter() - queued) * 1000
+                self._active = True
+                try:
+                    if operation in {"upsert_flush", "delete_flush"}:
+                        self._metadata = None
+                    return await super()._io(action, operation=operation, measurement=measurement)
+                finally:
+                    self._active = False
+        finally:
+            self._pending -= 1
+            if measurement is not None:
+                measurement.total_ms = (perf_counter() - queued) * 1000
+
+    def stop_admission(self) -> None:
+        self._closing = True
+
+    async def aclose(self) -> None:
+        self.stop_admission()
+        if self._close_task is None:
+            self._close_task = asyncio.create_task(self._close())
+        await _drain_native(self._close_task)
+
+    async def _close(self) -> None:
+        async with self._admission:
+            if self._collection is not None:
+                await super()._io(self._collection.close, operation="close")
+                self._collection = None
+                self._metadata = None
+
+    async def optimize(
+        self,
+        *,
+        concurrency: int = 2,
+        on_dispatch: Callable[[dict[str, Any]], Awaitable[None]],
+    ) -> dict[str, Any]:
+        from zvec import OptimizeOption
+
+        if not 1 <= concurrency <= 2:
+            raise ValueError("Knowledge maintenance concurrency must be 1 or 2.")
+        self.check_available()
+        self._maintenance = "draining"
+        started = perf_counter()
+        try:
+            async with self._admission:
+                if self._closing:
+                    raise KnowledgeIndexUnavailableError("closing")
+                before = await super()._io(self._snapshot, operation="metadata")
+                await on_dispatch(before)
+                self._maintenance = "optimizing"
+                self._metadata = None
+
+                def maintain() -> dict[str, Any]:
+                    self._collection.optimize(OptimizeOption(concurrency=concurrency))
+                    after = self._snapshot()
+                    self._metadata = after
+                    return after
+
+                after = await super()._io(maintain, operation="optimize")
+                if before["doc_count"] != after["doc_count"]:
+                    raise VectorSinkError("Knowledge document count changed during maintenance.")
+                if after["doc_count"] and after["index_completeness"].get(DENSE_VECTOR) != 1.0:
+                    raise VectorSinkError("Native optimization returned without a complete ANN index.")
+                return {
+                    "before": before,
+                    "after": after,
+                    "elapsed_ms": (perf_counter() - started) * 1000,
+                    "concurrency": concurrency,
+                }
+        finally:
+            self._maintenance = None
 
     async def upsert(self, records: Sequence[VectorRecord]) -> int:
         require_ordinary(EgressChannel.INDEX, records)
@@ -232,6 +363,8 @@ class ZvecChunkSink(_ZvecIO):
             # 向量可能还在内存里, 而 SQLite 那边已经标成 indexed —— 得到
             # 一个"标着已索引却搜不到"的状态, 且没有任何自动发现途径。
             await self._io(write, operation="upsert_flush")
+        except KnowledgeIndexUnavailableError:
+            raise
         except Exception as exc:
             raise VectorSinkError(f"写入 {len(docs)} 条向量失败: {exc}") from exc
 
@@ -295,37 +428,39 @@ class ZvecChunkSink(_ZvecIO):
 
         try:
             return await self._io(query, operation="search", measurement=measurement)
+        except KnowledgeIndexUnavailableError:
+            raise
         except Exception as exc:
             raise VectorSinkError(f"检索知识向量失败: {exc}") from exc
 
     async def diagnostic_snapshot(self) -> dict[str, Any]:
-        def inspect() -> dict[str, Any]:
-            schema, stats = self._collection.schema, self._collection.stats
-            vector = schema.vector(DENSE_VECTOR)
-            if vector is None:
-                raise VectorSinkError("Knowledge collection has no dense vector field.")
-            index = vector.index_param
-            return {
-                "doc_count": int(stats.doc_count),
-                "index_completeness": stats.index_completeness,
-                "dimension": vector.dimension,
-                "vector_index": str(index.type) if index is not None else None,
-                "metric": str(metric)
-                if (metric := getattr(index, "metric_type", None)) is not None
-                else None,
-                "hnsw_m": getattr(index, "m", None),
-                "hnsw_ef_construction": getattr(index, "ef_construction", None),
-                "filter_indexes": {
-                    name: str(item.index_param.type)
-                    if (item := schema.field(name)) is not None and item.index_param is not None
-                    else None
-                    for name in ("resource_id", "granularity", "model_version")
-                },
-                "segment_count": None,
-                "segment_count_available": False,
-            }
+        snapshot = await self._io(self._snapshot, operation="metadata")
+        self._metadata = snapshot
+        return snapshot
 
-        return await self._io(inspect, operation="metadata")
+    def _snapshot(self) -> dict[str, Any]:
+        schema, stats = self._collection.schema, self._collection.stats
+        vector = schema.vector(DENSE_VECTOR)
+        if vector is None:
+            raise VectorSinkError("Knowledge collection has no dense vector field.")
+        index = vector.index_param
+        return {
+            "doc_count": int(stats.doc_count),
+            "index_completeness": stats.index_completeness,
+            "dimension": vector.dimension,
+            "vector_index": str(index.type) if index is not None else None,
+            "metric": str(metric) if (metric := getattr(index, "metric_type", None)) is not None else None,
+            "hnsw_m": getattr(index, "m", None),
+            "hnsw_ef_construction": getattr(index, "ef_construction", None),
+            "filter_indexes": {
+                name: str(item.index_param.type)
+                if (item := schema.field(name)) is not None and item.index_param is not None
+                else None
+                for name in ("resource_id", "granularity", "model_version")
+            },
+            "segment_count": None,
+            "segment_count_available": False,
+        }
 
     async def delete_document(self, resource_id: str, doc_uri: str) -> int:
         # 比较符是单个 ``=`` (SQL 风格), 不是 ``==``。写成 ``==`` 会被

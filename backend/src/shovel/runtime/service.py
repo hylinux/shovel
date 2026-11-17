@@ -2,7 +2,8 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
-from collections.abc import AsyncGenerator
+from collections.abc import AsyncGenerator, Iterator
+from contextlib import contextmanager
 from dataclasses import asdict
 from importlib.metadata import version
 from pathlib import Path
@@ -34,7 +35,7 @@ from shovel.db.proactive_repository import SQLiteProactiveRepository
 from shovel.db.workflow_repository import SQLiteWorkflowRepository
 from shovel.enterprise.organization_service import OrganizationService
 from shovel.enterprise.service import ConnectionService
-from shovel.exceptions.pipeline import VectorSinkError
+from shovel.exceptions.pipeline import KnowledgeIndexUnavailableError, VectorSinkError
 from shovel.execution.control import ExecutionWakeupService, RecoveryService
 from shovel.execution.effects import ExternalEffectService
 from shovel.execution.engine import ExecutionEngine
@@ -53,6 +54,7 @@ from shovel.platform.authorization import ApprovalAuthorization, ExplicitActions
 from shovel.platform.policy import ConfiguredSecurityPolicy
 from shovel.platform.service import PlatformApplication
 from shovel.runtime.diagnostics import trace, trace_context
+from shovel.runtime.errors import RuntimeFailure
 from shovel.runtime.locking import RuntimeLock
 from shovel.runtime.operation_reads import OperationQueries
 from shovel.security.services import ApprovalService, AuthorizationService, SecurityGate
@@ -103,6 +105,9 @@ class Runtime:
         self.worker_error: str | None = None
         self._sink: ZvecChunkSink | None = None
         self._sink_lock = asyncio.Lock()
+        self._closing = False
+        self._knowledge_close_task: asyncio.Task[None] | None = None
+        self._maintenance_operation: str | None = None
         self._index_open: IndexOpenTimings | None = None
         self._index_open_started = 0.0
         self.initialization: dict[str, float] = {}
@@ -250,6 +255,46 @@ class Runtime:
     def ready_sink(self) -> ZvecChunkSink | None:
         return self._sink
 
+    def knowledge_index_status(self) -> dict[str, Any]:
+        if self._sink is not None:
+            snapshot = self._sink.admission_snapshot()
+        else:
+            snapshot = {
+                "admission": "closing" if self._closing else "unopened",
+                "maintenance": None,
+                "ann_complete": None,
+                "collection": None,
+                "pending_io": 0,
+                "active_io": False,
+            }
+        snapshot["operation_id"] = self._maintenance_operation
+        if self._maintenance_operation is not None and not self._closing:
+            snapshot["admission"] = "maintenance"
+            snapshot["maintenance"] = snapshot["maintenance"] or (
+                "opening" if self._sink is None else "checkpoint"
+            )
+        return snapshot
+
+    def check_knowledge_index_available(self, *, maintenance_operation_id: str | None = None) -> None:
+        if self._closing:
+            raise RuntimeFailure("Knowledge index is closing.", status=503)
+        if (
+            self._maintenance_operation is not None
+            and maintenance_operation_id != self._maintenance_operation
+        ):
+            raise KnowledgeIndexUnavailableError("maintenance")
+        if self._sink is not None:
+            self._sink.check_available()
+
+    @contextmanager
+    def knowledge_maintenance(self, operation_id: str) -> Iterator[None]:
+        self.check_knowledge_index_available()
+        self._maintenance_operation = operation_id
+        try:
+            yield
+        finally:
+            self._maintenance_operation = None
+
     def index_open_snapshot(self) -> dict[str, Any] | None:
         if self._index_open is None:
             return None
@@ -267,10 +312,18 @@ class Runtime:
             "warmup_active": self.performance.warming,
         }
 
-    async def sink(self, *, reason: Literal["warmup", "on_demand"] = "on_demand") -> ZvecChunkSink:
+    async def sink(
+        self,
+        *,
+        reason: Literal["warmup", "on_demand"] = "on_demand",
+        maintenance_operation_id: str | None = None,
+    ) -> ZvecChunkSink:
+        self.check_knowledge_index_available(maintenance_operation_id=maintenance_operation_id)
         started = perf_counter()
         requested_at = time()
         async with self._sink_lock:
+            if self._closing:
+                raise RuntimeFailure("Knowledge index is closing.", status=503)
             if self._sink is None:
                 measurement = IndexOpenTimings(
                     host_id=self.retrieval_diagnostics.host_id,
@@ -298,12 +351,16 @@ class Runtime:
                     trace("index.opening", lock_wait_ms=round(measurement.lock_wait_ms, 2))
                     task = asyncio.create_task(asyncio.to_thread(open_sink))
                     try:
-                        try:
-                            self._sink = await asyncio.shield(task)
-                        except asyncio.CancelledError:
-                            measurement.caller_cancelled = True
-                            self._sink = await task
-                            raise
+                        while not task.done():
+                            try:
+                                await asyncio.shield(task)
+                            except asyncio.CancelledError:
+                                measurement.caller_cancelled = True
+                        self._sink = task.result()
+                        if self._closing:
+                            self._sink.stop_admission()
+                        if measurement.caller_cancelled:
+                            raise asyncio.CancelledError
                     except BaseException as exc:
                         if self._sink is None:
                             measurement.state = "failed"
@@ -335,9 +392,15 @@ class Runtime:
                 }
             self.warmup.states["index"]["state"] = "ready"
             self.warmup.states["index"].pop("error_type", None)
+            if self._closing:
+                self._sink.stop_admission()
+                raise RuntimeFailure("Knowledge index is closing.", status=503)
             return self._sink
 
     async def close(self) -> None:
+        self._closing = True
+        if self._sink is not None:
+            self._sink.stop_admission()
         try:
             try:
                 await self.events.stop()
@@ -357,9 +420,23 @@ class Runtime:
                 try:
                     await self.retrieval.close()
                 finally:
-                    if self._sink is not None:
-                        await self._sink.aclose()
-                        self._sink = None
+                    if self._knowledge_close_task is None:
+                        self._knowledge_close_task = asyncio.create_task(self._close_knowledge_index())
+                    cancelled = False
+                    while not self._knowledge_close_task.done():
+                        try:
+                            await asyncio.shield(self._knowledge_close_task)
+                        except asyncio.CancelledError:
+                            cancelled = True
+                    self._knowledge_close_task.result()
+                    if cancelled:
+                        raise asyncio.CancelledError
+
+    async def _close_knowledge_index(self) -> None:
+        async with self._sink_lock:
+            if self._sink is not None:
+                await self._sink.aclose()
+                self._sink = None
 
 
 async def create_runtime(

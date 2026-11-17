@@ -1,19 +1,65 @@
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+import hashlib
+import json
+from pathlib import Path
+from typing import TYPE_CHECKING, Any
 
 from sqlalchemy import delete, select
 
+from shovel.config.settings import AppSettings
 from shovel.db.base import now_ts
 from shovel.db.model.execution import Job
 from shovel.db.model.retrieval import DeletionOutbox, RetrievalLog
 from shovel.db.model.runtime import Operation
+from shovel.db.unit_of_work import sqlite_write
 from shovel.domain.enums import JobState
-from shovel.runtime.errors import NotFound
-from shovel.runtime.schemas import HistoryPruneInput
+from shovel.runtime.errors import NotFound, RuntimeFailure
+from shovel.runtime.schemas import HistoryPruneInput, IndexOptimizeInput
 
 if TYPE_CHECKING:
     from shovel.runtime.service import Runtime
+
+
+def knowledge_index_identity(settings: AppSettings) -> str:
+    identity = [
+        settings.database.url,
+        str(Path(settings.zvec.knowledge_path).expanduser().resolve()),
+        settings.zvec.dim,
+        settings.zvec.chunk_collection,
+    ]
+    return hashlib.sha256(json.dumps(identity).encode()).hexdigest()
+
+
+async def optimize_index(runtime: Runtime, operation: Operation) -> dict[str, Any]:
+    request = IndexOptimizeInput.model_validate(
+        {key: value for key, value in operation.payload.items() if key != "index_identity"}
+    )
+    if operation.payload.get("index_identity") != knowledge_index_identity(runtime.settings):
+        raise RuntimeFailure(
+            "Knowledge index identity changed; submit a new maintenance request.", status=409
+        )
+
+    async def checkpoint(result: dict[str, Any]) -> None:
+        async with sqlite_write(runtime.sessions, durable=True) as session:
+            row = await session.get(Operation, operation.id)
+            if row is None:
+                raise NotFound("操作", operation.id)
+            row.result = result
+            await session.commit()
+
+    async def dispatch(before: dict[str, Any]) -> None:
+        if runtime.stopping.is_set():
+            raise RuntimeFailure("Host is stopping; knowledge maintenance was not dispatched.", status=503)
+        await checkpoint({"phase": "dispatched", "concurrency": request.concurrency, "before": before})
+
+    with runtime.knowledge_maintenance(operation.id):
+        await checkpoint({"phase": "draining", "concurrency": request.concurrency})
+        sink = await runtime.sink(maintenance_operation_id=operation.id)
+        result = await sink.optimize(concurrency=request.concurrency, on_dispatch=dispatch)
+        result["phase"] = "completed"
+        await checkpoint(result)
+        return result
 
 
 async def prune_history(runtime: Runtime, request: HistoryPruneInput, operation_id: str) -> dict[str, int]:

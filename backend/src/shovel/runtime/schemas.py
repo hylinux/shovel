@@ -175,6 +175,18 @@ class CleanupInput(InputModel):
     resource_id: str | None = None
 
 
+class IndexOptimizeInput(InputModel):
+    maintenance_window: Literal[True]
+    concurrency: int = Field(default=2, ge=1, le=2, strict=True)
+
+    @field_validator("maintenance_window", mode="before")
+    @classmethod
+    def explicit_maintenance_window(cls, value: Any) -> Literal[True]:
+        if value is not True:
+            raise ValueError("Explicit maintenance_window=true acknowledgement is required.")
+        return True
+
+
 class ChunkerInput(InputModel):
     chunk_chars: int = Field(default=800, ge=1, le=1_000_000)
     overlap_chars: int = Field(default=120, ge=0)
@@ -230,6 +242,7 @@ class CommandInput(InputModel):
         "profile.save",
         "profile.delete",
         "history.prune",
+        "index.optimize",
     ]
     ref: str | None = None
     payload: dict[str, Any] = Field(default_factory=dict)

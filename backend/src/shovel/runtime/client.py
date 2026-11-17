@@ -24,6 +24,7 @@ from shovel.runtime.requests import request_operation_id
 from shovel.runtime.schemas import (
     CleanupInput,
     HistoryPruneInput,
+    IndexOptimizeInput,
     ProfileInput,
     ResourceInput,
     RetrievalDiagnosticInput,
@@ -167,6 +168,10 @@ async def _submit_local(
         operation = await runtime.operations.scan(
             ref or "", ScanInput.model_validate(payload), request_key=request_key
         )
+    elif kind == "index.optimize":
+        operation = await runtime.operations.optimize_index(
+            IndexOptimizeInput.model_validate(payload), request_key=request_key
+        )
     elif kind in {"cleanup", "history.prune"}:
         maintenance = (
             CleanupInput.model_validate(payload)
@@ -237,7 +242,13 @@ def _check_result(data: dict[str, Any]) -> dict[str, Any]:
             message = f"资源元数据已删除,但向量清理未完成:{message}"
         if data.get("result", {}).get("profile_deleted"):
             message = f"Profile 已删除,但向量清理未完成:{message}"
-        raise RuntimeFailure(message, hint=f"操作 {data['id']};可在 Web 重试或运行 shovel scan cleanup。")
+        hint = (
+            f"Operation {data['id']}: inspect the receipt and /api/v1/index/status; "
+            "maintenance requires a new acknowledged request, not blind retry."
+            if data.get("kind") == "index.optimize"
+            else f"操作 {data['id']};可在 Web 重试或运行 shovel scan cleanup。"
+        )
+        raise RuntimeFailure(message, hint=hint)
     return data
 
 
@@ -256,6 +267,8 @@ async def execute_command(
         body = CleanupInput.model_validate(body).model_dump()
     elif kind == "history.prune":
         body = HistoryPruneInput.model_validate(body).model_dump()
+    elif kind == "index.optimize":
+        body = IndexOptimizeInput.model_validate(body).model_dump()
     key = request_key or new_id("request")
     identifier = request_operation_id(key)
     await asyncio.to_thread(_record_request, settings, key, kind, ref)
@@ -282,6 +295,7 @@ async def execute_command(
                     "scan": f"/resources/{encoded}/scans",
                     "cleanup": "/index/cleanup",
                     "history.prune": "/history/prune",
+                    "index.optimize": "/index/optimize",
                     "resource.delete": f"/resources/{encoded}",
                     "resource.update": f"/resources/{encoded}",
                 }

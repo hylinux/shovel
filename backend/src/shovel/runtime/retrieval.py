@@ -273,6 +273,8 @@ class RetrievalService:
                 trace("retrieval.degraded", requested_mode=request.mode, effective_mode=mode, reason=reason)
         if mode in {"vector", "hybrid"} and not self.runtime.settings.embedding.is_configured:
             raise RuntimeFailure("向量检索需要配置 [embedding];可改用 keyword。", status=503)
+        if scope and mode in {"vector", "hybrid"}:
+            self.runtime.check_knowledge_index_available()
         trace("retrieval.started", mode=mode, resource_count=len(scope), limit=request.limit)
         candidate_count = min(300, request.limit * 10)
         rankings: list[list[str]] = []

@@ -8,6 +8,7 @@ from shovel.cli.commands import platform
 from shovel.cli.commands.config import app as config_app
 from shovel.cli.commands.diagnose import app as diagnose_app
 from shovel.cli.commands.history import app as history_app
+from shovel.cli.commands.index import app as index_app
 from shovel.cli.commands.init import app as init_app
 from shovel.cli.commands.operation import app as operation_app
 from shovel.cli.commands.profile import app as profile_app
@@ -85,6 +86,7 @@ app.add_typer(
     help="Scan resources and build the search index.",
 )
 app.add_typer(operation_app, name="operation", help="Inspect and recover durable background operations.")
+app.add_typer(index_app, name="index", help="Manually maintain the knowledge vector index.")
 app.add_typer(profile_app, name="profile", help="Manage persisted scan profiles.")
 app.add_typer(history_app, name="history", help="Explicitly prune terminal task history.")
 app.add_typer(

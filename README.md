@@ -592,6 +592,14 @@ Vector persistence must succeed before chunks become indexed. After interruption
 use scan/cleanup status and supported reconciliation rather than editing SQLite
 or deleting an active index directory.
 
+For an explicitly acknowledged knowledge-index maintenance window, run
+`uv run shovel index optimize --yes --concurrency 2`. This uses a durable
+`index.optimize` Operation, drains accepted knowledge I/O and temporarily rejects
+new vector requests; Memory and keyword search have no shared maintenance gate.
+It is never automatic and does not change embedding or ANN query parameters.
+Inspect `/api/v1/index/status` and the Operation receipt; a dispatched operation
+with unknown completion must be reconciled, not blindly retried.
+
 See [scan pipeline](Documents/scan_pipeline.md) and
 [Outlook integration](Documents/outlook_local.md).
 

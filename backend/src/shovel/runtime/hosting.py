@@ -5,7 +5,8 @@ import inspect
 import json
 import os
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from pathlib import Path
 from typing import cast
 from urllib.parse import urlsplit
@@ -15,13 +16,14 @@ from dependency_injector import providers
 from fastapi import FastAPI
 from py_generic_host.di.protocols import AppContainerProtocol
 from py_generic_host.hosting.builder import WebHostBuilder
-from py_generic_host.hosting.host import Host
 from py_generic_host.hosting.hosted_service import BackgroundService
 from py_generic_host.hosting.lifetime import ApplicationLifetime
+from py_generic_host.web.uvicorn_service import UvicornHostedService
 from starlette.exceptions import HTTPException
 from starlette.responses import Response
 from starlette.staticfiles import StaticFiles
 from starlette.types import Scope
+from uvicorn import Server
 
 from shovel.config.settings import AppSettings
 from shovel.container import AppContainer
@@ -29,6 +31,14 @@ from shovel.runtime.diagnostics import trace
 from shovel.runtime.errors import RuntimeFailure
 from shovel.runtime.locking import endpoint_file
 from shovel.runtime.service import Runtime
+from shovel.runtime.shutdown import RuntimeHost
+
+
+class _RuntimeUvicornServer(Server):
+    @contextmanager
+    def capture_signals(self) -> Iterator[None]:
+        # Current Uvicorn no longer calls the pinned framework's install_signal_handlers hook.
+        yield
 
 
 async def resolve_runtime(provider: Callable[[], object]) -> Runtime:
@@ -135,6 +145,13 @@ class RuntimeWorker(BackgroundService):  # type: ignore[misc]  # Framework does 
             if runtime.worker_state != "failed":
                 runtime.worker_state = "stopped"
             trace("worker.stopped", state=runtime.worker_state)
+
+    def begin_shutdown(self, deadline: float) -> None:
+        if self._runtime is not None:
+            self._runtime.begin_shutdown(deadline)
+
+    def shutdown_failed(self) -> bool:
+        return self._runtime is not None and self._runtime._knowledge_worker.shutdown_failed
 
     async def stop(self, stopping: asyncio.Event) -> None:
         if self._runtime is not None:
@@ -280,7 +297,7 @@ def build_host(
     *,
     development: bool,
     frontend: Path | None = None,
-) -> Host:
+) -> RuntimeHost:
     from shovel.runtime.api import configure_api
 
     host = settings.dev_http_host if development else settings.http_host
@@ -310,20 +327,34 @@ def build_host(
     )
     if frontend is not None:
         builder.configure_endpoint(lambda _ctx, app: mount_frontend(app, frontend))
-    return builder.build()
+    built = builder.build()
+    for service in built.services:
+        if isinstance(service, UvicornHostedService):
+            service._server = _RuntimeUvicornServer(service._server.config)
+    return RuntimeHost(
+        built.container,
+        built.services,
+        built.lifetime,
+        built.options,
+        on_stopping=worker.begin_shutdown,
+        shutdown_failed=worker.shutdown_failed,
+    )
 
 
-def build_cli_host(settings: AppSettings) -> tuple[Host, Callable[[], object]]:
+def build_cli_host(settings: AppSettings) -> tuple[RuntimeHost, Callable[[], object]]:
     container = make_container(settings)
     lifetime = ApplicationLifetime()
-    host = Host(
+    worker = RuntimeWorker(container.runtime)
+    host = RuntimeHost(
         container=container,
         services=[
-            RuntimeWorker(container.runtime),
+            worker,
             ExecutionMaintenanceWorker(container.runtime),
             MemoryExtractionWorker(container.runtime),
         ],
         lifetime=lifetime,
+        on_stopping=worker.begin_shutdown,
+        shutdown_failed=worker.shutdown_failed,
     )
     return host, container.runtime
 

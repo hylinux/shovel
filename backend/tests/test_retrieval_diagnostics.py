@@ -218,7 +218,7 @@ async def test_cancelled_open_drains_native_work_before_waiter_reuses_handle(
         opened.append(sink)
         return sink
 
-    monkeypatch.setattr("shovel.runtime.service.open_chunk_sink", blocked)
+    monkeypatch.setattr(runtime._knowledge_worker, "open", blocked)
     first = asyncio.create_task(runtime.sink(reason="warmup"))
     waiter = None
     try:

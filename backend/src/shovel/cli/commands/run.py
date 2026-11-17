@@ -23,7 +23,7 @@ import signal
 import subprocess
 import sys
 from collections.abc import AsyncGenerator, Callable, Iterable
-from contextlib import asynccontextmanager
+from contextlib import AsyncExitStack, asynccontextmanager
 from pathlib import Path
 from typing import Annotated, Any
 
@@ -37,7 +37,9 @@ from shovel.cli.ui.console import console
 from shovel.cli.ui.logo import get_logo, get_tagline
 from shovel.config.settings import AppSettings, load_settings
 from shovel.runtime.diagnostics import development_logging, trace
+from shovel.runtime.errors import RuntimeFailure
 from shovel.runtime.hosting import build_host
+from shovel.runtime.shutdown import RuntimeHost, drain_task
 
 # -----------------------------------------------------------------------------
 # 平台适配层
@@ -114,7 +116,12 @@ def run_prd(
             frontend_dir = packaged if packaged.is_dir() else _resolve_frontend_dir(None) / "out"
     host = build_host(settings, development=False, frontend=frontend_dir)
     console.info(f"Production → http://{settings.http_host}:{settings.http_port}")
-    asyncio.run(host.run_async())
+    try:
+        asyncio.run(host.run_async())
+    except KeyboardInterrupt:
+        if host.exit_code:
+            raise typer.Exit(code=host.exit_code) from None
+        raise
     if host.exit_code:
         raise typer.Exit(code=host.exit_code)
 
@@ -158,7 +165,7 @@ async def _run_dev_logged(frontend_dir_override: Path | None) -> None:
 
 
 async def _supervise(
-    host: Any,
+    host: RuntimeHost,
     frontend_dir: Path,
     backend_port: int,
     *,
@@ -166,16 +173,20 @@ async def _supervise(
     frontend_port: int = 3000,
 ) -> int:
     """并发运行前后端, 返回退出码。任一方结束或收到停止信号即整体关闭。"""
-    async with _run_frontend(
-        frontend_dir,
-        backend_port,
-        backend_host=backend_host,
-        frontend_port=frontend_port,
-    ) as npm_proc:
+    async with AsyncExitStack() as stack:
+        npm_proc = await stack.enter_async_context(
+            _run_frontend(
+                frontend_dir,
+                backend_port,
+                backend_host=backend_host,
+                frontend_port=frontend_port,
+            )
+        )
         backend_task = asyncio.create_task(host.run_async(), name="backend")
         frontend_task = asyncio.create_task(npm_proc.wait(), name="frontend")
         stop_task = asyncio.create_task(_wait_for_stop_signal(), name="stop")
-        all_tasks = [backend_task, frontend_task, stop_task]
+        host_stop_task = asyncio.create_task(host.lifetime.stopping.wait(), name="backend-stopping")
+        all_tasks = [backend_task, frontend_task, stop_task, host_stop_task]
 
         try:
             done, pending = await asyncio.wait(
@@ -185,16 +196,14 @@ async def _supervise(
         except KeyboardInterrupt, asyncio.CancelledError:
             # Windows 上没有 add_signal_handler, Ctrl+C 走这条路
             console.info("Shutting down dev environment...")
-            await _cancel_all(all_tasks)
-            return 0
+            done, pending = set(), set(all_tasks)
 
-        await _cancel_all(pending)
+        shutdown_failed = await _stop_dev(host, stack, pending)
 
-        if stop_task in done:
+        if stop_task in done or host_stop_task in done:
             console.info("Shutting down dev environment...")
-            return 0
 
-        exit_code = 0
+        exit_code = int(shutdown_failed)
 
         if frontend_task in done:
             rc = frontend_task.result()
@@ -205,7 +214,7 @@ async def _supervise(
             else:
                 console.info("Frontend dev server stopped.")
 
-        if backend_task in done:
+        if not backend_task.cancelled():
             exc = backend_task.exception()
             if exc is not None:
                 console.error(f"Backend crashed: {exc!r}")
@@ -214,7 +223,37 @@ async def _supervise(
                 console.info("Backend stopped.")
                 exit_code = exit_code or host.exit_code
 
-        return exit_code
+        return exit_code or host.exit_code
+
+
+async def _stop_dev(host: RuntimeHost, stack: AsyncExitStack, tasks: Iterable[asyncio.Task[Any]]) -> bool:
+    host.request_shutdown()
+    assert host.shutdown_deadline is not None
+    deadline = host.shutdown_deadline
+    expired = False
+
+    async def watch() -> None:
+        nonlocal expired
+        await asyncio.sleep(max(0.0, deadline - asyncio.get_running_loop().time()))
+        expired = True
+        structlog.get_logger("shovel.dev").error("dev.shutdown.over_budget", phase="process_cleanup")
+
+    monitor = asyncio.create_task(watch(), name="dev-stop-deadline")
+    # Close Node and its output pumps while the backend drains, not afterwards.
+    frontend = asyncio.create_task(stack.aclose(), name="dev-frontend-stop")
+    try:
+        try:
+            await _cancel_all(tasks)
+        finally:
+            await drain_task(frontend)
+        if not expired and asyncio.get_running_loop().time() > deadline:
+            expired = True
+            structlog.get_logger("shovel.dev").error("dev.shutdown.over_budget", phase="process_cleanup")
+        return expired
+    finally:
+        monitor.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await monitor
 
 
 async def _cancel_all(tasks: Iterable[asyncio.Task[Any]]) -> None:
@@ -222,7 +261,7 @@ async def _cancel_all(tasks: Iterable[asyncio.Task[Any]]) -> None:
     for task in alive:
         task.cancel()
     if alive:
-        await asyncio.wait(alive)
+        await drain_task(asyncio.create_task(asyncio.wait(alive)))
 
 
 async def _wait_for_stop_signal() -> None:
@@ -370,14 +409,18 @@ async def _run_frontend(
     try:
         yield proc
     finally:
-        await _terminate(proc)
-        if pumps:
-            # 给泵一点时间把最后几行冲出来, 超时就砍掉
-            _, still_running = await asyncio.wait(
-                pumps,
-                timeout=_PUMP_DRAIN_TIMEOUT,
-            )
-            await _cancel_all(still_running)
+        try:
+            await _terminate(proc)
+        finally:
+            if pumps:
+                # 给泵一点时间把最后几行冲出来, 超时就砍掉
+                _, still_running = await asyncio.wait(
+                    pumps,
+                    timeout=_PUMP_DRAIN_TIMEOUT,
+                )
+                await _cancel_all(still_running)
+        if proc.returncode is None:
+            raise RuntimeFailure("Frontend process did not exit after termination.")
         trace("frontend.stopped", pid=proc.pid, exit_code=proc.returncode)
 
 

@@ -140,6 +140,10 @@ class VectorSearchTimings:
     total_ms: float = 0
     admission_wait_ms: float = 0
     process_cpu_ms: float = 0
+    host_process_cpu_ms: float = 0
+    ipc_ms: float = 0
+    worker_queue_ms: float = 0
+    worker_lock_wait_ms: float = 0
     native_topk: int = 0
     filter_chars: int = 0
     resource_count: int = 0

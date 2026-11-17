@@ -9,7 +9,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Literal
 
-from pydantic import BaseModel, model_validator
+from pydantic import BaseModel, Field, model_validator
 
 
 class ZvecSettings(BaseModel):
@@ -41,6 +41,7 @@ class ZvecSettings(BaseModel):
 
     #: Zvec 自己的日志目录; 留空回落到 ~/.shovel/logs
     log_dir: str = ""
+    worker_memory_mb: int = Field(default=4096, ge=256, le=65536)
 
     @model_validator(mode="after")
     def _resolve_default_paths(self) -> ZvecSettings:

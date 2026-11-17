@@ -72,65 +72,11 @@ def pdf_excerpt(data: bytes) -> PdfExcerpt:
 
 def _limit_worker() -> int | None:
     if sys.platform == "win32":
-        import ctypes
-        from ctypes import wintypes
+        import os
 
-        class BasicLimits(ctypes.Structure):
-            _fields_ = [
-                ("process_time", ctypes.c_int64),
-                ("job_time", ctypes.c_int64),
-                ("flags", wintypes.DWORD),
-                ("minimum_working_set", ctypes.c_size_t),
-                ("maximum_working_set", ctypes.c_size_t),
-                ("active_processes", wintypes.DWORD),
-                ("affinity", ctypes.c_size_t),
-                ("priority", wintypes.DWORD),
-                ("scheduling", wintypes.DWORD),
-            ]
+        from shovel.runtime.process_guard import create_kill_job
 
-        class IoCounters(ctypes.Structure):
-            _fields_ = [
-                (name, ctypes.c_uint64)
-                for name in ("read_ops", "write_ops", "other_ops", "read_bytes", "write_bytes", "other_bytes")
-            ]
-
-        class ExtendedLimits(ctypes.Structure):
-            _fields_ = [
-                ("basic", BasicLimits),
-                ("io", IoCounters),
-                ("process_memory", ctypes.c_size_t),
-                ("job_memory", ctypes.c_size_t),
-                ("peak_process_memory", ctypes.c_size_t),
-                ("peak_job_memory", ctypes.c_size_t),
-            ]
-
-        kernel = ctypes.WinDLL("kernel32", use_last_error=True)
-        kernel.CreateJobObjectW.argtypes = [ctypes.c_void_p, wintypes.LPCWSTR]
-        kernel.CreateJobObjectW.restype = wintypes.HANDLE
-        kernel.SetInformationJobObject.argtypes = [
-            wintypes.HANDLE,
-            ctypes.c_int,
-            ctypes.c_void_p,
-            wintypes.DWORD,
-        ]
-        kernel.SetInformationJobObject.restype = wintypes.BOOL
-        kernel.GetCurrentProcess.restype = wintypes.HANDLE
-        kernel.AssignProcessToJobObject.argtypes = [wintypes.HANDLE, wintypes.HANDLE]
-        kernel.AssignProcessToJobObject.restype = wintypes.BOOL
-        kernel.CloseHandle.argtypes = [wintypes.HANDLE]
-        job = kernel.CreateJobObjectW(None, None)
-        limits = ExtendedLimits()
-        limits.basic.flags = 0x100 | 0x2000  # process memory limit; kill on job close
-        limits.process_memory = MAX_PDF_MEMORY
-        if not job:
-            raise OSError("PDF memory isolation is unavailable.")
-        if not kernel.SetInformationJobObject(job, 9, ctypes.byref(limits), ctypes.sizeof(limits)):
-            kernel.CloseHandle(job)
-            raise OSError("PDF memory isolation is unavailable.")
-        if not kernel.AssignProcessToJobObject(job, kernel.GetCurrentProcess()):
-            kernel.CloseHandle(job)
-            raise OSError("PDF memory isolation is unavailable.")
-        return int(job)  # Keep the owning handle alive until this child exits.
+        return create_kill_job(os.getpid(), memory_bytes=MAX_PDF_MEMORY)
     if sys.platform == "linux":
         import resource
 

@@ -91,6 +91,41 @@ Development supervises Next.js and the existing Generic Host together: either
 exiting stops both. The ports are configurable through `dev_frontend_port`,
 `dev_http_port`, and `http_port`.
 
+Shutdown immediately closes knowledge-index admission. Shovel's Host adapter
+uses one graceful deadline across service stopping and resource cleanup; dev
+also checks frontend cleanup against that deadline and closes Node concurrently
+with backend draining. Budget overruns are logged when they occur and produce
+a nonzero exit status without replacing the original stop cause.
+The knowledge collection's entire open/query/write/flush/optimize/close lifecycle
+runs in a private child process. Shutdown starts its admission drain immediately,
+in parallel with other cleanup. It reserves up to five seconds (20% of the
+remaining budget) to terminate and reap an unresponsive knowledge worker.
+Writer ownership is released only after the actual child exits; the native I/O
+locks and cancellation-safe drains remain in place. Windows uses a parent-owned
+kill-on-close Job; Linux uses a parent-death signal. A child-owned collection lock
+also prevents another Host or initialization from taking over a surviving writer.
+Console interrupts belong to the Host, not Uvicorn or the knowledge worker.
+
+Forced stops, channel failures and unexpected worker exits are **not successful
+shutdowns**: they produce a nonzero exit status and retain the collection's
+sibling `.worker-state.json` recovery journal. Reopening validates native metadata
+and exposes `recovery_required`; it does not claim full physical integrity or
+silently replay an optimization with an unknown completion receipt. A subsequent
+acknowledged close may be `clean` while that recovery warning remains set.
+Inspect/reconcile uncertain maintenance and verify authoritative SQLite data;
+do not delete the journal to claim recovery.
+
+`[zvec].worker_memory_mb` defaults to 4096 MiB (256-65536), with SDK query and
+optimization thread pools configured to two threads each. Windows additionally
+caps the worker's private committed memory at that budget plus 512 MiB of
+interpreter overhead. The Linux limit is the SDK memory budget, not an OS RSS
+guarantee. These settings do not cap Memory, models or the parent Host.
+Memory stays in its separate existing lifecycle and is not gated by knowledge
+opening or maintenance. The default 60-second overall budget is still **not a
+universal hard process-exit limit**: Memory, network cleanup, process creation/
+reaping and filesystem operations can have their own non-cooperative tails.
+Never force-kill or experiment on an original store to demonstrate the bound.
+
 The workbench exposes Chat and its session tree, Search Documents, Resources,
 Background tasks, Skills, Workflows, Proactive Services, Approval Center,
 Activity, and Settings. Settings contains runtime configuration, native Memory,
@@ -188,6 +223,12 @@ ID, scope/configuration fingerprints, UTC-second query timestamps, individual
 samples and repeat median/maximum query times. Native timing separates worker
 queue, collection lock, `collection.query()`, result conversion and total sink
 time. Query-call time includes SDK processing, not just internal C++ execution.
+For process-backed knowledge, `native_ms`/`query_ms` measure the child's SDK
+query, while `ipc_ms` accounts for the remaining parent RPC/serialization
+overhead. `worker_queue_ms` and `worker_lock_wait_ms` describe the child;
+the existing queue/lock fields and `total_ms` retain the parent-side boundary.
+Process CPU time is the child's CPU; `host_process_cpu_ms` is recorded separately.
+Host-side query trace spans and UTC timestamps include the RPC boundary.
 Process CPU time includes other threads. Activity snapshots identify observed
 foreground/warmup/legacy-operation interference but can miss brief activity.
 

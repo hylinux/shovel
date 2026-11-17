@@ -7,6 +7,7 @@ from contextlib import contextmanager
 from dataclasses import asdict
 from importlib.metadata import version
 from pathlib import Path
+from threading import Lock
 from time import perf_counter, time
 from typing import TYPE_CHECKING, Any, Literal
 
@@ -49,14 +50,16 @@ from shovel.identity.service import (
 from shovel.identity.waits import AuthenticationRequests
 from shovel.interaction.service import InteractionService, NotificationService
 from shovel.memory.experience import ExperienceService
-from shovel.pipeline.sink import IndexOpenTimings, ZvecChunkSink, open_chunk_sink
+from shovel.pipeline.sink import IndexOpenTimings, ZvecChunkSink
 from shovel.platform.authorization import ApprovalAuthorization, ExplicitActions, InputAuthorization
 from shovel.platform.policy import ConfiguredSecurityPolicy
 from shovel.platform.service import PlatformApplication
 from shovel.runtime.diagnostics import trace, trace_context
 from shovel.runtime.errors import RuntimeFailure
+from shovel.runtime.knowledge_worker import KnowledgeWorker
 from shovel.runtime.locking import RuntimeLock
 from shovel.runtime.operation_reads import OperationQueries
+from shovel.runtime.shutdown import drain_task
 from shovel.security.services import ApprovalService, AuthorizationService, SecurityGate
 from shovel.services.resource_service import ResourceService
 from shovel.workflow.service import WorkflowService
@@ -104,8 +107,15 @@ class Runtime:
         self.worker_state = "idle"
         self.worker_error: str | None = None
         self._sink: ZvecChunkSink | None = None
+        self._knowledge_worker = KnowledgeWorker(
+            settings.zvec.knowledge_path,
+            log_dir=settings.zvec.log_dir,
+            memory_mb=settings.zvec.worker_memory_mb,
+        )
         self._sink_lock = asyncio.Lock()
+        self._open_dispatch_lock = Lock()
         self._closing = False
+        self._close_task: asyncio.Task[None] | None = None
         self._knowledge_close_task: asyncio.Task[None] | None = None
         self._maintenance_operation: str | None = None
         self._index_open: IndexOpenTimings | None = None
@@ -256,11 +266,14 @@ class Runtime:
         return self._sink
 
     def knowledge_index_status(self) -> dict[str, Any]:
+        closing = self._closing or self.stopping.is_set()
         if self._sink is not None:
             snapshot = self._sink.admission_snapshot()
+            if closing and snapshot["admission"] != "closed":
+                snapshot["admission"] = "closing"
         else:
             snapshot = {
-                "admission": "closing" if self._closing else "unopened",
+                "admission": "closing" if closing else "unopened",
                 "maintenance": None,
                 "ann_complete": None,
                 "collection": None,
@@ -268,7 +281,8 @@ class Runtime:
                 "active_io": False,
             }
         snapshot["operation_id"] = self._maintenance_operation
-        if self._maintenance_operation is not None and not self._closing:
+        snapshot["worker"] = self._knowledge_worker.snapshot()
+        if self._maintenance_operation is not None and not closing:
             snapshot["admission"] = "maintenance"
             snapshot["maintenance"] = snapshot["maintenance"] or (
                 "opening" if self._sink is None else "checkpoint"
@@ -276,7 +290,7 @@ class Runtime:
         return snapshot
 
     def check_knowledge_index_available(self, *, maintenance_operation_id: str | None = None) -> None:
-        if self._closing:
+        if self._closing or self.stopping.is_set():
             raise RuntimeFailure("Knowledge index is closing.", status=503)
         if (
             self._maintenance_operation is not None
@@ -322,8 +336,7 @@ class Runtime:
         started = perf_counter()
         requested_at = time()
         async with self._sink_lock:
-            if self._closing:
-                raise RuntimeFailure("Knowledge index is closing.", status=503)
+            self.check_knowledge_index_available(maintenance_operation_id=maintenance_operation_id)
             if self._sink is None:
                 measurement = IndexOpenTimings(
                     host_id=self.retrieval_diagnostics.host_id,
@@ -337,11 +350,16 @@ class Runtime:
                 opening = perf_counter()
 
                 def open_sink() -> ZvecChunkSink:
-                    measurement.phase = "worker"
-                    measurement.worker_started_at = time()
-                    measurement.queue_ms = (perf_counter() - opening) * 1000
+                    with self._open_dispatch_lock:
+                        if self._closing or self.stopping.is_set():
+                            raise RuntimeFailure("Knowledge index is closing.", status=503)
+                        measurement.phase = "worker"
+                        measurement.worker_started_at = time()
+                        measurement.queue_ms = (perf_counter() - opening) * 1000
                     trace("index.worker.started", queue_ms=round(measurement.queue_ms, 2))
-                    return open_chunk_sink(self.settings.zvec.knowledge_path, measurement=measurement)
+                    return self._knowledge_worker.open(
+                        self.settings.zvec.knowledge_path, measurement=measurement
+                    )
 
                 with trace_context(
                     host_id=measurement.host_id,
@@ -357,7 +375,7 @@ class Runtime:
                             except asyncio.CancelledError:
                                 measurement.caller_cancelled = True
                         self._sink = task.result()
-                        if self._closing:
+                        if self._closing or self.stopping.is_set():
                             self._sink.stop_admission()
                         if measurement.caller_cancelled:
                             raise asyncio.CancelledError
@@ -392,15 +410,32 @@ class Runtime:
                 }
             self.warmup.states["index"]["state"] = "ready"
             self.warmup.states["index"].pop("error_type", None)
-            if self._closing:
+            if self._closing or self.stopping.is_set():
                 self._sink.stop_admission()
                 raise RuntimeFailure("Knowledge index is closing.", status=503)
             return self._sink
 
-    async def close(self) -> None:
-        self._closing = True
+    def begin_shutdown(self, deadline: float | None = None) -> None:
+        with self._open_dispatch_lock:
+            self._closing = True
+        self.stopping.set()
+        self.wake.set()
+        self.memory_wake.set()
         if self._sink is not None:
             self._sink.stop_admission()
+        self._knowledge_worker.begin_shutdown(
+            deadline if deadline is not None else asyncio.get_running_loop().time() + 60
+        )
+        if self._knowledge_close_task is None:
+            self._knowledge_close_task = asyncio.create_task(self._close_knowledge_index())
+
+    async def close(self) -> None:
+        self.begin_shutdown()
+        if self._close_task is None:
+            self._close_task = asyncio.create_task(self._close(), name="runtime-close")
+        await drain_task(self._close_task)
+
+    async def _close(self) -> None:
         try:
             try:
                 await self.events.stop()
@@ -433,10 +468,13 @@ class Runtime:
                         raise asyncio.CancelledError
 
     async def _close_knowledge_index(self) -> None:
-        async with self._sink_lock:
-            if self._sink is not None:
-                await self._sink.aclose()
-                self._sink = None
+        try:
+            async with self._sink_lock:
+                if self._sink is not None:
+                    await self._sink.aclose()
+                    self._sink = None
+        finally:
+            await self._knowledge_worker.aclose()
 
 
 async def create_runtime(

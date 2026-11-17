@@ -656,7 +656,7 @@ async def test_warmup_worker_and_foreground_share_one_real_index(
             200, json={"created": 1, "choices": [{"message": {"role": "assistant", "content": "Answer"}}]}
         )
 
-    monkeypatch.setattr("shovel.runtime.service.open_chunk_sink", open_index)
+    monkeypatch.setattr(runtime._knowledge_worker, "open", open_index)
     monkeypatch.setattr(runtime.retrieval, "embed_query", embedding)
     runtime.chat.agent._client = httpx.AsyncClient(transport=httpx.MockTransport(answer))
     worker = RuntimeWarmupWorker(lambda: runtime)

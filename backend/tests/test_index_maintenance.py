@@ -191,7 +191,7 @@ async def test_runtime_close_drains_inflight_open_and_prevents_reopening(
         opened.append(sink)
         return sink
 
-    monkeypatch.setattr("shovel.runtime.service.open_chunk_sink", blocked)
+    monkeypatch.setattr(runtime._knowledge_worker, "open", blocked)
     opening = asyncio.create_task(runtime.sink())
     closing = None
     try:
@@ -256,7 +256,7 @@ async def test_maintenance_waiting_for_open_rejects_new_admission_and_shutdown_p
         assert release.wait(10)
         return open_chunk_sink(path, **kwargs)
 
-    monkeypatch.setattr("shovel.runtime.service.open_chunk_sink", blocked)
+    monkeypatch.setattr(runtime._knowledge_worker, "open", blocked)
     operation = await runtime.operations.optimize_index(IndexOptimizeInput(maintenance_window=True))
     worker = asyncio.create_task(runtime.operations.run_once(identifier=operation.id))
     try:

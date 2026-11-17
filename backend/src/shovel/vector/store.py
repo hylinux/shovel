@@ -37,6 +37,9 @@ def init_zvec_runtime(
     *,
     log_dir: Path | str | None = None,
     log_level: zvec.LogLevel | None = None,
+    query_threads: int | None = None,
+    optimize_threads: int | None = None,
+    memory_limit_mb: int | None = None,
 ) -> None:
     """初始化 Zvec 运行时。幂等: 重复调用是空操作。
 
@@ -49,6 +52,13 @@ def init_zvec_runtime(
         return
 
     kwargs: dict[str, Any] = {}
+    for name, value in (
+        ("query_threads", query_threads),
+        ("optimize_threads", optimize_threads),
+        ("memory_limit_mb", memory_limit_mb),
+    ):
+        if value is not None:
+            kwargs[name] = value
 
     if log_dir is not None:
         path = Path(log_dir)
@@ -132,9 +142,12 @@ def init_vector_store(settings: ZvecSettings) -> list[CollectionInfo]:
     results: list[CollectionInfo] = []
 
     for path, schema in specs:
-        info = ensure_collection(path, schema)
-        # init 只负责"建好", 不长期持有句柄: 真正的读写由服务层自己打开
-        info.collection.close()
+        from shovel.runtime.locking import KnowledgeWorkerLock
+
+        with KnowledgeWorkerLock(path):
+            info = ensure_collection(path, schema)
+            # init 只负责"建好", 不长期持有句柄: 真正的读写由服务层自己打开
+            info.collection.close()
         results.append(info)
 
     return results

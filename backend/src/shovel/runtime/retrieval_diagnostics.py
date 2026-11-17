@@ -7,7 +7,7 @@ import platform
 import struct
 from collections.abc import Awaitable, Callable
 from dataclasses import asdict
-from importlib.metadata import version
+from importlib.metadata import PackageNotFoundError, version
 from statistics import median
 from time import perf_counter
 from typing import TYPE_CHECKING, Any
@@ -24,6 +24,24 @@ from shovel.runtime.schemas import RetrievalDiagnosticInput, SearchInput
 
 if TYPE_CHECKING:
     from shovel.runtime.service import Runtime
+
+
+def diagnostic_environment() -> dict[str, Any]:
+    try:
+        zvec_version = version("zvec")
+    except PackageNotFoundError:
+        zvec_version = "not_installed"
+    return {
+        "python": platform.python_version(),
+        "zvec": zvec_version,
+        "os": platform.system(),
+        "machine": platform.machine(),
+        "process_bits": struct.calcsize("P") * 8,
+        "physical_disk_io": "not_collected",
+        "hard_page_faults": "not_collected",
+        "storage_medium": "not_collected",
+        "architecture_emulation": "not_determined",
+    }
 
 
 class RetrievalDiagnostics:
@@ -184,6 +202,8 @@ class RetrievalDiagnostics:
         return {
             "report_version": 1,
             "host_id": self.host_id,
+            "runtime_initialization": runtime.initialization,
+            "index_open": runtime.index_open_snapshot(),
             "diagnostic_id": uuid4().hex,
             "workspace_id": request.workspace_id,
             "configuration_id": request.configuration_id,
@@ -204,18 +224,10 @@ class RetrievalDiagnostics:
             "collection": metadata,
             "sqlite": counts,
             "metadata_ms": metadata_ms,
-            "environment": {
-                "python": platform.python_version(),
-                "zvec": version("zvec"),
-                "os": platform.system(),
-                "machine": platform.machine(),
-                "process_bits": struct.calcsize("P") * 8,
-                "physical_disk_io": "not_collected",
-                "hard_page_faults": "not_collected",
-                "storage_medium": "not_collected",
-                "architecture_emulation": "not_determined",
-            },
+            "environment": runtime.environment,
             "limitations": [
+                "Index opening is the latest actual open in this Host, not this request's index wait.",
+                "Runtime initialization excludes Web listener binding; active open snapshots are partial.",
                 "First observed query is not proof of cold OS or disk caches.",
                 "Process CPU includes other threads; activity snapshots can miss brief concurrent work.",
                 "The budget stops subsequent samples, not in-flight native I/O or final metadata inspection.",

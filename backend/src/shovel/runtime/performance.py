@@ -84,7 +84,7 @@ class RuntimePerformance:
             self.last_foreground = monotonic()
 
     def background_delay(self) -> float:
-        if self.foreground or self.warming:
+        if self.foreground:
             return 1.0
         return max(0.0, self.settings.background_idle_seconds - (monotonic() - self.last_foreground))
 
@@ -149,7 +149,7 @@ class RuntimeWarmup:
     async def run(self) -> None:
         actions: dict[str, Callable[[], Awaitable[object]]] = {
             "chat_model": self.runtime.chat.warm_model,
-            "index": self.runtime.sink,
+            "index": lambda: self.runtime.sink(reason="warmup"),
             "memory_embedding": self.runtime.memory.warmup,
             "rag_embedding": lambda: self.runtime.retrieval.embed_query("Shovel warmup"),
         }

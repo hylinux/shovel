@@ -32,8 +32,8 @@ import asyncio
 import threading
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
-from time import perf_counter, process_time
-from typing import Any, Protocol
+from time import perf_counter, process_time, time
+from typing import Any, Literal, Protocol
 from uuid import uuid4
 
 from shovel.db.base import now_ts
@@ -99,6 +99,32 @@ class NullVectorSink:
 
     async def aclose(self) -> None:
         return None
+
+
+@dataclass
+class IndexOpenTimings:
+    host_id: str
+    reason: Literal["warmup", "on_demand"]
+    attempt: int = 1
+    operation_id: str = field(default_factory=lambda: uuid4().hex)
+    state: str = "opening"
+    phase: str = "queued"
+    requested_at: float = field(default_factory=time)
+    worker_started_at: float | None = None
+    completed_at: float | None = None
+    lock_wait_ms: float = 0
+    queue_ms: float | None = None
+    import_ms: float | None = None
+    runtime_ms: float | None = None
+    collection_ms: float | None = None
+    collection_cpu_ms: float | None = None
+    worker_ms: float | None = None
+    process_cpu_ms: float | None = None
+    elapsed_ms: float | None = None
+    error_type: str | None = None
+    caller_cancelled: bool = False
+    activity_before: dict[str, object] = field(default_factory=dict)
+    activity_after: dict[str, object] = field(default_factory=dict)
 
 
 @dataclass
@@ -445,7 +471,7 @@ def _escape(value: str) -> str:
     return value.replace("\\", "\\\\").replace('"', '\\"')
 
 
-def open_chunk_sink(knowledge_path: str) -> ZvecChunkSink:
+def open_chunk_sink(knowledge_path: str, *, measurement: IndexOpenTimings | None = None) -> ZvecChunkSink:
     """打开知识库 collection 并包成一个 sink。
 
     collection 不存在时**不**自动创建: 建 collection 需要知道维度和
@@ -453,19 +479,46 @@ def open_chunk_sink(knowledge_path: str) -> ZvecChunkSink:
     默认维度, 而它极可能与用户配的 embedding 模型不符。
     """
 
-    from shovel.runtime.diagnostics import trace
+    from shovel.runtime.diagnostics import trace_duration
 
-    started = perf_counter()
-    from shovel.vector.store import init_zvec_runtime, open_collection
-
-    trace("index.import.completed", elapsed_ms=round((perf_counter() - started) * 1000, 2))
-    started = perf_counter()
-    init_zvec_runtime()
-    trace("index.runtime.completed", elapsed_ms=round((perf_counter() - started) * 1000, 2))
-    started = perf_counter()
-    result = ZvecChunkSink(open_collection(knowledge_path))
-    trace("index.collection.completed", elapsed_ms=round((perf_counter() - started) * 1000, 2))
-    return result
+    started, cpu = perf_counter(), process_time()
+    try:
+        if measurement is not None:
+            measurement.phase = "import"
+        with trace_duration("index.import.completed"):
+            importing = perf_counter()
+            try:
+                from shovel.vector.store import init_zvec_runtime, open_collection
+            finally:
+                if measurement is not None:
+                    measurement.import_ms = (perf_counter() - importing) * 1000
+        if measurement is not None:
+            measurement.phase = "runtime"
+        with trace_duration("index.runtime.completed"):
+            initializing = perf_counter()
+            try:
+                init_zvec_runtime()
+            finally:
+                if measurement is not None:
+                    measurement.runtime_ms = (perf_counter() - initializing) * 1000
+        if measurement is not None:
+            measurement.phase = "collection"
+        opening, opening_cpu = perf_counter(), process_time()
+        try:
+            with trace_duration("index.collection.completed"):
+                return ZvecChunkSink(open_collection(knowledge_path))
+        finally:
+            if measurement is not None:
+                measurement.collection_ms = (perf_counter() - opening) * 1000
+                measurement.collection_cpu_ms = (process_time() - opening_cpu) * 1000
+    except BaseException as exc:
+        if measurement is not None:
+            measurement.error_type = type(exc).__name__
+        raise
+    finally:
+        if measurement is not None:
+            measurement.worker_ms = (perf_counter() - started) * 1000
+            measurement.process_cpu_ms = (process_time() - cpu) * 1000
 
 
 __all__ = [

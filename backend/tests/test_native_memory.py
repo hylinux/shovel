@@ -1256,8 +1256,17 @@ async def test_episode_dates_do_not_merge_and_unknown_date_is_not_record_time(ru
     "source,date_value,valid",
     [
         ("I completed migration on 2026-11-03.", "2026-11-03", True),
+        ("请记住\uff1a我在2026年10月12日开始了紫鸢-V74项目。", "2026-10-12", True),
+        ("我在2024年2月29日完成了迁移。", "2024-02-29", True),
+        ("我在2026 年 1 月 2 日完成了迁移。", "2026-01-02", True),
+        ("我在2026年10月12日完成了迁移。", "2026-10-13", False),
+        ("我在2026年2月29日完成了迁移。", "2026-02-28", False),
+        ("我在12026年10月12日完成了迁移。", "2026-10-12", False),
+        ("我在10月12日完成了迁移。", "2026-10-12", False),
+        ("I completed migration on 2026-11-030.", "2026-11-03", False),
         ("I completed migration yesterday.", None, True),
         ("I completed migration yesterday.", "2026-11-03", False),
+        ("我昨天完成了迁移。", "2026-11-03", False),
         ("I completed migration on 2026-02-30.", "2026-02-30", False),
     ],
 )
@@ -1305,7 +1314,7 @@ async def test_extractor_episode_date_requires_calendar_and_exact_evidence(
     else:
         candidates = await extractor.extract(source)
         assert candidates[0].occurred_at == (
-            int(datetime(2026, 11, 3, tzinfo=UTC).timestamp()) if date_value else None
+            int(datetime.fromisoformat(date_value).replace(tzinfo=UTC).timestamp()) if date_value else None
         )
 
 

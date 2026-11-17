@@ -3,10 +3,11 @@ from __future__ import annotations
 import asyncio
 import hashlib
 from collections.abc import AsyncGenerator
+from dataclasses import asdict
 from importlib.metadata import version
 from pathlib import Path
-from time import perf_counter
-from typing import TYPE_CHECKING
+from time import perf_counter, time
+from typing import TYPE_CHECKING, Any, Literal
 
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
@@ -47,11 +48,11 @@ from shovel.identity.service import (
 from shovel.identity.waits import AuthenticationRequests
 from shovel.interaction.service import InteractionService, NotificationService
 from shovel.memory.experience import ExperienceService
-from shovel.pipeline.sink import ZvecChunkSink, open_chunk_sink
+from shovel.pipeline.sink import IndexOpenTimings, ZvecChunkSink, open_chunk_sink
 from shovel.platform.authorization import ApprovalAuthorization, ExplicitActions, InputAuthorization
 from shovel.platform.policy import ConfiguredSecurityPolicy
 from shovel.platform.service import PlatformApplication
-from shovel.runtime.diagnostics import trace
+from shovel.runtime.diagnostics import trace, trace_context
 from shovel.runtime.locking import RuntimeLock
 from shovel.runtime.operation_reads import OperationQueries
 from shovel.security.services import ApprovalService, AuthorizationService, SecurityGate
@@ -85,7 +86,7 @@ class Runtime:
         from shovel.runtime.operations import OperationService
         from shovel.runtime.performance import RuntimePerformance, RuntimeWarmup
         from shovel.runtime.retrieval import RetrievalService
-        from shovel.runtime.retrieval_diagnostics import RetrievalDiagnostics
+        from shovel.runtime.retrieval_diagnostics import RetrievalDiagnostics, diagnostic_environment
         from shovel.runtime.runtime_config import RuntimeConfigurationService
         from shovel.runtime.user_profile import UserProfileService
 
@@ -102,6 +103,9 @@ class Runtime:
         self.worker_error: str | None = None
         self._sink: ZvecChunkSink | None = None
         self._sink_lock = asyncio.Lock()
+        self._index_open: IndexOpenTimings | None = None
+        self._index_open_started = 0.0
+        self.initialization: dict[str, float] = {}
         self.performance: RuntimePerformance = RuntimePerformance(settings)
         self.capabilities = CapabilityRegistry(SQLiteCapabilityRepository(sessions))
         scope = CapabilityScope(
@@ -215,6 +219,7 @@ class Runtime:
         self.operations: OperationService = OperationService(self)
         self.retrieval: RetrievalService = RetrievalService(self)
         self.retrieval_diagnostics: RetrievalDiagnostics = RetrievalDiagnostics(self)
+        self.environment = diagnostic_environment()
         self.memory_tasks: MemoryTaskService = MemoryTaskService(self)
         self.user_profile = UserProfileService(sessions, self.memory.owner)
         self.instructions: AgentInstructionsService = AgentInstructionsService(
@@ -245,29 +250,84 @@ class Runtime:
     def ready_sink(self) -> ZvecChunkSink | None:
         return self._sink
 
-    async def sink(self) -> ZvecChunkSink:
+    def index_open_snapshot(self) -> dict[str, Any] | None:
+        if self._index_open is None:
+            return None
+        snapshot = asdict(self._index_open)
+        if self._index_open.state == "opening":
+            snapshot["elapsed_ms"] = (perf_counter() - self._index_open_started) * 1000
+        return snapshot
+
+    def _index_activity(self) -> dict[str, object]:
+        return {
+            "foreground_runs": self.performance.running,
+            "foreground_waiters": self.performance.foreground - self.performance.running,
+            "legacy_worker_state": self.worker_state,
+            "memory_operation_active": self.memory_tasks.is_active,
+            "warmup_active": self.performance.warming,
+        }
+
+    async def sink(self, *, reason: Literal["warmup", "on_demand"] = "on_demand") -> ZvecChunkSink:
         started = perf_counter()
+        requested_at = time()
         async with self._sink_lock:
             if self._sink is None:
-                trace("index.opening", lock_wait_ms=round((perf_counter() - started) * 1000, 2))
+                measurement = IndexOpenTimings(
+                    host_id=self.retrieval_diagnostics.host_id,
+                    reason=reason,
+                    attempt=self._index_open.attempt + 1 if self._index_open is not None else 1,
+                    requested_at=requested_at,
+                    lock_wait_ms=(perf_counter() - started) * 1000,
+                    activity_before=self._index_activity(),
+                )
+                self._index_open, self._index_open_started = measurement, started
                 opening = perf_counter()
 
                 def open_sink() -> ZvecChunkSink:
-                    trace("index.worker.started", queue_ms=round((perf_counter() - opening) * 1000, 2))
-                    return open_chunk_sink(self.settings.zvec.knowledge_path)
+                    measurement.phase = "worker"
+                    measurement.worker_started_at = time()
+                    measurement.queue_ms = (perf_counter() - opening) * 1000
+                    trace("index.worker.started", queue_ms=round(measurement.queue_ms, 2))
+                    return open_chunk_sink(self.settings.zvec.knowledge_path, measurement=measurement)
 
-                task = asyncio.create_task(asyncio.to_thread(open_sink))
-                try:
-                    self._sink = await asyncio.shield(task)
-                except asyncio.CancelledError:
-                    self._sink = await task
-                    raise
-                except FileNotFoundError as exc:
-                    trace("index.open.failed", error_type=type(exc).__name__)
-                    raise VectorSinkError(
-                        "知识库向量集合不存在,清理意图仍保留。",
-                        hint="运行 shovel init 初始化向量集合;不配置模型也可以使用资源管理和关键词检索。",
-                    ) from exc
+                with trace_context(
+                    host_id=measurement.host_id,
+                    index_open_id=measurement.operation_id,
+                    reason=reason,
+                ):
+                    trace("index.opening", lock_wait_ms=round(measurement.lock_wait_ms, 2))
+                    task = asyncio.create_task(asyncio.to_thread(open_sink))
+                    try:
+                        try:
+                            self._sink = await asyncio.shield(task)
+                        except asyncio.CancelledError:
+                            measurement.caller_cancelled = True
+                            self._sink = await task
+                            raise
+                    except BaseException as exc:
+                        if self._sink is None:
+                            measurement.state = "failed"
+                            measurement.error_type = measurement.error_type or type(exc).__name__
+                            self.warmup.states["index"] = {
+                                "state": "failed",
+                                "error_type": measurement.error_type,
+                            }
+                        if isinstance(exc, FileNotFoundError):
+                            raise VectorSinkError(
+                                "知识库向量集合不存在,清理意图仍保留。",
+                                hint=(
+                                    "运行 shovel init 初始化向量集合;"
+                                    "不配置模型也可以使用资源管理和关键词检索。"
+                                ),
+                            ) from exc
+                        raise
+                    finally:
+                        if self._sink is not None:
+                            measurement.phase, measurement.state = "complete", "ready"
+                        measurement.completed_at = time()
+                        measurement.elapsed_ms = (perf_counter() - started) * 1000
+                        measurement.activity_after = self._index_activity()
+                        trace("index.open.completed", **asdict(measurement))
                 trace("index.opened", elapsed_ms=round((perf_counter() - opening) * 1000, 2))
                 self.warmup.states["index"] = {
                     "state": "ready",
@@ -308,6 +368,7 @@ async def create_runtime(
     sessions: async_sessionmaker[AsyncSession],
     resources: ResourceService,
 ) -> AsyncGenerator[Runtime]:
+    started, started_at = perf_counter(), time()
     with RuntimeLock(settings):
         trace("runtime.initializing")
         await asyncio.to_thread(_prepare_database_path, str(engine.url.database or ""))
@@ -322,6 +383,11 @@ async def create_runtime(
             await runtime.operations.recover()
             await runtime.chat.recover()
             await runtime.attachments.cleanup(force=True)
+            runtime.initialization = {
+                "started_at": started_at,
+                "ready_at": time(),
+                "elapsed_ms": (perf_counter() - started) * 1000,
+            }
             trace(
                 "runtime.ready",
                 model_configured=settings.model.is_configured,

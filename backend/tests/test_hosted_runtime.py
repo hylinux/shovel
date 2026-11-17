@@ -2160,16 +2160,11 @@ async def test_long_memory_failure_keeps_answer_and_reports_durable_task_failure
     assert saved.state == "completed" and saved.content == "Answer remains available."
     assert not any("记忆写入失败" in warning for warning in saved.warnings)
     assert writes == []
-    for _ in range(3):
-        async with runtime.sessions() as session:
-            operation = await session.get(Operation, saved.memory_operation_id)
-            assert operation is not None
-            operation.result = {}
-            await session.commit()
-        assert await runtime.memory_tasks.run_once()
+    assert await runtime.memory_tasks.run_once()
+    assert not await runtime.memory_tasks.run_once()
     operation = await runtime.operations.get(saved.memory_operation_id)
-    assert operation.state == "failed" and operation.attempts == 3 and operation.error
-    assert writes == ["I prefer tea."] * 3
+    assert operation.state == "failed" and operation.attempts == 1 and operation.error
+    assert writes == ["I prefer tea."]
 
 
 async def test_native_session_memory_cleanup_preserves_cross_session_facts(

@@ -474,6 +474,10 @@ def configure_api(
             "memory_configured": rt.memory.configured,
             "memory": await rt.memory.status(),
             "workspace_id": workspace_id(rt.settings),
+            "host_id": rt.retrieval_diagnostics.host_id,
+            "runtime_initialization": rt.initialization,
+            "index_open": rt.index_open_snapshot(),
+            "environment": rt.environment,
             "warmup": rt.warmup.states,
             "chat_capacity": rt.performance.snapshot(),
         }

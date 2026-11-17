@@ -402,7 +402,9 @@ output       = memory_candidates JSON Schema
 其他事实可通过独立 Memory 关键词索引召回；语义召回仍需要
 `[memory.embedder]` 和可用索引。
 
-自动候选不输出 `expires_at`，可提供证据中明确出现的 ISO `occurred_on` 日期，
+自动候选不输出 `expires_at`，可提供 ISO 格式的 `occurred_on` 日期。
+证据必须明确包含完整的 `YYYY-MM-DD` 或中文数字日期 `YYYY年M月D日`；
+中文日期只做确定性的公历格式归一化，原始证据保持不变，不补全年份或推断相对日期。
 程序校验后转换为 UTC 当日零点的 Unix 秒，表示日期精度而非精确发生时刻。
 无明确日期的新事件对外 `occurred_at=null`，记录时间仍独立保留。
 旧事件保留原值并标记 `legacy_unspecified`，不实现任意自然语言时间推理。
@@ -775,8 +777,15 @@ payload 记录源消息、会话、workspace/user、generation 和 run ID。
 
 Memory Worker 是 Generic Host 托管服务，单次执行通过锁串行化，
 按 `queued_at` 和数据库 rowid 顺序取任务。
-前台运行或排队、模型预热、最近一次前台交互后的空闲窗口都会影响调度。
+前台运行或排队、最近一次前台交互后的空闲窗口都会影响调度。
 默认 `performance.background_idle_seconds=5`。
+预热状态仅用于诊断，不再作为全局后台闸门；知识索引预热不阻塞独立的 Memory 提取。
+本地模型预热与提取请求仍通过同一模型准入限制并发，不绕过本地推理资源保护。
+这解除的是应用调度依赖，不承诺隔离 CPU、磁盘及模型资源竞争。
+`GET /api/v1/status` 的 `index_open` 被动保留同 Host 最近一次真实打开的
+状态、原因、分阶段耗时和进程 CPU 增量；状态查询本身不打开或查询知识索引。
+同 Host 检索诊断复用该记录，不能把预热后接近零的索引等待时间当成原始打开耗时。
+Runtime 初始化时间不包含 HTTP 监听器绑定；真实索引基准需另行安排维护窗口。
 
 这是开始执行前的空闲门控，不是抢占式调度：
 已经发出的提取模型请求不会因为用户又发了一条消息而自动抢占或撤回。
@@ -1297,7 +1306,7 @@ uv run --no-sync pytest backend\tests\test_native_memory.py backend\tests\test_m
 | --- | --- | --- |
 | 回答成功但没有新事实 | 消息 `memory_operation_id`、Operation、准入条件、模型输出 | 可能仍排队、被规则排除或正常空候选 |
 | 有事实但新会话想不起来 | `[memory.embedder]`、索引状态、pending、相似度与 Scope | SQLite 保存成功不等于向量已就绪 |
-| 长时间 queued | 前台运行/排队、预热、idle 秒数、retry_at | 前台优先可能延后后台执行 |
+| 长时间 queued | 前台运行/排队、idle 秒数、retry_at、之前的 Memory 任务 | 前台优先可能延后后台执行；知识索引预热不是 Memory 的全局前置条件 |
 | Operation failed | 安全错误信息、模型 schema 能力、输入/输出预算、timeout | 不应伪造成功；排除原因后按条件重试 |
 | Index failed/pending | embedder 维度/身份、目录权限、Outbox last_error | 不直接删除 SQLite 事实；可修复后重试/重建 |
 | 更换模型后召回为空 | model_version、building generation、待处理 intents | 不兼容向量不混用，等待新索引完成 |
@@ -1321,7 +1330,7 @@ Zvec 可重建不代表“随时删除正在使用的索引目录”是安全操
    当前原生 Memory 路径没有构建完整关联图、逐次修订日志或主动订阅推送。
 3. 自动提取仅 semantic/episodic；procedural 只可显式维护，
    不具备自动学习、成功率反馈优化或自动修改 Skills/工作流的闭环。
-4. 自动事件仅校验原文中的明确 ISO 日期，不提供完整时间推理；有效期等可显式管理，
+4. 自动事件仅校验原文中的明确 ISO 或完整中文数字日期，不提供完整时间推理；有效期等可显式管理，
    不存在任意历史时点的完整双时态查询接口。
 5. 对原始事实的宽泛敏感性、真假、自然语言等价和主体归属，没有完备判定器。
 6. 缺失 Memory embedder 时保留 Profile/关键词召回，但没有通用语义替代算法；

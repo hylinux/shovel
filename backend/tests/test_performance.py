@@ -11,7 +11,7 @@ from sqlalchemy import select
 
 from shovel.config.model_settings import DefaultAgentModelSettings, ModelProviderType
 from shovel.config.settings import AppSettings
-from shovel.db.model.runtime import Operation
+from shovel.db.model.runtime import ChatMessage, Conversation, Operation
 from shovel.pipeline.embedding_cache import EmbeddingCache
 from shovel.runtime.agent import ContextBudgetMiddleware
 from shovel.runtime.diagnostics import development_logging
@@ -493,7 +493,7 @@ async def test_warmup_uses_owned_resources_and_reports_failures_without_secrets(
     runtime.settings.memory.embedder.provider = "ollama"
     calls: list[str] = []
 
-    async def index() -> object:
+    async def index(**_kwargs: Any) -> object:
         calls.append("index")
         raise OSError("private-source-path")
 
@@ -520,6 +520,82 @@ async def test_warmup_uses_owned_resources_and_reports_failures_without_secrets(
     assert "private-source-path" not in caplog.text
 
 
+async def test_dated_memory_commits_while_knowledge_index_warmup_is_blocked(
+    runtime: Runtime, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import json
+    from datetime import UTC, datetime
+
+    source = "请记住\uff1a我在2026年10月12日开始了紫鸢-V74项目。"
+    started, release = asyncio.Event(), asyncio.Event()
+
+    async def open_index(**_kwargs: Any) -> object:
+        started.set()
+        await release.wait()
+        return object()
+
+    def respond(_request: httpx.Request) -> httpx.Response:
+        content = json.dumps(
+            {
+                "candidates": [
+                    {
+                        "text": source,
+                        "kind": "episodic",
+                        "subject": "user",
+                        "predicate": "decides",
+                        "object": "紫鸢-V74",
+                        "topic": "project.紫鸢-V74.started",
+                        "confidence": 0.95,
+                        "importance": 0.8,
+                        "evidence": source,
+                        "occurred_on": "2026-10-12",
+                    }
+                ]
+            }
+        )
+        return httpx.Response(
+            200,
+            json={"created": 1, "choices": [{"message": {"role": "assistant", "content": content}}]},
+        )
+
+    runtime.settings.performance.warm_local_models = False
+    runtime.settings.embedding.provider = "ollama"
+    runtime.settings.embedding.model = "embedding"
+    monkeypatch.setattr(runtime, "sink", open_index)
+    runtime.memory.extractor._transport = lambda: httpx.MockTransport(respond)
+    warmup = RuntimeWarmup(runtime)
+    task = asyncio.create_task(warmup.run())
+    try:
+        await asyncio.wait_for(started.wait(), 3)
+        async with runtime.sessions() as session:
+            conversation = Conversation()
+            session.add(conversation)
+            await session.flush()
+            user = ChatMessage(conversation_id=conversation.id, role="user", content=source, sequence=1)
+            session.add(user)
+            await session.flush()
+            identifier = await runtime.memory_tasks.enqueue(
+                session,
+                user,
+                generation=await runtime.memory_tasks.generation(session),
+                run_id="dated-memory-during-warmup",
+            )
+            await session.commit()
+        assert await asyncio.wait_for(runtime.memory_tasks.run_once(respect_foreground=True), 3)
+        operation = await runtime.operations.get(identifier)
+        assert operation.state == "succeeded" and operation.attempts == 1
+        items = await runtime.memory.list()
+        assert len(items) == 1
+        assert items[0]["kind"] == "episodic" and items[0]["state"] == "active"
+        assert items[0]["occurred_at"] == int(datetime(2026, 10, 12, tzinfo=UTC).timestamp())
+        assert items[0]["episode_time_precision"] == "day"
+        assert items[0]["provenance"][0]["evidence"] == source
+        assert not task.done() and runtime.ready_sink() is None
+    finally:
+        release.set()
+        await asyncio.wait_for(task, 3)
+
+
 def test_remote_models_are_never_automatically_warmed(runtime: Runtime) -> None:
     runtime.settings.model.model_provider_type = ModelProviderType.OLLAMA
     runtime.settings.model.base_endpoint = "https://remote.invalid"
@@ -544,7 +620,7 @@ def test_remote_models_are_never_automatically_warmed(runtime: Runtime) -> None:
 
 
 async def test_warmup_worker_and_foreground_share_one_real_index(
-    runtime: Runtime, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    runtime: Runtime, api: httpx.AsyncClient, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     import threading
 
@@ -561,34 +637,75 @@ async def test_warmup_worker_and_foreground_share_one_real_index(
     started, release = asyncio.Event(), threading.Event()
     loop = asyncio.get_running_loop()
 
-    def open_index(path: str) -> Any:
+    def open_index(path: str, **kwargs: Any) -> Any:
         loop.call_soon_threadsafe(started.set)
         if not release.wait(10):
             raise TimeoutError("Test did not release index initialization.")
-        sink = open_chunk_sink(path)
+        sink = open_chunk_sink(path, **kwargs)
         opened.append(sink)
         return sink
 
-    async def forbidden(_query: str) -> Any:
-        pytest.fail("A warming index must be detected before query embedding.")
+    embedded = asyncio.Event()
+
+    async def embedding(_query: str) -> Any:
+        embedded.set()
+        return [1.0, 0.0, 0.0, 0.0], "test"
+
+    def answer(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200, json={"created": 1, "choices": [{"message": {"role": "assistant", "content": "Answer"}}]}
+        )
 
     monkeypatch.setattr("shovel.runtime.service.open_chunk_sink", open_index)
-    monkeypatch.setattr(runtime.retrieval, "embed_query", forbidden)
+    monkeypatch.setattr(runtime.retrieval, "embed_query", embedding)
+    runtime.chat.agent._client = httpx.AsyncClient(transport=httpx.MockTransport(answer))
     worker = RuntimeWarmupWorker(lambda: runtime)
     warming = asyncio.create_task(worker.execute_async(runtime.stopping))
+    strict = None
     try:
         await asyncio.wait_for(started.wait(), 3)
+        status = (await asyncio.wait_for(api.get("/api/v1/status"), 3)).json()
+        opening = status["index_open"]
+        assert opening["state"] == "opening" and opening["reason"] == "warmup"
+        assert opening["host_id"] == status["host_id"]
+        assert status["runtime_initialization"]["ready_at"] <= opening["requested_at"]
+        assert status["environment"]["process_bits"] == 64
+        assert (await asyncio.wait_for(api.get("/api/v1/resources"), 3)).status_code == 200
+        conversation = (await api.post("/api/v1/conversations", json={})).json()["id"]
+        answer_response = await asyncio.wait_for(
+            api.post(
+                f"/api/v1/conversations/{conversation}/messages",
+                json={"content": "Explain a general programming concept", "memory_enabled": False},
+            ),
+            5,
+        )
+        assert answer_response.status_code == 200 and not warming.done()
+        keywords = await asyncio.wait_for(
+            runtime.retrieval.search(SearchInput(query="Shovel", mode="keyword")), 3
+        )
+        assert keywords["mode"] == "keyword" and keywords["items"]
         result = await asyncio.wait_for(
             runtime.retrieval.search(SearchInput(query="Shovel"), allow_keyword_fallback=True), 3
         )
         assert result["mode"] == "keyword" and result["items"] and result["degraded"]
         assert result["index_state"] == "warming" and not warming.done()
         assert runtime.ready_sink() is None
+        assert not embedded.is_set()
+        strict = asyncio.create_task(runtime.retrieval.search(SearchInput(query="Shovel", mode="vector")))
+        await asyncio.wait_for(embedded.wait(), 3)
+        assert not strict.done()
     finally:
         release.set()
         _, sink = await asyncio.gather(warming, runtime.sink())
+        strict_result = await strict if strict is not None else None
     assert opened == [sink] and await runtime.sink() is sink
     assert runtime.warmup.states["index"]["state"] == "ready"
+    assert strict_result is not None and strict_result["mode"] == "vector"
+    snapshot = runtime.index_open_snapshot()
+    assert snapshot is not None and snapshot["operation_id"] == opening["operation_id"]
+    assert snapshot["state"] == "ready" and snapshot["reason"] == "warmup"
+    assert snapshot["elapsed_ms"] >= snapshot["worker_ms"] >= snapshot["collection_ms"] >= 0
+    assert snapshot["process_cpu_ms"] >= snapshot["collection_cpu_ms"] >= 0
     assert (
         await sink.search([1.0, 0.0, 0.0, 0.0], resource_ids=["absent"], model_version="test", limit=1) == []
     )
@@ -602,7 +719,7 @@ async def test_cancelled_warmup_clears_background_admission(
     runtime.warmup = RuntimeWarmup(runtime)
     started = asyncio.Event()
 
-    async def open_index() -> object:
+    async def open_index(**_kwargs: Any) -> object:
         started.set()
         await asyncio.Event().wait()
         return object()

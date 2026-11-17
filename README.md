@@ -132,6 +132,30 @@ query timeout has been added.
 
 ### Same-Host Zvec performance diagnostics
 
+`GET /api/v1/status` passively exposes `host_id`, `runtime_initialization`,
+`environment`, and `index_open`. It does not open or query the knowledge index,
+inspect collection metadata, invoke a provider, or retry a failed opening.
+`index_open` is null until an actual opening starts; afterward it retains the
+latest attempt in this Runtime, including failures. It is not persisted across
+Host restarts. An opening's `operation_id` is a diagnostic ID, not a durable
+background Operation.
+
+The opening snapshot separates application-lock wait, dispatch/thread queue,
+SDK import, SDK runtime initialization, collection opening, and total worker
+and caller wall time. Import timing may be near zero if another component
+already imported the SDK. It includes UTC-second timestamps, `warmup`/`on_demand`
+reason, attempt number, process CPU deltas, and activity before/after opening.
+An in-progress snapshot is partial: null phases have not completed, and
+`elapsed_ms` continues increasing. Failures expose exception classes, not
+messages or paths. Cancellation drains native work; `caller_cancelled` can
+therefore be true while the actual opening finishes `ready`.
+
+`runtime_initialization.elapsed_ms` ends when Runtime initialization/recovery
+finishes; it is **not** process startup or HTTP-listener binding time.
+Knowledge warmup no longer globally gates unrelated background Memory work.
+Foreground-idle gating and shared local-generation admission remain; this is
+dependency isolation, not isolation from CPU, disk, or model contention.
+
 Keep the existing Web Host running and use a separate terminal:
 
 ```powershell
@@ -153,6 +177,11 @@ vector and collection** for serial native repeats, including SQLite candidate
 revalidation. Resource selection is frozen and rechecked between samples;
 revocation aborts the run. Only one diagnostic batch can run per Host.
 Metadata is inspected **after** the queries so it cannot warm the first sample.
+
+The report includes the same historical `index_open` and
+`runtime_initialization` snapshots. In contrast,
+`samples[].phases_ms.index_ready_ms` measures that query's remaining index wait;
+a near-zero value after warmup does not mean collection opening was fast.
 
 The report contains a stable `host_id` for this Runtime, a per-run diagnostic
 ID, scope/configuration fingerprints, UTC-second query timestamps, individual
@@ -204,6 +233,24 @@ are explicitly marked uncollected/undetermined. Correlate report timestamps with
 Windows Performance Monitor or an independently approved OS trace when needed;
 process I/O is not physical disk I/O. Diagnostics do not clear OS caches,
 compact/rebuild collections, change HNSW parameters or stop other tasks.
+
+For an offline synthetic baseline, the diagnostics tests use a separate
+one-vector, four-dimensional collection: three sequential fresh processes
+open/close it, and two fixture-query cases each repeat five times in one
+Runtime. Run from the repository root:
+
+```powershell
+uv run pytest backend\tests\test_retrieval_diagnostics.py::test_synthetic_native_open_baseline_across_three_processes backend\tests\test_retrieval_diagnostics.py::test_real_sdk_diagnostic_is_serial_sanitized_and_uses_actual_metadata --no-cov -q -rP
+```
+
+These are correctness/measurement fixtures, not a representative large-library
+performance target. Native-opening timings exclude Python process startup,
+and OS cache state is uncontrolled. For a real baseline, arrange an approved
+maintenance window: retain the same data/configuration/SDK/machine, capture
+status and same-Host reports over at least three orderly Host starts, and use
+at least five query repeats. Report medians/ranges rather than a tiny-sample
+P95. Never open an active Host's collection in another process, copy a live
+writing collection, or invoke real embedding diagnostics without approval.
 
 ### Python-only local production serving
 

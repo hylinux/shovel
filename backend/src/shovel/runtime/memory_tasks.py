@@ -72,6 +72,10 @@ class MemoryTaskService:
         self._control_lock = asyncio.Lock()
         self._active: Operation | None = None
 
+    @property
+    def is_active(self) -> bool:
+        return self._active is not None
+
     async def generation(self, session: AsyncSession) -> int:
         value = await session.scalar(
             select(MemoryEpoch.generation).where(

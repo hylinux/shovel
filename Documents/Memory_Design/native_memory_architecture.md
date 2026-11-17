@@ -645,6 +645,13 @@ predicate / object，事件保留明确时间、时间来源/精度，事实保�
 或一般建议。冻结候选与真实最终回答评估见
 [Memory 基线](memory_baseline.md#2026-11-09-支持性准入与冻结语料回答评估)；
 该小样本结果不是生产质量保证。
+普通项目启动/完成与项目评估的日期问句也走支持性检查，不要求必须属于
+“评估”主题。中英文项目名称的前置/后置形式共享实体解析；事件使用完整、
+单一的句式绑定动作、目标与参与者，不能把“项目启动”和“项目评估启动”
+互相替代。第一人称问句要求摘要明确说明参与者是当前用户，Scope 所有权
+不能补足缺失的参与者；不支持的第三方、假设和复合句式保守返回 unknown。
+日期仍要求明确来源及 day/instant 精度。既有事件摘要在读取时解析，不修改
+持久化身份、指纹或向量，不需要全量重提取或重建索引。
 用户属性不是文档引用，资料中的账号、人名或路径不能替代当前用户身份。
 文档/摘要参考与长期用户 Memory 分成两条数据消息；长期 Memory 紧邻本轮问题，
 明确标注跨 Session 来源，避免大段文档把用户背景埋在同一份参考 JSON 中。
@@ -854,7 +861,7 @@ HTTP 接口或运行权限；原有索引故障 warning/error 仍保留安全的
 | `memory.extraction.committed` | `source_eligible`、`proposed_candidates`、`admitted_candidates`、`committed_records`、`pending_review` 区分源过滤、模型提议、本地准入与提交。提交数是返回记录数，可能包含幂等复用，不等于新插入数 |
 | `memory.index.completed` | `attempted`、`upserted`、`deleted`、`failed`、`pending_batch`、`expired` 及耗时；只有 sink 成功且 Outbox 已确认才计成功。`pending_batch` 是一次有界查询的数量，不保证是总积压 |
 | `memory.index.failed` | 初始化/维护无法完成时仅记异常类型；不是成功回执 |
-| `memory.recall.completed` | 复用领域层阈值、无效向量、支持性及预算计数，另带 `vector_enabled`、`vector_fallback`。索引失败后的关键词降级也输出完成事件；没有配置索引不等于发生故障降级 |
+| `memory.recall.completed` | 复用领域层阈值、无效向量、支持性及预算计数，另带 `vector_enabled`、`vector_fallback`。支持性拒绝增加固定 `support_rejected_*` 计数：`unresolved_entity`、`unverified_conditions`、`unsupported_question`、`event_binding`、`event_actor`、`event_time`；只计对应分支，不包含原始问句或事实。索引失败后的关键词降级也输出完成事件；没有配置索引不等于发生故障降级 |
 | `agent.context.ready` | `recalled_memories` 与 `memory_budget_skipped` 区分领域召回和最终 Agent 预算；`memories`/`memory_status` 仍表示实际保留的上下文 |
 | `memory.operation.completed` | 数据库实际状态、尝试次数、本次耗时、安全失败字段与下一次退避秒数；临时失败显示 `queued`，不可重试或耗尽重试显示 `failed`，已原子提交的回执优先 |
 

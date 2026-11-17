@@ -162,7 +162,8 @@ async def test_baseline_exercises_real_storage_and_distinguishes_model_errors_fr
     assert metrics["false_positive"] == 0
     assert metrics["false_negative"] == (2 if invalid_output else 0)
     assert metrics["error_count"] == int(invalid_output)
-    assert metrics["recall"] == (0.75 if invalid_output else 1)
+    expected_count = sum(len(case.expected) for case in dataset.cases)
+    assert metrics["recall"] == ((expected_count - 2) / expected_count if invalid_output else 1)
     assert len(calls) == sum(row["extractor_eligible"] for row in result["extraction"]["cases"])
     for phase in ("gold_recall", "end_to_end_recall"):
         assert set(result[phase]["metrics"]) == {"keyword_profile", "vector", "hybrid"}

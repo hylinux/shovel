@@ -4,11 +4,13 @@ import asyncio
 import hashlib
 import json
 import os
+import threading
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
 
 import httpx
 import pytest
@@ -18,10 +20,11 @@ from scripts.memory_support_evaluation import AnswerTransport, source_fingerprin
 
 from shovel.config.settings import AppSettings
 from shovel.db.model.runtime import Operation
-from shovel.memory.domain import MemoryCandidate, MemoryState, Provenance
+from shovel.memory.domain import MemoryCandidate, MemoryState, MemoryType, Provenance
 from shovel.runtime.api import configure_api
 from shovel.runtime.diagnostics import development_logging
 from shovel.runtime.service import Runtime
+from shovel.vector.store import init_vector_store, open_collection
 from test_hosted_runtime import settings_at
 from test_memory_p0_live import _free_text_answer_correct
 from test_native_memory import vectors
@@ -73,7 +76,9 @@ async def _running(
 
         def model(request: httpx.Request) -> httpx.Response:
             supported = [
-                item["object"]
+                datetime.fromtimestamp(item["occurred_at"], UTC).date().isoformat()
+                if item["kind"] == "episodic"
+                else item["object"]
                 for payload in _references(json.loads(request.content))
                 for item in payload.get("memory", [])
                 if item.get("answer_support") == "supported"
@@ -347,6 +352,137 @@ async def test_live_restart_correction_and_forget_lifecycle(tmp_path: Path) -> N
     settings = isolated_settings(AppSettings.load(Path(path)), tmp_path)
     assert settings.model.is_configured and settings.memory.embedder.is_configured
     await _lifecycle(tmp_path, settings, live=True)
+
+
+async def _project_event(root: Path, settings: AppSettings, *, live: bool) -> None:
+    source = "请记住\uff1a我在2026年10月12日启动了测试项目 WARMUP-LIVE-36-X。"
+    questions = [
+        ("When did I start the WARMUP-LIVE-36-X project?", True),
+        ("我是什么时候启动测试项目 WARMUP-LIVE-36-X 的\uff1f", True),
+        ("When did Alice start project WARMUP-LIVE-36-X?", False),
+        ("When did I start project OTHER-MEMORY-37?", False),
+        ("When did I finish project WARMUP-LIVE-36-X?", False),
+    ]
+    init_vector_store(settings.zvec)
+    requests: list[list[dict[str, Any]]] = []
+    report = _report(settings, live, _fingerprints())
+    report["reads"] = []
+
+    async def read(runtime: Runtime, api: httpx.AsyncClient, question: str, expected: bool) -> None:
+        diagnostics: dict[str, int] = {}
+        recalled = await runtime.memory.application.retrieve(
+            question, record_access=False, diagnostics=diagnostics
+        )
+        answer = await _send(api, question)
+        supported = [
+            item
+            for payload in requests[-1]
+            for item in payload.get("memory", [])
+            if item.get("answer_support") == "supported"
+        ]
+        report["reads"].append(
+            {
+                "question": question,
+                "recalled_ids": [item["id"] for item in recalled],
+                "diagnostics": diagnostics,
+                "supported": supported,
+                "answer": answer["content"],
+            }
+        )
+        assert [item["id"] for item in supported] == ([fact_id] if expected else [])
+        assert all(
+            payload["memory_status"] == ("supported" if expected else "no_supported_fact")
+            for payload in requests[-1]
+            if "memory_status" in payload
+        )
+        assert _free_text_answer_correct(answer["content"], "2026-10-12" if expected else None)
+        if not expected:
+            assert not _free_text_answer_correct(answer["content"], "2026-10-12")
+        for item in supported:
+            assert item["occurred_at"] == 1791763200 and item["episode_time_precision"] == "day"
+        operation_id = answer["memory_operation_id"]
+        if operation_id:
+            assert await runtime.memory_tasks.run_once()
+            receipt = await runtime.operations.get(operation_id)
+            assert receipt.state == "succeeded" and receipt.result["memories"] == 0
+
+    try:
+        async with _running(settings, root, live, requests) as (runtime, api):
+            if not live:
+                runtime.memory.extractor.extract = AsyncMock(
+                    side_effect=lambda text, *_args: (
+                        [
+                            MemoryCandidate(
+                                "用户在2026年10月12日启动了测试项目 WARMUP-LIVE-36-X。",
+                                kind=MemoryType.EPISODIC,
+                                object="WARMUP-LIVE-36-X",
+                                evidence=source,
+                                occurred_at=1791763200,
+                                time_precision="day",
+                            )
+                        ]
+                        if text == source
+                        else []
+                    )
+                )
+            entered, release = asyncio.Event(), threading.Event()
+            loop = asyncio.get_running_loop()
+
+            def blocked(path: str) -> Any:
+                if Path(path).resolve() == Path(settings.zvec.knowledge_path).resolve():
+                    loop.call_soon_threadsafe(entered.set)
+                    if not release.wait(300):
+                        raise TimeoutError("Isolated knowledge-opening barrier was not released.")
+                return open_collection(path)
+
+            with patch("shovel.vector.store.open_collection", blocked):
+                warming = asyncio.create_task(runtime.sink(reason="warmup"))
+                try:
+                    await asyncio.wait_for(entered.wait(), 20)
+                    first = await _send(api, source)
+                    operation_id = first["memory_operation_id"]
+                    assert operation_id and await runtime.memory_tasks.run_once()
+                    assert (await runtime.operations.get(operation_id)).state == "succeeded"
+                    facts = await runtime.memory.list()
+                    assert len(facts) == 1 and facts[0]["kind"] == "episodic"
+                    report["stored_fact"] = facts[0]
+                    fact_id = facts[0]["id"]
+                    await _drain(runtime)
+                    for question, expected in questions:
+                        await read(runtime, api, question, expected)
+                    assert not warming.done() and runtime.ready_sink() is None
+                    report["memory_during_knowledge_open"] = await runtime.memory.status()
+                finally:
+                    release.set()
+                    await asyncio.wait_for(warming, 30)
+            await read(runtime, api, questions[0][0], True)
+        async with _running(settings, root, live, requests) as (runtime, api):
+            assert (await runtime.operations.get(operation_id)).state == "succeeded"
+            for question, expected in questions[:2]:
+                await read(runtime, api, question, expected)
+            assert [item["id"] for item in await runtime.memory.list()] == [fact_id]
+        assert _fingerprints() == report["source_sha256"]
+        report["complete"] = True
+    finally:
+        _save(root, live, "memory-project-event", report)
+
+
+async def test_project_event_reaches_agent_during_knowledge_open_and_after_restart(tmp_path: Path) -> None:
+    await _project_event(tmp_path, settings_at(tmp_path), live=False)
+
+
+@pytest.mark.live
+@pytest.mark.skipif(
+    os.environ.get("SHOVEL_RUN_LIVE_TESTS") != "1", reason="Explicit live endpoint opt-in required"
+)
+async def test_live_project_event_reaches_agent_during_knowledge_open_and_after_restart(
+    tmp_path: Path,
+) -> None:
+    path = os.environ.get("SHOVEL_LIVE_CONFIG")
+    assert path, "Select an existing settings.toml with SHOVEL_LIVE_CONFIG."
+    settings = isolated_settings(AppSettings.load(Path(path)), tmp_path)
+    assert settings.model.is_configured and settings.memory.embedder.is_configured
+    await _project_event(tmp_path, settings, live=True)
 
 
 async def _profile_race(root: Path, settings: AppSettings, *, live: bool, clear: bool, review: bool) -> None:

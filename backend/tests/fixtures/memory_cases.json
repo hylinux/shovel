@@ -1,5 +1,5 @@
 {
-  "version": "memory-baseline-v1",
+  "version": "memory-baseline-v2",
   "cases": [
     {
       "id": "english-profile",
@@ -53,6 +53,17 @@
         {"key": "episode", "text": "2026-10-12 用户完成了 Cedar 项目的离线评估。", "kind": "episodic", "object": "Cedar", "occurred_on": "2026-10-12"}
       ],
       "queries": [{"text": "Cedar 项目的离线评估何时完成？", "expected": ["episode"]}]
+    },
+    {
+      "id": "project-start",
+      "source": "我在2026年10月12日启动了测试项目 WARMUP-LIVE-36-X。",
+      "expected": [
+        {"key": "project-start", "text": "用户在2026年10月12日启动了测试项目 WARMUP-LIVE-36-X。", "kind": "episodic", "object": "WARMUP-LIVE-36-X", "occurred_on": "2026-10-12"}
+      ],
+      "queries": [
+        {"text": "When did I start the WARMUP-LIVE-36-X project?", "expected": ["project-start"]},
+        {"text": "我是什么时候启动测试项目 WARMUP-LIVE-36-X 的？", "expected": ["project-start"]}
+      ]
     },
     {"id": "question", "source": "Which database should I use for a new project?", "expected": [], "queries": []},
     {"id": "speculation", "source": "I might try snowboarding someday, but I have not decided.", "expected": [], "queries": []},

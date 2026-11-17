@@ -1047,7 +1047,7 @@ async def test_chat_uses_compact_memory_with_explicit_episode_time(
             runtime.memory.owner,
             [
                 MemoryCandidate(
-                    "Completed the Cedar evaluation.",
+                    "The user completed the Cedar evaluation.",
                     kind=MemoryType.EPISODIC,
                     occurred_at=occurred_at,
                     time_precision="day",

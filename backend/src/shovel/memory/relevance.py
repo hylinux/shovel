@@ -5,6 +5,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 from enum import StrEnum
+from typing import Literal
 
 from shovel.db.search_terms import keyword_terms
 from shovel.memory.domain import PROFILE_TOPICS, MemoryRecord, MemoryType, normalize
@@ -84,6 +85,15 @@ _FUNCTION_WORDS = frozenset(
         "about",
         "favorite",
         "favourite",
+        "start",
+        "started",
+        "begin",
+        "began",
+        "finish",
+        "finished",
+        "complete",
+        "completed",
+        "offline",
     }
 )
 _CHINESE_FUNCTIONS = re.compile(r"什么|哪个|哪些|哪种|我的|我在|我用|我|使用|喜欢|请问|告诉|记得|喝")
@@ -92,6 +102,7 @@ _CHINESE_ENTITY_CONTEXT = r"(?:(?:我(?:们)?|用户)(?:在|的)\s*)?"
 _ENTITY = re.compile(
     rf"\b(?P<kind>project|repository|repo|team|customer|client)\s+"
     rf"(?:(?:named|called|is)\s+)?[\"']?(?P<name>{_NAME})"
+    rf"|(?P<prefix>项目|仓库|团队|客户)\s*[“「\"']?(?P<after>{_NAME})"
     rf"|(?<![\w.-]){_CHINESE_ENTITY_CONTEXT}(?P<before>{_NAME})\s*(?P<chinese>项目|仓库|团队|客户)"
     rf"|[“「\"](?P<quoted>[^”」\"]{{1,32}})[”」\"]\s*(?P<quoted_kind>项目|仓库|团队|客户)",
     re.IGNORECASE,
@@ -121,12 +132,14 @@ _NAMES = rf"{_NAME}(?:{_SEPARATOR}{_NAME})+"
 _ENTITY_LIST = re.compile(
     rf"\b(?P<kind>{_ENTITY_KIND})\s+(?P<after>{_NAMES})"
     rf"|(?<![\w.-]){_CHINESE_ENTITY_CONTEXT}(?P<before>{_NAMES})"
-    rf"\s*(?P<suffix>项目|仓库|团队|客户|\b(?:{_ENTITY_KIND})\b)",
+    rf"\s*(?P<suffix>项目|仓库|团队|客户|\b(?:{_ENTITY_KIND})\b)"
+    rf"|(?P<prefix>项目|仓库|团队|客户)\s*(?P<following>{_NAMES})",
     re.IGNORECASE,
 )
 _ALIAS = re.compile(rf"(?:also known as|aka|alias|别名(?:为|是)?)\s+[\"']?({_NAME})", re.IGNORECASE)
 _NAMED_EVALUATION = re.compile(
-    r"\b([A-Z][A-Za-z0-9_.-]{0,63})\s+(?:offline\s+)?(?:evaluation|benchmark|assessment)\b"
+    r"\b([A-Z][A-Za-z0-9_.-]{0,63})\s+(?:offline\s+)?(?:evaluation|benchmark|assessment)\b",
+    re.I,
 )
 _MIXED_EVALUATION = re.compile(r"(?<![a-zA-Z0-9_.-])([a-zA-Z][a-zA-Z0-9_.-]{0,63})\s*(?:离线)?(?:评估|测评)")
 
@@ -172,6 +185,42 @@ _ACTIONS = {
     "start": r"\b(?:begin|began|start(?:ed)?)\b|开始|启动",
     "finish": r"\b(?:finish(?:ed)?|complet(?:e|ed))\b|完成|结束",
 }
+_EVENT_PROJECT = (
+    rf"(?:the\s+)?(?:(?:test\s+)?project\s+[\"']?{_NAME}[\"']?|{_NAME}\s+project"
+    rf"|(?:测试)?项目\s*[“「\"']?{_NAME}[”」\"']?|{_NAME}\s*项目)"
+)
+_EVENT_EVALUATION = (
+    rf"(?:(?:the\s+)?(?:offline\s+)?(?:evaluation|benchmark|assessment)\s+(?:for|of)\s+{_EVENT_PROJECT}"
+    rf"|(?:the\s+)?{_NAME}\s+(?:offline\s+)?(?:evaluation|benchmark|assessment)"
+    rf"|{_EVENT_PROJECT}\s*的?\s*(?:离线)?(?:评估|测评)"
+    rf"|{_NAME}\s*(?:离线)?(?:评估|测评))"
+)
+_EVENT_ACTOR = r"(?:i|the user|user)"
+_EVENT_VERB = rf"(?P<verb>{'|'.join(_ACTIONS.values())})(?:了)?"
+_EVENT_QUESTIONS = tuple(
+    re.compile(pattern, re.I)
+    for pattern in (
+        rf"when\s+did\s+(?P<actor>{_EVENT_ACTOR})\s+{_EVENT_VERB}\s+(?P<target>.+)",
+        rf"when\s+(?:did|was)\s+(?P<target>.+?)\s+{_EVENT_VERB}",
+        rf"(?P<actor>我|用户)\s*(?:是|在)?(?:什么时候|何时|哪天)\s*{_EVENT_VERB}\s*(?P<target>.+?)\s*的?",
+        rf"(?P<target>.+?)\s*(?:是|在)?(?:什么时候|何时|哪天)\s*{_EVENT_VERB}\s*的?",
+    )
+)
+_EVENT_STATEMENTS = tuple(
+    re.compile(pattern, re.I)
+    for pattern in (
+        rf"(?P<actor>{_EVENT_ACTOR})\s+(?:has\s+)?{_EVENT_VERB}\s+(?P<target>.+)",
+        rf"(?P<actor>我|用户)\s*{_EVENT_VERB}\s*(?P<target>.+)",
+        rf"(?P<target>.+?)\s+(?:was\s+)?{_EVENT_VERB}(?:\s+by\s+(?P<actor>{_EVENT_ACTOR}))?",
+        rf"{_EVENT_VERB}\s+(?P<target>.+)",
+        rf"(?P<target>.+?)\s*{_EVENT_VERB}",
+    )
+)
+_EVENT_DATE = re.compile(
+    r"(?<![a-z0-9_.-])(?:on\s+|在\s*|于\s*)?"
+    r"(?:\d{4}-\d{2}-\d{2}|\d{4}\s*年\s*\d{1,2}\s*月\s*\d{1,2}\s*日)(?![0-9-])",
+    re.I,
+)
 _NEGATION = re.compile(
     r"\b(?:not|never|neither|nor|without|no(?:\s+longer)?)\b|\b[a-z]+n['\u2019]t\b"
     r"|没有|并未|未曾|从未|从不|不再|不(?:使用|用|是|曾)|没(?:使用|用|完成|开始)|未(?:使用|用|完成|开始)",
@@ -257,8 +306,8 @@ def _topic_entities(topic: str, explicit: dict[str, set[str]]) -> dict[str, set[
 def entities(text: str, topic: str = "", *, include_aliases: bool = True) -> dict[str, set[str]]:
     result: dict[str, set[str]] = {}
     for match in _ENTITY.finditer(text):
-        kind = match["kind"] or match["chinese"] or match["quoted_kind"]
-        value = normalize(match["name"] or match["before"] or match["quoted"]).rstrip(".")
+        kind = match["kind"] or match["prefix"] or match["chinese"] or match["quoted_kind"]
+        value = normalize(match["name"] or match["after"] or match["before"] or match["quoted"]).rstrip(".")
         if value not in _FUNCTION_WORDS:
             result.setdefault(_KINDS.get(kind.casefold(), kind.casefold()), set()).add(value)
     for match in _SUFFIX_ENTITY.finditer(text):
@@ -267,8 +316,8 @@ def entities(text: str, topic: str = "", *, include_aliases: bool = True) -> dic
             kind = match["kind"].casefold()
             result.setdefault(_KINDS.get(kind, kind), set()).add(value)
     for match in _ENTITY_LIST.finditer(text):
-        kind = (match["kind"] or match["suffix"]).casefold()
-        names = re.split(_SEPARATOR, match["after"] or match["before"], flags=re.I)
+        kind = (match["kind"] or match["suffix"] or match["prefix"]).casefold()
+        names = re.split(_SEPARATOR, match["after"] or match["before"] or match["following"], flags=re.I)
         result.setdefault(_KINDS.get(kind, kind), set()).update(
             normalize(name).rstrip(".") for name in names if normalize(name) not in _FUNCTION_WORDS
         )
@@ -295,6 +344,39 @@ def query_terms(query: str) -> list[str]:
 
 
 @dataclass(frozen=True)
+class Event:
+    actor: str | None
+    target_kind: str
+    target: str
+
+
+def event_statement(text: str, *, question: bool = False) -> Event | None:
+    """Bind one complete event clause; ownership never supplies a missing actor."""
+    if not question:
+        text = _EVENT_DATE.sub("", text, count=1)
+    text = text.strip(" \t\r\n.,;:!?。\uff0c\uff1b\uff1a\uff01\uff1f")
+    for pattern in _EVENT_QUESTIONS if question else _EVENT_STATEMENTS:
+        if match := pattern.fullmatch(text):
+            target = match["target"].strip()
+            if re.fullmatch(_EVENT_EVALUATION, target, re.I):
+                kind = "evaluation"
+            elif re.fullmatch(_EVENT_PROJECT, target, re.I):
+                kind = "project"
+            else:
+                continue
+            names = entities(target, include_aliases=False)
+            if set(names) != {"project"} or len(names["project"]) != 1:
+                continue
+            actor = match.groupdict().get("actor")
+            if actor is not None:
+                actor = normalize(actor)
+                if actor in {"i", "user", "the user", "我", "用户"}:
+                    actor = "user"
+            return Event(actor, kind, next(iter(names["project"])))
+    return None
+
+
+@dataclass(frozen=True)
 class Query:
     entities: dict[str, set[str]]
     domains: frozenset[str]
@@ -309,6 +391,7 @@ class Query:
     audience: str | None
     personal_actor: bool
     terms: tuple[str, ...]
+    event: Event | None = None
 
     @classmethod
     def parse(cls, text: str) -> Query:
@@ -327,13 +410,14 @@ class Query:
         actions = relation_matches(text, _ACTIONS)
         predicate = next(iter(predicates)) if len(predicates) == 1 else None
         action = next(iter(actions)) if len(actions) == 1 else None
-        asks_time = bool(re.search(r"\bwhen\b|何时|什么时候|日期", text, re.I))
+        asks_time = bool(re.search(r"\bwhen\b|何时|什么时候|哪天|日期", text, re.I))
+        event = event_statement(text, question=True) if asks_time and action else None
         actor = re.search(r"\b(?:do|does|did)\s+(.+?)\s+(?:use|prefer|like|dislike)\b", text, re.I)
         unknown_actor = bool(
             actor and normalize(actor[1]) not in {"i", "the user"} and not entities(actor[1])
         )
         known_request = bool(
-            (asks_time and action and "evaluation" in domains)
+            event is not None
             or re.search(
                 r"\b(?:what|which)\s+(?:(?:is|are|my|the|a|an|preferred|favorite|favourite|programming)\s+)*"
                 r"(?:database|drink|beverage|tea|coffee|application|tool|notebook|notes|airline|carrier|language|name|occupation|profession|job|timezone)\b"
@@ -374,10 +458,32 @@ class Query:
                 )
             ),
             tuple(query_terms(text)),
+            event,
         )
 
 
-def assess(query: Query, record: MemoryRecord, *, semantic_match: bool) -> Support:
+def assess(
+    query: Query,
+    record: MemoryRecord,
+    *,
+    semantic_match: bool,
+    diagnostics: dict[str, int] | None = None,
+) -> Support:
+    def reject(
+        reason: Literal[
+            "unresolved_entity",
+            "unverified_conditions",
+            "unsupported_question",
+            "event_binding",
+            "event_actor",
+            "event_time",
+        ],
+    ) -> Support:
+        if diagnostics is not None:
+            key = f"support_rejected_{reason}"
+            diagnostics[key] = diagnostics.get(key, 0) + 1
+        return Support.UNKNOWN
+
     if record.subject == "user" and record.predicate in PROFILE_TOPICS:
         return (
             Support.SUPPORTED
@@ -389,8 +495,10 @@ def assess(query: Query, record: MemoryRecord, *, semantic_match: bool) -> Suppo
         )
     if query.profiles:
         return Support.RELATED
-    if query.unresolved_entity or query.unverified_conditions:
-        return Support.UNKNOWN
+    if query.unresolved_entity:
+        return reject("unresolved_entity")
+    if query.unverified_conditions:
+        return reject("unverified_conditions")
     if query.personal_actor and record.kind == MemoryType.SEMANTIC and record.subject != "user":
         return Support.RELATED
     body = " ".join((record.text, record.object, record.topic))
@@ -433,7 +541,7 @@ def assess(query: Query, record: MemoryRecord, *, semantic_match: bool) -> Suppo
         if query.audience not in audiences:
             return Support.CONFLICT
     if query.question and not query.known_request:
-        return Support.UNKNOWN
+        return reject("unsupported_question")
     if query.predicate and (record.kind != MemoryType.SEMANTIC or record.predicate != query.predicate):
         return Support.RELATED
     if query.domains and not any(
@@ -443,12 +551,19 @@ def assess(query: Query, record: MemoryRecord, *, semantic_match: bool) -> Suppo
     if query.asks_time or query.event_action:
         if record.kind != MemoryType.EPISODIC:
             return Support.RELATED
+        actual_event = event_statement(record.text)
+        if query.event is None or actual_event is None or query.event.target_kind != actual_event.target_kind:
+            return reject("event_binding")
+        if query.event.target != actual_event.target:
+            return Support.CONFLICT
+        if query.event.actor is not None and query.event.actor != actual_event.actor:
+            return reject("event_actor")
         if query.asks_time and (
             record.occurred_at is None
             or record.episode_time_source not in ("explicit", "user")
             or record.episode_time_precision not in ("day", "instant")
         ):
-            return Support.UNKNOWN
+            return reject("event_time")
         if query.event_action and not re.search(_ACTIONS[query.event_action], record.text, re.I):
             return Support.RELATED
     if query.domains or query.entities or query.predicate or query.asks_time:

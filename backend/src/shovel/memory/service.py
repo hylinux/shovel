@@ -304,7 +304,12 @@ class MemoryService:
             found[identifier] = (record, rank(record, min(1, score * 61 / 2), now))
         intent = Query.parse(query)
         verdicts = {
-            identifier: assess(intent, record, semantic_match="vector" in channels[identifier])
+            identifier: assess(
+                intent,
+                record,
+                semantic_match="vector" in channels[identifier],
+                diagnostics=diagnostics,
+            )
             for identifier, (record, _) in found.items()
         }
         rejected = {verdict: sum(v == verdict for v in verdicts.values()) for verdict in Support}

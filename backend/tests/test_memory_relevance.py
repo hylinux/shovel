@@ -476,6 +476,148 @@ def test_suffix_event_names_do_not_relax_event_direction_or_time_evidence() -> N
 
 
 @pytest.mark.parametrize(
+    "text",
+    [
+        "The user started the WARMUP-LIVE-36-X project on 2026-10-12.",
+        "User started test project WARMUP-LIVE-36-X on 2026-10-12.",
+        "用户在2026年10月12日启动了测试项目 WARMUP-LIVE-36-X。",
+    ],
+)
+@pytest.mark.parametrize(
+    "question",
+    [
+        "When did I start the WARMUP-LIVE-36-X project?",
+        "When did project WARMUP-LIVE-36-X begin?",
+        "When was the WARMUP-LIVE-36-X project started?",
+        "我是什么时候启动测试项目 WARMUP-LIVE-36-X 的\uff1f",
+        "WARMUP-LIVE-36-X项目是什么时候启动的\uff1f",
+    ],
+)
+def test_project_event_support_survives_language_and_episode_projection(text: str, question: str) -> None:
+    fact = replace(
+        record(text=text, kind="episodic", object="WARMUP-LIVE-36-X", occurred_on="2026-10-12"),
+        subject="",
+        predicate="",
+        object="",
+        topic="",
+    )
+    assert assess(Query.parse(question), fact, semantic_match=False) == Support.SUPPORTED
+
+
+@pytest.mark.parametrize(
+    "question",
+    [
+        "When did Alice start the WARMUP-LIVE-36-X project?",
+        "When did I plan to start the WARMUP-LIVE-36-X project?",
+        "When did I not start the WARMUP-LIVE-36-X project?",
+        "When did I start project WARMUP-LIVE-36-X in 2024?",
+        "When did I start project WARMUP-LIVE-36-X and finish lunch?",
+        "When did I start projects WARMUP-LIVE-36-X and Other?",
+        "When did I start project WARMUP-LIVE-36-X and who helped?",
+        "When did I start the offline evaluation for project WARMUP-LIVE-36-X?",
+        "我什么时候可能启动项目 WARMUP-LIVE-36-X\uff1f",
+        "我什么时候启动项目 WARMUP-LIVE-36-X 和 Other\uff1f",
+    ],
+)
+def test_event_questions_do_not_infer_actors_or_unverified_conditions(question: str) -> None:
+    fact = record(
+        text="The user started project WARMUP-LIVE-36-X on 2026-10-12.",
+        kind="episodic",
+        object="WARMUP-LIVE-36-X",
+        occurred_on="2026-10-12",
+    )
+    assert assess(Query.parse(question), fact, semantic_match=True) != Support.SUPPORTED
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Alice started project WARMUP-LIVE-36-X on 2026-10-12.",
+        "The user might start project WARMUP-LIVE-36-X on 2026-10-12.",
+        "The user plans to start project WARMUP-LIVE-36-X on 2026-10-12.",
+        "用户可能在2026年10月12日启动项目 WARMUP-LIVE-36-X。",
+        "用户在2026年10月12日没有启动项目 WARMUP-LIVE-36-X。",
+        "The user started the offline evaluation for project WARMUP-LIVE-36-X.",
+        "The user met Alice. Alice started project WARMUP-LIVE-36-X on 2026-10-12.",
+        "The user started project WARMUP-LIVE-36-X on 2026-10-12 and again on 2026-10-13.",
+        "Started project WARMUP-LIVE-36-X on 2026-10-12.",
+    ],
+)
+def test_event_records_require_one_bound_factual_event(text: str) -> None:
+    fact = record(text=text, kind="episodic", object="WARMUP-LIVE-36-X", occurred_on="2026-10-12")
+    for question in (
+        "When did I start project WARMUP-LIVE-36-X?",
+        "When did project WARMUP-LIVE-36-X start?",
+    ):
+        if text.startswith(("Alice", "Started")) and " I " not in question:
+            continue
+        assert assess(Query.parse(question), fact, semantic_match=True) != Support.SUPPORTED
+
+
+@pytest.mark.parametrize("change", [{"occurred_at": None}, {"episode_time_source": "recorded"}])
+def test_project_event_time_must_remain_explicit(change: dict[str, Any]) -> None:
+    fact = record(
+        text="The user started project WARMUP-LIVE-36-X.",
+        kind="episodic",
+        object="WARMUP-LIVE-36-X",
+        occurred_on="2026-10-12",
+    )
+    assert (
+        assess(
+            Query.parse("When did I start project WARMUP-LIVE-36-X?"),
+            replace(fact, **change),
+            semantic_match=True,
+        )
+        == Support.UNKNOWN
+    )
+
+
+@pytest.mark.parametrize(
+    "question,changes,reason",
+    [
+        ("When did this project start?", {}, "unresolved_entity"),
+        ("When did I start project Cedar in 2024?", {}, "unverified_conditions"),
+        ("When did Alice start project Cedar?", {}, "unsupported_question"),
+        ("When did I start project Cedar?", {"text": "Project Cedar started."}, "event_actor"),
+        ("When did I start project Cedar?", {"episode_time_precision": "month"}, "event_time"),
+    ],
+)
+def test_event_rejection_diagnostics_are_fixed_content_free_codes(
+    question: str, changes: dict[str, Any], reason: str
+) -> None:
+    fact = record(
+        text="The user started project Cedar.", kind="episodic", object="Cedar", occurred_on="2026-10-12"
+    )
+    diagnostics: dict[str, int] = {}
+    assert (
+        assess(Query.parse(question), replace(fact, **changes), semantic_match=True, diagnostics=diagnostics)
+        == Support.UNKNOWN
+    )
+    assert diagnostics == {f"support_rejected_{reason}": 1}
+
+
+@pytest.mark.parametrize(
+    "question,expected",
+    [
+        ("when did the cedar evaluation finish?", Support.SUPPORTED),
+        ("when did the birch evaluation finish?", Support.CONFLICT),
+        ("When did the evaluation finish?", Support.UNKNOWN),
+        ("When did the offline evaluation finish?", Support.UNKNOWN),
+    ],
+)
+def test_event_target_is_required_even_without_an_explicit_project_category(
+    question: str, expected: Support
+) -> None:
+    fact = record(
+        text="The user completed the Cedar evaluation.",
+        kind="episodic",
+        object="Cedar",
+        occurred_on="2026-10-12",
+    )
+    assert assess(Query.parse(question), fact, semantic_match=True) == expected
+
+
+@pytest.mark.parametrize(
     "text,expected",
     [
         ("the meridian repository", {"repository": {"meridian"}}),

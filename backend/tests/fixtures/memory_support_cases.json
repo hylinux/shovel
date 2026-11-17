@@ -1,5 +1,5 @@
 {
-  "version": "memory-support-v1",
+  "version": "memory-support-v2",
   "facts": [
     {"key": "aurora-db", "text": "The user uses SQLite as the database for project Aurora (also known as Dawn).", "predicate": "uses", "object": "SQLite", "topic": "project.aurora.database"},
     {"key": "aurora-language", "text": "The user uses Go as the programming language for project Aurora.", "predicate": "uses", "object": "Go", "topic": "project.aurora.language"},
@@ -23,6 +23,11 @@
     {"text": "When did the offline evaluation for project Aurora begin?", "expected": []},
     {"text": "Which database do I use for project Juniper?", "expected": []},
     {"text": "When did I finish the Harbor offline evaluation?", "expected": []},
-    {"text": "我在 Juniper 项目使用哪种编程语言？", "expected": []}
+    {"text": "我在 Juniper 项目使用哪种编程语言？", "expected": []},
+    {"text": "When did I start the WARMUP-LIVE-36-X project?", "expected": ["project-start"]},
+    {"text": "我是什么时候启动测试项目 WARMUP-LIVE-36-X 的？", "expected": ["project-start"]},
+    {"text": "When did Alice start project WARMUP-LIVE-36-X?", "expected": []},
+    {"text": "When did I finish project WARMUP-LIVE-36-X?", "expected": []},
+    {"text": "When did I start the offline evaluation for project WARMUP-LIVE-36-X?", "expected": []}
   ]
 }

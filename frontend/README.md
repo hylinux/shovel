@@ -118,6 +118,18 @@ navigation moves above the main content and spans the page width.
 - **Chat:** the session tree is expanded by default and stays visible while visiting other pages. New Session and existing sessions are indented children of Chat, without a separate Sessions heading. Enter Chat to open it; click Chat again to collapse or expand its children without interrupting the active chat. New Session creates and selects a persisted session; history is ordered by latest interaction in a bounded scroll area, with Load more sessions for older pages. Rename/delete controls live under the selected Session in the sidebar. The Session page contains message history, numbered source excerpts, and a multiline composer: Enter inserts a newline; Ctrl + Enter or Send Message submits. The official AG-UI `HttpAgent` SDK streams the MAF Agent's text and tool activity; message and Session history are refreshed after success or failure.
 - **Settings:** the bottom sidebar menu opens five keyboard-accessible tabs: Runtime configuration, Manage long-term Memory, MCP Server Management, Agent instructions, and General settings. Switching tabs preserves mounted editors and drafts. Runtime configuration includes provider readiness and performance/warmup; provider changes require editing settings.toml and restarting the backend. Saved facts load from SQLite only on request. Memory shows its Zvec index status and pending operations, supports confirmed soft deletion, and can queue a rebuild in Background tasks. Session history, session summaries and long-term facts remain separate; session deletion removes its summary/session-scoped Memory, not cross-session facts.
 
+**Memory editing restriction:** Kind and Scope are intentionally read-only when
+editing an existing fact, including when remembering a forgotten or rejected fact
+again. Saving creates a replacement with the same kind and ownership scope,
+including the same owning Session (`session_id`) for Session-scoped facts; it does
+not convert the Memory type or move it to another scope. Kind determines
+storage/field semantics, while Scope determines
+visibility. The API and background worker enforce this restriction as well as the
+UI. New Memory can choose its kind and scope; a separate confirmed conversion or
+migration workflow is not currently implemented. See the
+[Memory architecture](../Documents/Memory_Design/native_memory_architecture.md)
+for the replacement and lifecycle rules.
+
 **General settings** also saves an optional nickname, avatar, gender, occupation
 and biography in the current workspace/user's SQLite profile. Avatars accept
 static PNG/JPEG/WebP up to 2 MB and 4 megapixels; the backend resizes them to at

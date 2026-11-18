@@ -479,7 +479,22 @@ object 规范化不同
 不同 topic 的兼容偏好允许并存。
 
 管理 API 的显式更新使用 `replace_id`，创建新记录并替代指定旧记录；
-要求同一写入 Scope 内目标仍 active，不允许顺便改变记忆类型。
+目标必须处于 active/deleted/rejected，替代记录保持原记忆类型和完整写入 Scope。
+
+**当前编辑限制（设计约束）**：编辑已有记忆时，不能更改 `kind`、`scope`
+或所属 `session_id`；显式恢复已遗忘/拒绝的事实也遵守此限制。
+新建记忆时可以选择类型和范围，但已有记录的编辑不是类型转换或跨 Scope 迁移。
+
+- 类型决定 semantic/episodic/procedural 对应的存储结构和处理语义；
+  例如事件记忆需要区分事件时间与记录时间，不能仅修改分类值。
+- Scope 决定记忆的可见上下文，包括所属 Agent/Session；改变范围可能扩大或缩小
+  可见性，不能作为普通正文编辑的附带变更。
+- 同类型、同 Scope 的替代更新保持现有来源/替代历史、遗忘围栏和索引事务的一致性。
+
+该限制不只是页面行为：编辑表单禁用“类型”和“范围”，提交序列化保留原始值，
+REST 接口与后台 Operation 执行阶段也分别校验；绕过前端不能改变这些归属。
+若以后支持更正类型或范围，需要单独设计转换/迁移流程，包含目标字段与事件时间校验、
+可见性变更确认、旧记录替代和索引更新的原子提交；当前尚未实现该流程。
 
 ## 9. 生命周期与遗忘
 
@@ -1227,7 +1242,7 @@ provider、路径或模型版本变更通常需要重启 Host；
 | `GET /memories?conversation_id=...` | 在指定会话上下文中读取，包括该会话的 session Scope |
 | `GET /memories?all_scopes=true&include_history=true&limit=20&offset=0` | 管理视图读取当前工作区/用户的所有 Scope 和历史；state 在分页前过滤，稳定跨类型排序；不改变 Agent 召回可见性 |
 | `POST /memories` | 手动新建，HTTP 202，返回持久 Operation |
-| `PUT /memories/{id}` | 显式替代更新，HTTP 202，返回 Operation |
+| `PUT /memories/{id}` | 显式替代 active/deleted/rejected 记录；保持原 kind、Scope 和 session_id，HTTP 202，返回 Operation |
 | `DELETE /memories/{id}` | 默认软删除，返回 `{"deleted": true}` |
 | `DELETE /memories/{id}?hard=true` | 硬删除事实行，仍保留向量清理意图 |
 | `POST /memory/index/rebuild` | 排队重建，HTTP 202；需要配置 Memory embedder 才能执行成功 |

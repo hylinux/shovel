@@ -6,7 +6,21 @@ from collections.abc import Sequence
 from dataclasses import asdict, replace
 from typing import Any
 
-from sqlalchemy import and_, case, column, false, func, or_, select, text, true, update
+from sqlalchemy import (
+    and_,
+    case,
+    column,
+    delete,
+    false,
+    func,
+    literal,
+    or_,
+    select,
+    text,
+    true,
+    union_all,
+    update,
+)
 from sqlalchemy import table as sql_table
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -16,7 +30,9 @@ from shovel.db.model.memory import (
     MemoryEpisode,
     MemoryIndexOutbox,
     MemoryIndexState,
+    MemoryLink,
     MemoryProcedure,
+    MemoryRevision,
     NativeMemory,
 )
 from shovel.db.model.runtime import ChatMessage, MemoryEpoch, Operation
@@ -279,18 +295,64 @@ class SQLiteMemoryRepository:
         return sorted(found, key=lambda row: (row.recorded_at, row.id), reverse=True)[:limit]
 
     async def _find(
-        self, session: AsyncSession, scope: MemoryScope, identifier: str
+        self, session: AsyncSession, scope: MemoryScope, identifier: str, *, all_scopes: bool = False
     ) -> tuple[Row, MemoryType]:
         for kind, table in _TABLES.items():
-            row = await session.scalar(select(table).where(table.id == identifier, _visible(table, scope)))
+            ownership = (
+                and_(table.workspace_id == scope.workspace_id, table.user_id == scope.user_id)
+                if all_scopes
+                else _visible(table, scope)
+            )
+            row = await session.scalar(select(table).where(table.id == identifier, ownership))
             if row is not None:
                 return row, kind
         raise NotFound("Memory", identifier)
 
-    async def get(self, scope: MemoryScope, identifier: str) -> MemoryRecord:
+    async def get(self, scope: MemoryScope, identifier: str, *, all_scopes: bool = False) -> MemoryRecord:
         async with self.sessions() as session:
-            row, kind = await self._find(session, scope, identifier)
+            row, kind = await self._find(session, scope, identifier, all_scopes=all_scopes)
             return record(row, kind)
+
+    async def page(
+        self,
+        scope: MemoryScope,
+        *,
+        limit: int,
+        offset: int,
+        states: Sequence[MemoryState],
+        all_scopes: bool = False,
+    ) -> tuple[list[MemoryRecord], int]:
+        selections = []
+        for kind, table in _TABLES.items():
+            selections.append(
+                select(literal(kind.value).label("kind"), table.id, table.recorded_at).where(
+                    and_(table.workspace_id == scope.workspace_id, table.user_id == scope.user_id)
+                    if all_scopes
+                    else _visible(table, scope),
+                    table.validity_state.in_([state.value for state in states]),
+                    or_(table.valid_until.is_(None), table.valid_until > now_ts())
+                    if states == (MemoryState.ACTIVE,)
+                    else true(),
+                )
+            )
+        entries = union_all(*selections).subquery()
+        async with self.sessions() as session:
+            total = int(await session.scalar(select(func.count()).select_from(entries)) or 0)
+            keys = list(
+                await session.execute(
+                    select(entries)
+                    .order_by(entries.c.recorded_at.desc(), entries.c.id.desc())
+                    .offset(offset)
+                    .limit(limit)
+                )
+            )
+            found = {}
+            for kind, table in _TABLES.items():
+                ids = [key.id for key in keys if key.kind == kind.value]
+                if ids:
+                    for row in await session.scalars(select(table).where(table.id.in_(ids))):
+                        found[row.id] = record(row, kind)
+            return [found[key.id] for key in keys], total
 
     async def consolidate(
         self,
@@ -340,6 +402,12 @@ class SQLiteMemoryRepository:
                 target, _ = await self._find(session, scope, replace_id)
                 if any(source.get("source_kind") == "user_settings" for source in target.provenance):
                     raise RuntimeFailure("Edit this Profile field in General settings.", status=409)
+            manual_update = (
+                operation is not None
+                and operation.kind == "memory.update"
+                and provenance.source_kind == "manual"
+                and replace_id is not None
+            )
             for candidate in candidates:
                 if (
                     profile is not None
@@ -390,7 +458,13 @@ class SQLiteMemoryRepository:
                     MemoryValidityState.DELETED,
                     MemoryValidityState.REJECTED,
                 ):
-                    continue
+                    if operation is not None and operation.kind == "memory.create":
+                        raise RuntimeFailure(
+                            "该内容与已遗忘或拒绝的记忆冲突,墓碑保护阻止写入;未保存修改。请检查正文和结构化字段。",
+                            status=409,
+                        )
+                    if not manual_update:
+                        continue
                 if candidate.merge_with:
                     duplicate = next((r for r in rows if r.id == candidate.merge_with), None)
                     if duplicate is None or duplicate.validity_state != MemoryValidityState.ACTIVE:
@@ -465,21 +539,39 @@ class SQLiteMemoryRepository:
                     )
                 replaced: list[Row] = []
                 for previous in rows:
-                    if (
-                        not review_required
-                        and previous.validity_state == MemoryValidityState.ACTIVE
-                        and (
-                            previous.id == replace_id
-                            or conflicts(record(previous, candidate.kind), candidate)
+                    if not review_required and (
+                        (
+                            previous.validity_state == MemoryValidityState.ACTIVE
+                            and (
+                                previous.id == replace_id
+                                or conflicts(record(previous, candidate.kind), candidate)
+                                or (manual_update and same_fact(record(previous, candidate.kind), candidate))
+                            )
+                        )
+                        or (
+                            manual_update
+                            and previous.validity_state
+                            in (MemoryValidityState.DELETED, MemoryValidityState.REJECTED)
+                            and (
+                                previous.id == replace_id
+                                or same_fact(record(previous, candidate.kind), candidate)
+                            )
                         )
                     ):
-                        previous.validity_state = MemoryValidityState.SUPERSEDED
+                        preserve_tombstone = previous.validity_state in (
+                            MemoryValidityState.DELETED,
+                            MemoryValidityState.REJECTED,
+                        ) and not same_fact(record(previous, candidate.kind), candidate)
+                        if not preserve_tombstone:
+                            previous.validity_state = MemoryValidityState.SUPERSEDED
                         previous.invalidated_at = now_ts()
                         previous.supersede_reason = "Explicit user correction"
                         queue_index_intent(session, previous, candidate.kind, "delete")
                         replaced.append(previous)
                 if replace_id is not None and not any(r.id == replace_id for r in replaced):
-                    raise RuntimeFailure("只能更新同一 Scope 中的 active Memory。", status=409)
+                    raise RuntimeFailure(
+                        "只能更新同一 Scope 中的 active/deleted/rejected Memory。", status=409
+                    )
                 await session.flush()
                 session.add(row)
                 await session.flush()
@@ -599,12 +691,23 @@ class SQLiteMemoryRepository:
             await session.commit()
 
     async def transition(
-        self, scope: MemoryScope, identifier: str, state: MemoryState, *, hard: bool = False
+        self,
+        scope: MemoryScope,
+        identifier: str,
+        state: MemoryState,
+        *,
+        hard: bool = False,
+        all_scopes: bool = False,
     ) -> None:
         async with self.sessions() as session:
             await session.execute(text("BEGIN IMMEDIATE"))
-            row, kind = await self._find(session, scope, identifier)
-            if any(source.get("source_kind") == "user_settings" for source in row.provenance):
+            row, kind = await self._find(session, scope, identifier, all_scopes=all_scopes)
+            if any(source.get("source_kind") == "user_settings" for source in row.provenance) and not (
+                hard
+                and row.validity_state == MemoryValidityState.DELETED
+                and isinstance(row, MemoryBelief)
+                and not row.object_
+            ):
                 raise RuntimeFailure("Edit this Profile field in General settings.", status=409)
             if hard and state != MemoryState.DELETED:
                 raise ValueError("Hard removal requires deleted state.")
@@ -614,6 +717,8 @@ class SQLiteMemoryRepository:
             row.invalidated_at = now_ts()
             queue_index_intent(session, row, kind, "delete")
             if hard:
+                await session.execute(delete(MemoryLink).where(MemoryLink.memory_id == row.id))
+                await session.execute(delete(MemoryRevision).where(MemoryRevision.memory_id == row.id))
                 await session.delete(row)
             await session.commit()
 

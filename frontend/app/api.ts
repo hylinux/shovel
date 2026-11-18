@@ -9,6 +9,7 @@ import { startQueryPolling } from "./query-polling";
 import { invalidateReads, sharedRead } from "./read-requests";
 import type { Attachment } from "./chat-attachments";
 import { batchStreamText } from "./stream-batch";
+export { forgetMemoryRequests } from "./request-recovery";
 
 export type Status = { service: string; workspace_id: string; embedding_configured: boolean; model_configured: boolean; model_name: string; memory_configured: boolean; memory?: { provider: string; index_state: string; pending_index_operations: number; last_error: string | null; review_required?: boolean }; warmup?: Record<string, { state: string; elapsed_ms?: number; error_type?: string }>; chat_capacity?: { limit: number; running: number; waiting: number } };
 export type UnixSeconds = number;
@@ -194,7 +195,8 @@ export function useAction() {
     const serialized = body === undefined ? undefined : JSON.stringify(body);
     const platformRun = path === "/platform/commands" && isPlatformRun(body);
     const durable = platformRun || path.startsWith("/resources") || path === "/index/cleanup" || path === "/history/prune"
-      || path === "/memory/index/rebuild" || (path.startsWith("/memories") && method !== "DELETE");
+      || path === "/memory/index/rebuild" || (path === "/memory/purge" && !(body && typeof body === "object" && "prepare" in body && body.prepare === true))
+      || (path.startsWith("/memories") && method !== "DELETE");
     let submitted = false;
     try {
       if (durable) {

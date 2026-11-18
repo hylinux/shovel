@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState, type FormEvent } from "react";
-import { active, segment, useAction, useQuery, type Items, type Memory, type MemoryInput, type Operation, type Status } from "./api";
+import { active, errorText, forgetMemoryRequests, segment, useAction, useQuery, type Items, type Memory, type MemoryInput, type Operation, type Status } from "./api";
 import { memoryInput, memoryPayload } from "./memory-model";
 import { useI18n } from "./locale-context";
 import { Empty, Feedback } from "./ui";
@@ -10,10 +10,13 @@ const kinds = ["semantic", "episodic", "procedural"] as const;
 const scopes = ["user", "workspace", "agent", "session"] as const;
 const predicates = ["prefers", "dislikes", "uses", "works_at", "has_name", "has_role", "has_timezone", "has_language", "has_goal", "has_constraint", "decides", "knows_about"];
 function pollOperation(operation: Operation) { return active(operation.state); }
+type MemoryPage = Items<Memory> & { total: number };
+type PurgePreview = { confirmation_id: string; expires_at: number; workspace_id: string; counts: Record<string, number> };
+const pageSize = 20;
 
 export function MemoryManagement({ status, sessionId = "" }: { status?: Status; sessionId?: string }) {
   const { t } = useI18n();
-  const [open, setOpen] = useState(false);
+  const [open, setOpen] = useState(true);
   return <section className="settings-card" id="settings-memory" aria-labelledby="settings-memory-heading" tabIndex={-1}>
     <header className="settings-card-header">
       <div><p className="settings-kicker">{t("User context")}</p><h2 id="settings-memory-heading">{t("Manage long-term Memory")}</h2><p className="muted">{t("Review the facts your Agent remembers across sessions.")}</p></div>
@@ -37,21 +40,27 @@ function Memories({ enabled, indexEnabled, sessionId }: { enabled: boolean; inde
   const [history, setHistory] = useState(true);
   const [state, setState] = useState("");
   const [editor, setEditor] = useState<{ original?: Memory; draft: MemoryInput }>();
-  const [confirm, setConfirm] = useState<{ item: Memory; decision: "approve" | "reject" | "forget" }>();
+  const [confirm, setConfirm] = useState<{ item: Memory; decision: "approve" | "reject" | "forget" | "delete" }>();
   const [operation, setOperation] = useState<Operation>();
   const [pending, setPending] = useState(false);
   const [localError, setLocalError] = useState("");
+  const [page, setPage] = useState(0);
+  const [purge, setPurge] = useState<PurgePreview>();
+  const [purgeText, setPurgeText] = useState("");
+  const [purgeAcknowledged, setPurgeAcknowledged] = useState(false);
+  const [cleanupError, setCleanupError] = useState("");
   const action = useAction();
   const sessionQuery = sessionId ? `&conversation_id=${segment(sessionId)}` : "";
-  const path = enabled ? `/memories?include_history=${history}${sessionQuery}` : null;
-  const memories = useQuery<Items<Memory>>(path, 5000);
+  const path = enabled ? `/memories?include_history=${history}${sessionQuery}&all_scopes=true&limit=${pageSize}&offset=${page * pageSize}${state ? `&state=${segment(state)}` : ""}` : null;
+  const memories = useQuery<MemoryPage>(path, 5000);
   const currentData = memories.dataPath === path ? memories.data : undefined;
   const currentError = memories.errorPath === path ? memories.error : "";
   const waiting = Boolean(path && !currentData && !currentError);
-  const rows = currentData?.items.filter(item => !state || item.state === state) ?? [];
+  const rows = currentData?.items ?? [];
+  const total = currentData?.total ?? rows.length;
   const busy = action.busy || pending;
   function watch(result: Operation | undefined) {
-    if (result) { setOperation(result); setPending(active(result.state)); setConfirm(undefined); }
+    if (result) { setOperation(result); setPending(active(result.state)); setConfirm(undefined); setPurge(undefined); }
   }
   async function save(event: FormEvent) {
     event.preventDefault();
@@ -66,24 +75,56 @@ function Memories({ enabled, indexEnabled, sessionId }: { enabled: boolean; inde
   async function decide() {
     if (!confirm || busy) return;
     const { item, decision } = confirm;
-    if (decision === "forget") {
-      const result = await action.run<{ deleted: boolean }>(`/memories/${segment(item.id)}?conversation_id=${segment(sessionId)}`, undefined, "DELETE");
-      if (result?.deleted) { setConfirm(undefined); memories.refresh(); action.setNotice("Memory forgotten."); }
-    } else watch(await action.run<Operation>(`/memories/${segment(item.id)}/review`, { decision, conversation_id: sessionId }));
+    if (decision === "forget" || decision === "delete") {
+      const result = await action.run<{ deleted: boolean }>(`/memories/${segment(item.id)}?conversation_id=${segment(item.session_id || "")}${decision === "delete" ? "&hard=true" : ""}`, undefined, "DELETE");
+      if (result?.deleted) { setConfirm(undefined); setPage(0); memories.refresh(); action.setNotice(decision === "delete" ? "Memory permanently deleted. Vector cleanup continues in the background." : "Memory forgotten."); }
+    } else watch(await action.run<Operation>(`/memories/${segment(item.id)}/review`, { decision, conversation_id: item.session_id || "" }));
+  }
+  async function preparePurge() {
+    if (busy) return;
+    setPurgeText(""); setPurgeAcknowledged(false);
+    setPurge(await action.run<PurgePreview>("/memory/purge", { prepare: true }));
+  }
+  async function clearAll() {
+    if (!purge || busy || !purgeAcknowledged || purgeText !== "DELETE ALL MEMORY") return;
+    watch(await action.run<Operation>("/memory/purge", {
+      confirmation_id: purge.confirmation_id, confirmation_text: purgeText,
+    }));
   }
   return <div className="memory-panel">
     <div className="button-row">
       <button disabled={busy} onClick={() => { setLocalError(""); setEditor({ draft: memoryInput(undefined, sessionId) }); }}>{t("Create Memory")}</button>
       <button disabled={busy || !indexEnabled} onClick={async () => watch(await action.run<Operation>("/memory/index/rebuild"))}>{t("Rebuild semantic index")}</button>
       <button disabled={action.busy} onClick={memories.refresh}>{t("Refresh")}</button>
-      <label><input type="checkbox" checked={history} onChange={event => setHistory(event.target.checked)} />{t("Include history")}</label>
-      <label>{t("State")}<select value={state} onChange={event => setState(event.target.value)}>
-        <option value="">{t("All states")}</option>{["active", "candidate", "superseded", "expired", "deleted", "rejected"].map(value => <option key={value} value={value}>{t(value)}</option>)}
+      <button className="danger" disabled={busy} onClick={preparePurge}>{t("Clear all long-term Memory…")}</button>
+      <label><input type="checkbox" checked={history} onChange={event => { setHistory(event.target.checked); setState(""); setPage(0); }} />{t("Include history")}</label>
+      <label>{t("State")}<select value={state} onChange={event => { setState(event.target.value); setPage(0); }}>
+        <option value="">{t("All states")}</option>{["active", "candidate", "superseded", "expired", "deleted", "rejected"].map(value => <option key={value} value={value}>{t(value === "deleted" ? "Forgotten (record retained)" : value)}</option>)}
       </select></label>
     </div>
-    {sessionId && <p className="muted">{t("Includes Memory available to the current Session.")}</p>}
+    <p className="muted">{t("All Memory scopes in this workspace, including other Sessions and forgotten facts.")}</p>
     <Feedback error={currentError} retry={memories.refresh} /><Feedback error={action.error || localError} notice={action.notice} />
-    {operation && <MemoryOperation key={operation.id} initial={operation} onSettled={() => { setPending(false); memories.refresh(); }} />}
+    {cleanupError && <p className="warning" role="alert">{t("Memory was cleared, but browser recovery receipts could not be removed.")} {cleanupError}</p>}
+    {operation && <MemoryOperation key={operation.id} initial={operation} onSettled={settled => {
+      setPending(false); memories.refresh();
+      if (settled.kind === "memory.purge" && settled.state === "succeeded") {
+        setPage(0); setEditor(undefined); setConfirm(undefined); setCleanupError("");
+        if (typeof settled.result?.workspace_id === "string") {
+          try { forgetMemoryRequests(settled.result.workspace_id); }
+          catch (error) { setCleanupError(errorText(error)); }
+        }
+      }
+    }} />}
+    {purge && <div className="confirmation" role="group" aria-labelledby="memory-purge-heading">
+      <h3 id="memory-purge-heading">{t("Permanently clear all Memory?")}</h3>
+      <p className="warning">{t("This clears all facts and history in this workspace, including forgotten/rejected facts, summaries, working notes, experience candidates, profile text, and all Memory index generations. It includes changes made before execution and cannot be undone.")}</p>
+      <p>{t("Sessions, source messages, attachments, knowledge documents, avatar and external backups are not deleted. Minimal content-free replay fences and the erasure receipt are retained.")}</p>
+      <p>{t("Workspace")}: <code>{purge.workspace_id}</code> · {t("Current Memory records: {p0}", { p0: Object.values(purge.counts).reduce((sum, count) => sum + count, 0) })}</p>
+      <p>{t("Confirmation expires after five minutes. Finish active chats before confirming.")}</p>
+      <label><input type="checkbox" checked={purgeAcknowledged} onChange={event => setPurgeAcknowledged(event.target.checked)} />{t("I understand the deletion scope and that this cannot be undone.")}</label>
+      <label>{t("Type DELETE ALL MEMORY to confirm")}<input autoComplete="off" value={purgeText} onChange={event => setPurgeText(event.target.value)} /></label>
+      <div className="button-row"><button className="danger" disabled={busy || !purgeAcknowledged || purgeText !== "DELETE ALL MEMORY"} onClick={clearAll}>{t("Confirm clear all Memory")}</button><button disabled={busy} onClick={() => setPurge(undefined)}>{t("Cancel")}</button></div>
+    </div>}
     {editor && <form className="memory-editor" onSubmit={save}>
       <h3>{t(editor.original ? "Edit Memory (creates a replacement)" : "Create Memory")}</h3>
       <fieldset disabled={busy}>
@@ -100,24 +141,34 @@ function Memories({ enabled, indexEnabled, sessionId }: { enabled: boolean; inde
         </div>
         {editor.draft.scope === "session" && <p>{t("Session")}: <code>{editor.draft.session_id}</code></p>}
         <p className="muted">{t("Kind and scope cannot change on edit. Saving queues an Operation; the list updates only after it succeeds.")}</p>
+        {editor.original && <p className="warning">{t("Saving an explicit edit can remember a forgotten or rejected fact again. Automatic extraction cannot do this.")}</p>}
         <div className="button-row"><button className="primary" type="submit">{t("Save Memory")}</button><button type="button" onClick={() => setEditor(undefined)}>{t("Cancel")}</button></div>
       </fieldset>
     </form>}
     {waiting ? <p role="status">{t("Loading saved Memory…")}</p> : rows.length === 0 ? <Empty title={t("No saved facts")}>{t("Long-term facts extracted from your messages will appear here.")}</Empty> : rows.map(item => <article className="memory-row" key={item.id}>
       <p className="preserve">{item.memory}</p>
-      <p className="muted">{[item.kind, item.scope, item.state].map(value => t(value)).join(" · ")}</p>
+      <p className="muted">{[item.kind, item.scope, item.state].map(value => t(value === "deleted" ? "Forgotten (record retained)" : value)).join(" · ")}</p>
       <MemoryEvidence item={item} />
-      {item.provenance?.some(source => source.source_kind === "user_settings") ? <p className="muted">{t("Managed in General settings. Edit or clear the profile field there.")}</p> : <div className="button-row">
-        {item.state === "active" && <button disabled={busy} onClick={() => { setLocalError(""); setEditor({ original: item, draft: memoryInput(item, sessionId) }); }}>{t("Edit")}</button>}
+      {item.provenance?.some(source => source.source_kind === "user_settings") ? <div>
+        <p className="muted">{t("Managed in General settings. Edit or clear the profile field there.")}</p>
+        {item.state === "deleted" && !item.object && <button className="danger" disabled={busy} onClick={() => setConfirm({ item, decision: "delete" })}>{t("Permanently delete…")}</button>}
+      </div> : <div className="button-row">
+        {["active", "deleted", "rejected"].includes(item.state) && <button disabled={busy} onClick={() => { setLocalError(""); setEditor({ original: item, draft: memoryInput(item, sessionId) }); }}>{t(item.state === "active" ? "Edit" : "Edit and remember again…")}</button>}
         {item.state === "candidate" && <button disabled={busy} onClick={() => setConfirm({ item, decision: "approve" })}>{t("Approve candidate…")}</button>}
         {(item.state === "candidate" || item.state === "active") && <button disabled={busy} onClick={() => setConfirm({ item, decision: "reject" })}>{t("Reject…")}</button>}
         {item.state !== "deleted" && <button disabled={busy} onClick={() => setConfirm({ item, decision: "forget" })}>{t("Forget…")}</button>}
+        <button className="danger" disabled={busy} onClick={() => setConfirm({ item, decision: "delete" })}>{t("Permanently delete…")}</button>
       </div>}
       {confirm?.item.id === item.id && <div className="confirmation">
-        <p>{t(confirm.decision === "forget" ? "Forget this saved fact? Its vector will also be cleaned up." : confirm.decision === "approve" ? "Approve this candidate for active recall? Approval is not verification of truth." : "Reject this fact? The same rejected fact will not be automatically recreated.")}</p>
-        <div className="button-row"><button className={confirm.decision === "approve" ? "primary" : "danger"} disabled={busy} onClick={decide}>{t(confirm.decision === "forget" ? "Confirm forget" : confirm.decision === "approve" ? "Confirm approve" : "Confirm reject")}</button><button disabled={busy} onClick={() => setConfirm(undefined)}>{t("Cancel")}</button></div>
+        <p>{t(confirm.decision === "delete" ? "Permanently delete this fact and its tombstone? It may be learned again. Source messages and backups are not erased; vector cleanup is retried in the background." : confirm.decision === "forget" ? "Forget this saved fact? Its vector will also be cleaned up." : confirm.decision === "approve" ? "Approve this candidate for active recall? Approval is not verification of truth." : "Reject this fact? The same rejected fact will not be automatically recreated.")}</p>
+        <div className="button-row"><button className={confirm.decision === "approve" ? "primary" : "danger"} disabled={busy} onClick={decide}>{t(confirm.decision === "delete" ? "Confirm permanent delete" : confirm.decision === "forget" ? "Confirm forget" : confirm.decision === "approve" ? "Confirm approve" : "Confirm reject")}</button><button disabled={busy} onClick={() => setConfirm(undefined)}>{t("Cancel")}</button></div>
       </div>}
     </article>)}
+    <nav className="button-row" aria-label={t("Memory pagination")}>
+      <button disabled={busy || page === 0 || waiting} onClick={() => { setConfirm(undefined); setPage(page - 1); }}>{t("Previous page")}</button>
+      <span role="status">{t("Page {p0} of {p1} · {p2} facts", { p0: page + 1, p1: Math.max(1, Math.ceil(total / pageSize)), p2: total })}</span>
+      <button disabled={busy || waiting || (page + 1) * pageSize >= total} onClick={() => { setConfirm(undefined); setPage(page + 1); }}>{t("Next page")}</button>
+    </nav>
   </div>;
 }
 
@@ -142,14 +193,16 @@ export function MemoryEvidence({ item }: { item: Memory }) {
   </details>;
 }
 
-function MemoryOperation({ initial, onSettled }: { initial: Operation; onSettled: () => void }) {
+function MemoryOperation({ initial, onSettled }: { initial: Operation; onSettled: (operation: Operation) => void }) {
   const { t } = useI18n();
   const query = useQuery<Operation>(`/operations/${segment(initial.id)}`, 2000, pollOperation);
   const operation = query.data ?? initial;
   const settled = useRef(false);
   useEffect(() => {
-    if (!active(operation.state) && !settled.current) { settled.current = true; onSettled(); }
-  }, [operation.state, onSettled]);
+    if (!active(operation.state) && !settled.current) {
+      settled.current = true; onSettled(operation);
+    }
+  }, [operation, onSettled]);
   return <div role="status" className="memory-task">
     <p>{t("Memory Operation")}: <code>{operation.id}</code> · {t(operation.state)}</p>
     {operation.state === "succeeded" && <p>{t("Memory change completed. The list has been refreshed.")}</p>}

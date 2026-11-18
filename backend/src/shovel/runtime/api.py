@@ -34,6 +34,7 @@ from shovel.exceptions.resource import (
     ResourceNotFoundError,
     UnknownConnectorError,
 )
+from shovel.memory.domain import MemoryState
 from shovel.protection.domain import ProtectionDeniedError
 from shovel.runtime.agent_instructions import AgentInstructionsView
 from shovel.runtime.diagnostics import DevelopmentRequestLogging, trace
@@ -55,6 +56,7 @@ from shovel.runtime.schemas import (
     MCPConfigurationInput,
     MCPCredentialInput,
     MemoryInput,
+    MemoryPurgeInput,
     MemoryReviewInput,
     MessageInput,
     ProfileInput,
@@ -1020,16 +1022,33 @@ def configure_api(
     async def memories(
         rt: RuntimeDependency,
         limit: int = Query(100, ge=1, le=1000),
+        offset: int = Query(0, ge=0),
         include_history: bool = False,
         conversation_id: str = "",
+        state: MemoryState | None = None,
+        all_scopes: bool = False,
     ) -> dict[str, Any]:
         if conversation_id:
             await rt.chat.conversation(conversation_id)
-        return {
-            "items": await rt.memory.list(
-                limit, include_history=include_history, conversation_id=conversation_id
-            )
-        }
+        return await rt.memory.page(
+            limit,
+            offset,
+            include_history=include_history,
+            conversation_id=conversation_id,
+            state=state,
+            all_scopes=all_scopes,
+        )
+
+    @router.post("/memory/purge")
+    async def purge_memory(
+        body: MemoryPurgeInput, rt: RuntimeDependency, request_key: RequestKey = None
+    ) -> JSONResponse:
+        if body.prepare:
+            return JSONResponse(await rt.memory_tasks.reset.prepare())
+        operation = await rt.memory_tasks.reset.confirm(
+            body.confirmation_id, body.confirmation_text, request_key
+        )
+        return JSONResponse(operation_view(operation), status_code=202)
 
     @router.post("/memories", status_code=202)
     async def create_memory(
@@ -1065,7 +1084,7 @@ def configure_api(
     ) -> dict[str, Any]:
         from shovel.memory.service import view
 
-        return view(await rt.memory.owned(identifier, conversation_id=conversation_id))
+        return view(await rt.memory.owned(identifier, conversation_id=conversation_id, all_scopes=True))
 
     @router.post("/memories/{identifier}/review", status_code=202)
     async def review_memory(
@@ -1078,7 +1097,7 @@ def configure_api(
         replay = await rt.memory_tasks.replay("memory.review", intent, request_key)
         if replay is not None:
             return operation_view(replay)
-        current = await rt.memory.owned(identifier, conversation_id=body.conversation_id)
+        current = await rt.memory.owned(identifier, conversation_id=body.conversation_id, all_scopes=True)
         if current.state.value not in ("candidate", "active") or (
             body.decision == "approve" and current.state.value != "candidate"
         ):
@@ -1112,12 +1131,16 @@ def configure_api(
         if replay is not None:
             return operation_view(replay)
         current = await rt.memory.repository.get(
-            replace(rt.memory.owner, session_id=body.session_id), identifier
+            replace(rt.memory.owner, session_id=body.session_id), identifier, all_scopes=True
         )
         if current.kind.value != body.kind:
             raise RuntimeFailure("更新不能更改 Memory 类型。")
-        if current.state.value != "active" or current.scope.kind.value != body.scope:
-            raise RuntimeFailure("只能更新同一 Scope 中的 active Memory。", status=409)
+        if (
+            current.state.value not in ("active", "deleted", "rejected")
+            or current.scope.kind.value != body.scope
+            or current.scope.session_id != body.session_id
+        ):
+            raise RuntimeFailure("只能更新同一 Scope 中的 active/deleted/rejected Memory。", status=409)
         async with rt.sessions() as session:
             generation = await rt.memory_tasks.generation(session)
         operation = await rt.operations.enqueue(
@@ -1160,7 +1183,7 @@ def configure_api(
         hard: bool = False,
         conversation_id: str = "",
     ) -> dict[str, bool]:
-        current = await rt.memory.owned(identifier, conversation_id=conversation_id)
+        current = await rt.memory.owned(identifier, conversation_id=conversation_id, all_scopes=True)
         if current.state.value == "deleted" and not hard:
             return {"deleted": True}
         await rt.memory_tasks.invalidate()

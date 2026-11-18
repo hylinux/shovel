@@ -10,7 +10,7 @@ from sqlalchemy import select
 
 from shovel.db.model.memory import MemoryBelief, SessionSummary
 from shovel.db.model.runtime import ChatMessage, Conversation, Operation
-from shovel.memory.domain import MemoryCandidate, MemoryExtractionError
+from shovel.memory.domain import MemoryCandidate, MemoryExtractionError, MemoryState, Provenance
 from shovel.runtime.agent import AgentResult
 from shovel.runtime.diagnostics import development_logging
 from shovel.runtime.errors import RuntimeFailure
@@ -104,6 +104,24 @@ async def test_native_facts_outbox_and_receipt_are_atomic(
     for event in ("related", "proposed", "persisted", "committed"):
         assert f"memory.extraction.{event}" in output
     assert "green tea" not in output
+
+
+async def test_tombstone_still_allows_successful_zero_fact_extraction(
+    runtime: Runtime, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo, scope = runtime.memory.repository, runtime.memory.owner
+    blocked = (await repo.consolidate(scope, await extraction(""), Provenance("manual")))[0]
+    await repo.transition(scope, blocked.id, MemoryState.DELETED)
+    before_outbox = await repo.pending(scope, force=True)
+    monkeypatch.setattr(runtime.memory.extractor, "extract", extraction)
+    identifier = await enqueue(runtime)
+    assert await runtime.memory_tasks.run_once()
+    operation = await runtime.operations.get(identifier)
+    assert operation.state == "succeeded"
+    assert operation.result["committed"] and operation.result["memories"] == 0
+    assert await runtime.memory.list() == []
+    assert (await repo.get(scope, blocked.id)).state == MemoryState.DELETED
+    assert await repo.pending(scope, force=True) == before_outbox
 
 
 async def test_atomic_consolidation_rolls_back_all_candidates_on_failure(runtime: Runtime) -> None:

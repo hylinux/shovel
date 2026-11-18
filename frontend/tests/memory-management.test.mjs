@@ -532,7 +532,7 @@ test("Memory management queues scoped create/review actions and waits for the Op
   const props = { ...component.props, enabled: true };
   const panel = () => elements(render(component.type, props));
   let nodes = panel();
-  assert.ok(queries.includes("/memories?include_history=true&conversation_id=session%2Fa"));
+  assert.ok(queries.includes("/memories?include_history=true&conversation_id=session%2Fa&all_scopes=true&limit=20&offset=0"));
   assert.equal(nodes.filter(node => node.type === "button" && node.props.children === "Approve candidate…").length, 1);
   nodes.find(node => node.type === "button" && node.props.children === "Create Memory").props.onClick();
   nodes = panel();
@@ -557,6 +557,111 @@ test("Memory management queues scoped create/review actions and waits for the Op
   assert.deepEqual(calls[1], {
     path: "/memories/candidate/review", body: { decision: "approve", conversation_id: "session/a" }, method: undefined,
   });
+});
+
+test("Memory defaults open, paginates on the server, restores forgotten facts and confirms destructive actions", async () => {
+  for (const language of ["en", "zh-CN"]) {
+    let current, index = 0, refreshed = 0, receipt;
+    const scopes = new Map(), calls = [], queries = [];
+    const forgotten = { ...fact, id: "forgotten/a?", state: "deleted", session_id: "other/session" };
+    const action = {
+      busy: false, error: "", notice: "", setNotice() {},
+      run: async (path, body, method) => {
+        calls.push({ path, body, method });
+        if (body?.prepare) return { confirmation_id: `ticket-${calls.length}`, expires_at: 4102444800, workspace_id: "owned-workspace", counts: { memory_belief: 45 } };
+        if (method === "DELETE") return { deleted: true };
+        return receipt = { id: `operation-${calls.length}`, kind: path === "/memory/purge" ? "memory.purge" : "memory.update", state: "queued" };
+      },
+    };
+    const { MemoryManagement } = loadComponent("memories.tsx", {
+      react: {
+        useState: initial => {
+          const slot = index++, state = current;
+          if (!(slot in state)) state[slot] = initial;
+          return [state[slot], value => { state[slot] = typeof value === "function" ? value(state[slot]) : value; }];
+        },
+        useRef: initial => {
+          const slot = index++;
+          if (!(slot in current)) current[slot] = { current: initial };
+          return current[slot];
+        },
+        useEffect: callback => callback(),
+      },
+      "./api": {
+        active: state => ["queued", "running"].includes(state), segment: encodeURIComponent,
+        useAction: () => action,
+        useQuery: path => {
+          queries.push(path);
+          return { data: path?.startsWith("/operations/") ? receipt : { items: [forgotten], total: 45 }, dataPath: path, error: "", refresh: () => refreshed++ };
+        },
+      },
+      "./memory-model": model, "./locale-context": { useI18n: () => locale(language) },
+      "./ui": { Feedback: () => null, Empty: () => null },
+    });
+    const t = key => translate(key, language);
+    function render(component, props) {
+      if (!scopes.has(component)) scopes.set(component, []);
+      current = scopes.get(component); index = 0;
+      return elements(component(props));
+    }
+    const parent = () => render(MemoryManagement, { status: { memory_configured: true }, sessionId: "current/session" });
+    const component = () => parent().find(node => typeof node.type === "function" && node.type.name === "Memories");
+    const panel = () => { const child = component(); return render(child.type, child.props); };
+    const button = text => panel().find(node => node.type === "button" && node.props.children === t(text));
+    assert.equal(component().props.enabled, true);
+    assert.ok(parent().some(node => node.type === "button" && node.props.children === t("Hide saved Memory")));
+    button("Next page").props.onClick();
+    panel();
+    assert.match(queries.at(-1), /all_scopes=true&limit=20&offset=20$/);
+    panel().find(node => node.type === "select" && node.props.value === "").props.onChange({ target: { value: "deleted" } });
+    panel();
+    assert.match(queries.at(-1), /offset=0&state=deleted$/);
+    button("Permanently delete…").props.onClick();
+    assert.equal(calls.length, 0);
+    button("Cancel").props.onClick();
+    assert.equal(calls.length, 0);
+    button("Permanently delete…").props.onClick();
+    await button("Confirm permanent delete").props.onClick();
+    assert.deepEqual(calls[0], { path: "/memories/forgotten%2Fa%3F?conversation_id=other%2Fsession&hard=true", body: undefined, method: "DELETE" });
+    button("Edit and remember again…").props.onClick();
+    panel().find(node => node.type === "textarea").props.onChange({ target: { value: "Explicitly remembered again" } });
+    await panel().find(node => node.type === "form").props.onSubmit({ preventDefault() {} });
+    assert.equal(calls[1].method, "PUT");
+    assert.equal(calls[1].body.session_id, "other/session");
+    assert.equal(calls[1].body.text, "Explicitly remembered again");
+    let monitor = panel().find(node => typeof node.type === "function" && node.type.name === "MemoryOperation");
+    receipt = { ...receipt, state: "succeeded" };
+    render(monitor.type, monitor.props);
+    await button("Clear all long-term Memory…").props.onClick();
+    assert.deepEqual(calls.at(-1), { path: "/memory/purge", body: { prepare: true }, method: undefined });
+    assert.equal(button("Confirm clear all Memory").props.disabled, true);
+    await button("Confirm clear all Memory").props.onClick();
+    assert.equal(calls.length, 3);
+    button("Cancel").props.onClick();
+    assert.equal(calls.length, 3);
+    await button("Clear all long-term Memory…").props.onClick();
+    const label = text => panel().find(node => node.type === "label" && elements(node.props.children).some(node => node.type === "input") && (
+      node.props.children[0] === t(text) || node.props.children[1] === t(text)
+    ));
+    elements(label("Type DELETE ALL MEMORY to confirm")).find(node => node.type === "input").props.onChange({ target: { value: "DELETE ALL MEMORY" } });
+    assert.equal(button("Confirm clear all Memory").props.disabled, true);
+    elements(label("I understand the deletion scope and that this cannot be undone.")).find(node => node.type === "input").props.onChange({ target: { checked: true } });
+    assert.equal(button("Confirm clear all Memory").props.disabled, false);
+    await button("Confirm clear all Memory").props.onClick();
+    assert.deepEqual(calls.at(-1), { path: "/memory/purge", body: { confirmation_id: "ticket-4", confirmation_text: "DELETE ALL MEMORY" }, method: undefined });
+    assert.equal(button("Clear all long-term Memory…").props.disabled, true);
+    monitor = panel().find(node => typeof node.type === "function" && node.type.name === "MemoryOperation");
+    scopes.delete(monitor.type);
+    render(monitor.type, monitor.props);
+    receipt = { ...receipt, state: "succeeded" };
+    render(monitor.type, monitor.props);
+    assert.equal(button("Clear all long-term Memory…").props.disabled, false);
+    assert.ok(refreshed >= 3);
+    parent().find(node => node.type === "button" && node.props.children === t("Hide saved Memory")).props.onClick();
+    assert.equal(component().props.enabled, false);
+    panel();
+    assert.equal(queries.at(-1), null);
+  }
 });
 
 test("Working editor keeps drafts across language/query refreshes, selects only active tasks and reconciles CAS failures", async () => {

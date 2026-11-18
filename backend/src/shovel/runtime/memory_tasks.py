@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-from dataclasses import replace
 from time import perf_counter
 from typing import TYPE_CHECKING, Any
 
@@ -9,7 +8,7 @@ import httpx
 from anyio import CancelScope
 from ollama import ResponseError
 from openai import APIConnectionError, APIStatusError
-from sqlalchemy import func, select, text, update
+from sqlalchemy import case, func, select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.sql.elements import ColumnElement
 
@@ -18,6 +17,7 @@ from shovel.db.model.runtime import ChatMessage, MemoryEpoch, Operation
 from shovel.memory.domain import EXTRACTION_VERSION, ExtractionCancelled, MemoryExtractionError
 from shovel.runtime.diagnostics import trace, trace_context
 from shovel.runtime.errors import RuntimeFailure
+from shovel.runtime.memory_reset import MemoryResetService
 from shovel.runtime.requests import request_fingerprint, request_operation_id
 
 if TYPE_CHECKING:
@@ -71,6 +71,7 @@ class MemoryTaskService:
         self._execute_lock = asyncio.Lock()
         self._control_lock = asyncio.Lock()
         self._active: Operation | None = None
+        self.reset = MemoryResetService(runtime)
 
     @property
     def is_active(self) -> bool:
@@ -94,6 +95,8 @@ class MemoryTaskService:
             previous = await session.get(Operation, request_operation_id(request_key))
         if previous is None:
             return None
+        if previous.result.get("purged") and previous.state == "cancelled":
+            raise RuntimeFailure("This request was erased. Use a new key for a new intent.", status=409)
         owned = {
             **intent,
             "workspace_id": self.runtime.memory.owner.workspace_id,
@@ -189,6 +192,10 @@ class MemoryTaskService:
             assert row is not None
             if row.state != "failed":
                 raise RuntimeFailure("只能重试失败的记忆任务。", status=409)
+            if row.kind == "memory.purge":
+                raise RuntimeFailure(
+                    "Prepare and confirm a new Memory erasure instead of retrying.", status=409
+                )
             if (
                 row.payload["workspace_id"] != self.runtime.memory.owner.workspace_id
                 or row.payload["user_id"] != self.runtime.memory.owner.user_id
@@ -229,7 +236,11 @@ class MemoryTaskService:
                         func.json_extract(Operation.payload, "$.user_id")
                         == self.runtime.memory.owner.user_id,
                     )
-                    .order_by(Operation.queued_at, text("operation.rowid"))
+                    .order_by(
+                        case((Operation.kind == "memory.purge", 0), else_=1),
+                        Operation.queued_at,
+                        text("operation.rowid"),
+                    )
                     .limit(1)
                 )
                 if operation is None:
@@ -296,14 +307,16 @@ class MemoryTaskService:
                         )
                     elif operation.kind == "memory.rebuild":
                         await self.runtime.memory.rebuild()
+                    elif operation.kind == "memory.purge":
+                        await self.runtime.chat.clear_memory(operation.id)
                     elif operation.kind in ("memory.create", "memory.update"):
                         await self.runtime.memory.write(operation)
                     elif operation.kind == "memory.review":
+                        target = await self.runtime.memory.owned(
+                            operation.payload["memory_id"], all_scopes=True
+                        )
                         await self.runtime.memory.repository.review(
-                            replace(
-                                self.runtime.memory.owner,
-                                session_id=operation.payload.get("conversation_id", ""),
-                            ),
+                            target.scope,
                             operation.payload["memory_id"],
                             operation.payload["decision"],
                             operation_id=operation.id,

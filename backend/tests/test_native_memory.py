@@ -1487,9 +1487,409 @@ async def test_native_management_api_and_idempotent_update(runtime: Runtime, api
     history = (await api.get("/api/v1/memories?include_history=true")).json()["items"]
     assert {r["state"] for r in history} == {"active", "superseded"}
     newer = next(r for r in history if r["state"] == "active")
+    assert newer["memory"] == changed["text"] and newer["object"] == changed["object"]
+    assert next(r for r in history if r["id"] == item["id"])["superseded_by"] == newer["id"]
     assert (await api.delete(f"/api/v1/memories/{newer['id']}")).json()["deleted"]
     assert (await api.get("/api/v1/memories")).json()["items"] == []
     assert (await api.post("/api/v1/memories", json={"text": "My password is unsafe"})).status_code == 422
+
+
+@pytest.mark.parametrize("state", [MemoryState.DELETED, MemoryState.REJECTED])
+@pytest.mark.parametrize("method", ["POST", "PUT"])
+async def test_manual_memory_tombstone_requires_explicit_edit(
+    runtime: Runtime, api: httpx.AsyncClient, state: MemoryState, method: str
+) -> None:
+    repo, scope = runtime.memory.repository, runtime.memory.owner
+    blocked = (await repo.consolidate(scope, [fact()], Provenance("manual")))[0]
+    await repo.transition(scope, blocked.id, state)
+    original = (
+        await repo.consolidate(
+            scope,
+            [replace(fact("User prefers coffee."), object="coffee")],
+            Provenance("manual"),
+        )
+    )[0]
+    before_outbox = await repo.pending(scope, force=True)
+    payload = {
+        "text": "User now prefers GREEN tea.",
+        "object": "GREEN TEA",
+        "topic": "drink",
+    }
+    headers = {"Idempotency-Key": f"manual-tombstone-{method}-{state}"}
+    path = f"/api/v1/memories/{original.id}" if method == "PUT" else "/api/v1/memories"
+    queued = await api.request(method, path, json=payload, headers=headers)
+    assert queued.status_code == 202, queued.text
+    assert await runtime.memory_tasks.run_once()
+    operation = (await api.get(f"/api/v1/operations/{queued.json()['id']}")).json()
+    if method == "POST":
+        assert operation["state"] == "failed", operation
+        assert "遗忘或拒绝" in operation["error"]
+        assert operation["result"]["retryable"] is False
+        assert not operation["result"].get("committed")
+        assert await repo.get(scope, original.id) == original
+        assert (await repo.get(scope, blocked.id)).state == state
+        assert await repo.pending(scope, force=True) == before_outbox
+        assert [item.id for item in await repo.list_records(scope)] == [original.id]
+    else:
+        assert operation["state"] == "succeeded", operation
+        assert operation["result"]["committed"]
+        active = await repo.list_records(scope)
+        assert len(active) == 1 and active[0].text == payload["text"]
+        for identifier in (original.id, blocked.id):
+            old = await repo.get(scope, identifier)
+            assert old.state == MemoryState.SUPERSEDED and old.superseded_by == active[0].id
+    replayed = await api.request(method, path, json=payload, headers=headers)
+    assert replayed.status_code == 202 and replayed.json()["id"] == queued.json()["id"]
+    assert replayed.json()["state"] == operation["state"]
+    assert not await runtime.memory_tasks.run_once()
+
+
+@pytest.mark.parametrize("kind", list(MemoryType))
+@pytest.mark.parametrize("state", [MemoryState.DELETED, MemoryState.REJECTED])
+async def test_edit_forgotten_fact_creates_active_replacement(
+    runtime: Runtime, api: httpx.AsyncClient, kind: MemoryType, state: MemoryState
+) -> None:
+    repo, scope = runtime.memory.repository, runtime.memory.owner
+    original = (await repo.consolidate(scope, [fact(kind=kind)], Provenance("manual")))[0]
+    await repo.transition(scope, original.id, state)
+    edited = await api.put(
+        f"/api/v1/memories/{original.id}",
+        json={"text": original.text, "kind": kind.value, "object": "green tea", "topic": "drink"},
+    )
+    assert edited.status_code == 202, edited.text
+    assert await runtime.memory_tasks.run_once()
+    assert (await runtime.operations.get(edited.json()["id"])).state == "succeeded"
+    current = await repo.list_records(scope)
+    assert len(current) == 1 and current[0].id != original.id
+    assert (await repo.get(scope, original.id)).superseded_by == current[0].id
+    assert (await api.delete(f"/api/v1/memories/{original.id}?hard=true")).status_code == 200
+    with pytest.raises(NotFound):
+        await repo.get(scope, original.id)
+    assert (await repo.get(scope, current[0].id)).state == MemoryState.ACTIVE
+
+
+async def test_memory_pagination_all_states_scopes_and_owner_boundary(
+    runtime: Runtime, api: httpx.AsyncClient
+) -> None:
+    repo, scope = runtime.memory.repository, runtime.memory.owner
+    ids = set()
+    for kind in MemoryType:
+        for number in range(9):
+            target = replace(scope, kind=ScopeKind.SESSION, session_id=f"session-{number}")
+            item = (
+                await repo.consolidate(target, [fact(f"Event {number}", kind=kind)], Provenance("manual"))
+            )[0]
+            ids.add(item.id)
+            if number % 2:
+                await repo.transition(target, item.id, MemoryState.DELETED)
+    foreign = replace(scope, workspace_id="other-workspace")
+    await repo.consolidate(foreign, [fact()], Provenance("manual"))
+    assert (await api.get("/api/v1/memories")).json()["items"] == []
+    seen = []
+    for offset in range(0, 27, 5):
+        response = await api.get(
+            "/api/v1/memories",
+            params={"all_scopes": True, "include_history": True, "limit": 5, "offset": offset},
+        )
+        page = response.json()
+        assert page["total"] == 27 and page["offset"] == offset
+        seen.extend(item["id"] for item in page["items"])
+    assert set(seen) == ids and len(seen) == len(set(seen))
+    deleted = (
+        await api.get("/api/v1/memories?all_scopes=true&include_history=true&state=deleted&limit=5")
+    ).json()
+    assert deleted["total"] == 12 and len(deleted["items"]) == 5
+    first = deleted["items"][0]
+    assert (
+        await api.put(
+            f"/api/v1/memories/{first['id']}",
+            json={
+                "text": first["memory"],
+                "kind": first["kind"],
+                "scope": "session",
+                "session_id": first["session_id"],
+                "object": first["object"],
+                "topic": first["topic"],
+            },
+        )
+    ).status_code == 202
+    assert await runtime.memory_tasks.run_once()
+    assert (await repo.get(foreign, (await repo.list_records(foreign))[0].id)).state == MemoryState.ACTIVE
+
+
+async def test_editing_forgotten_fact_to_different_identity_keeps_old_tombstone(
+    runtime: Runtime, api: httpx.AsyncClient
+) -> None:
+    repo, scope = runtime.memory.repository, runtime.memory.owner
+    old = (await repo.consolidate(scope, [fact()], Provenance("manual")))[0]
+    await repo.transition(scope, old.id, MemoryState.DELETED)
+    edited = await api.put(
+        f"/api/v1/memories/{old.id}",
+        json={"text": "User prefers coffee.", "object": "coffee", "topic": "drink"},
+    )
+    assert edited.status_code == 202
+    assert await runtime.memory_tasks.run_once()
+    assert (await runtime.operations.get(edited.json()["id"])).state == "succeeded"
+    active = await repo.list_records(scope)
+    assert len(active) == 1 and active[0].object == "coffee"
+    previous = await repo.get(scope, old.id)
+    assert previous.state == MemoryState.DELETED and previous.superseded_by == active[0].id
+    assert await repo.consolidate(scope, [fact()], Provenance("user_message")) == []
+
+
+async def test_confirmed_purge_erases_owned_memory_and_fences_old_requests(
+    runtime: Runtime, api: httpx.AsyncClient
+) -> None:
+    from sqlalchemy import func
+
+    from shovel.db.model.memory import (
+        MemoryExperience,
+        MemoryLink,
+        MemoryRevision,
+        MemoryWorking,
+        SessionSummary,
+    )
+    from shovel.db.model.runtime import MemoryEpoch, Operation
+    from shovel.domain.enums import MemoryKind, MemoryLinkKind, MemoryValidityState
+    from shovel.memory.zvec_index import memory_index_root
+    from shovel.runtime.user_profile import UserProfileInput
+
+    repo, scope = runtime.memory.repository, runtime.memory.owner
+    profile = await runtime.user_profile.save(
+        UserProfileInput(revision=0, nickname="Private profile", gender="", occupation="", bio="Private bio")
+    )
+    original = (await repo.consolidate(scope, [fact()], Provenance("manual")))[0]
+    await repo.transition(scope, original.id, MemoryState.DELETED)
+    for kind in (MemoryType.EPISODIC, MemoryType.PROCEDURAL):
+        await repo.consolidate(scope, [fact(kind=kind)], Provenance("manual"))
+    foreign = replace(scope, workspace_id="other-owner")
+    other = (await repo.consolidate(foreign, [fact()], Provenance("manual")))[0]
+    await repo.transition(foreign, other.id, MemoryState.REJECTED)
+    async with runtime.sessions() as session:
+        session.add(Conversation(id="purge-session"))
+        await session.flush()
+        session.add_all(
+            [
+                SessionSummary(
+                    conversation_id="purge-session",
+                    workspace_id=scope.workspace_id,
+                    user_id=scope.user_id,
+                    agent_id=scope.agent_id,
+                    content="Private summary",
+                    through_sequence=1,
+                ),
+                MemoryWorking(
+                    workspace_id=scope.workspace_id,
+                    user_id=scope.user_id,
+                    session_id="purge-session",
+                    content="Private working notes",
+                ),
+                MemoryExperience(
+                    workspace_id=scope.workspace_id,
+                    user_id=scope.user_id,
+                    source_execution_id="source",
+                    source_digest="digest",
+                    submission_digest="digest",
+                    generation=0,
+                    data={"observation": "Private experience"},
+                ),
+                MemoryLink(
+                    memory_id=original.id,
+                    memory_kind=MemoryKind.SEMANTIC,
+                    target_kind=next(iter(MemoryLinkKind)),
+                    target_id="source",
+                ),
+                MemoryRevision(
+                    memory_id=original.id,
+                    memory_kind=MemoryKind.SEMANTIC,
+                    to_state=MemoryValidityState.DELETED,
+                    reason="Private revision",
+                ),
+            ]
+        )
+        await session.commit()
+    root = memory_index_root(runtime.settings.memory, scope)
+    for generation in ("current-generation", "abandoned-generation"):
+        directory = root / generation
+        directory.mkdir(parents=True)
+        (directory / "synthetic-vector-data").write_text("private derived data")
+    sibling = memory_index_root(runtime.settings.memory, foreign)
+    sibling.mkdir()
+    (sibling / "keep").write_text("other owner")
+    payload = {"text": "Private pending fact", "object": "coffee"}
+    headers = {"Idempotency-Key": "old-pending-request"}
+    old = await api.post("/api/v1/memories", json=payload, headers=headers)
+    assert old.status_code == 202
+    async with runtime.sessions() as session:
+        session.add(
+            ChatMessage(
+                conversation_id="purge-session",
+                role="user",
+                content="Source messages are retained",
+                sequence=1,
+                memory_operation_id=old.json()["id"],
+            )
+        )
+        await session.commit()
+    assert (await api.post("/api/v1/memory/purge", json={})).status_code == 422
+    preview = (await api.post("/api/v1/memory/purge", json={"prepare": True})).json()
+    assert preview["counts"]["memory_belief"] == 3
+    assert root.exists() and (await repo.get(scope, original.id)).state == MemoryState.DELETED
+    assert (
+        await api.post(
+            "/api/v1/memory/purge",
+            json={"confirmation_id": preview["confirmation_id"], "confirmation_text": "wrong"},
+        )
+    ).status_code == 422
+    command = {
+        "confirmation_id": preview["confirmation_id"],
+        "confirmation_text": "DELETE ALL MEMORY",
+    }
+    key = {"Idempotency-Key": "confirmed-purge"}
+    accepted = await api.post("/api/v1/memory/purge", json=command, headers=key)
+    assert accepted.status_code == 202, accepted.text
+    assert root.exists()
+    assert await runtime.memory_tasks.run_once()
+    receipt = await runtime.operations.get(accepted.json()["id"])
+    assert receipt.state == "succeeded", receipt.error
+    recovery_workspace = (await api.get("/api/v1/status")).json()["workspace_id"]
+    assert receipt.result == {"committed": True, "purged": True, "workspace_id": recovery_workspace}
+    assert not root.exists() and (sibling / "keep").exists()
+    assert (await api.get("/api/v1/memories?all_scopes=true&include_history=true")).json()["total"] == 0
+    async with runtime.sessions() as session:
+        for model in (
+            MemoryBelief,
+            MemoryWorking,
+            MemoryExperience,
+            SessionSummary,
+            MemoryIndexOutbox,
+            MemoryIndexState,
+        ):
+            assert not await session.scalar(
+                select(func.count()).select_from(model).where(model.workspace_id == scope.workspace_id)
+            )
+        for model in (MemoryLink, MemoryRevision):
+            assert not await session.scalar(select(func.count()).select_from(model))
+        epoch = await session.scalar(
+            select(MemoryEpoch).where(MemoryEpoch.workspace_id == scope.workspace_id)
+        )
+        assert epoch is not None and epoch.generation == 1
+        fenced = await session.get(Operation, old.json()["id"])
+        assert fenced is not None and fenced.state == "cancelled" and fenced.result == {"purged": True}
+        assert fenced.payload == {"workspace_id": scope.workspace_id, "user_id": scope.user_id}
+        message = await session.scalar(select(ChatMessage))
+        assert message is not None and message.content == "Source messages are retained"
+        assert message.memory_operation_id is None
+    assert (await repo.get(foreign, other.id)).state == MemoryState.REJECTED
+    cleared = await runtime.user_profile.read()
+    assert cleared["revision"] > profile["revision"]
+    assert not any(cleared[field] for field in ("nickname", "gender", "occupation", "bio"))
+    await runtime.user_profile.synchronize()
+    assert await runtime.memory.list(include_history=True) == []
+    assert (await api.post("/api/v1/memories", json=payload, headers=headers)).status_code == 409
+    replay = await api.post("/api/v1/memory/purge", json=command, headers=key)
+    assert replay.status_code == 202 and replay.json()["id"] == receipt.id
+    assert (await api.post("/api/v1/memory/purge", json=command)).status_code == 409
+    fresh = await api.post("/api/v1/memories", json={"text": "Fresh intent after erasure"})
+    assert fresh.status_code == 202
+    assert await runtime.memory_tasks.run_once()
+    assert len(await runtime.memory.list()) == 1
+
+
+async def test_purge_confirmation_expires_without_deleting(
+    runtime: Runtime, api: httpx.AsyncClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    item = (
+        await runtime.memory.repository.consolidate(runtime.memory.owner, [fact()], Provenance("manual"))
+    )[0]
+    preview = (await api.post("/api/v1/memory/purge", json={"prepare": True})).json()
+    monkeypatch.setattr("shovel.runtime.memory_reset.now_ts", lambda: preview["expires_at"])
+    response = await api.post(
+        "/api/v1/memory/purge",
+        json={"confirmation_id": preview["confirmation_id"], "confirmation_text": "DELETE ALL MEMORY"},
+    )
+    assert response.status_code == 409
+    assert (await runtime.memory.owned(item.id)).state == MemoryState.ACTIVE
+
+
+async def test_cleared_profile_tombstone_can_be_deleted_without_projection_revival(
+    runtime: Runtime, api: httpx.AsyncClient
+) -> None:
+    from shovel.runtime.user_profile import UserProfileInput
+
+    saved = await runtime.user_profile.save(
+        UserProfileInput(revision=0, nickname="Synthetic nickname", gender="", occupation="", bio="")
+    )
+    item = (await runtime.memory.list())[0]
+    assert (await api.delete(f"/api/v1/memories/{item['id']}?hard=true")).status_code == 409
+    await runtime.user_profile.save(
+        UserProfileInput(revision=saved["revision"], nickname="", gender="", occupation="", bio="")
+    )
+    deleted = (await runtime.memory.list(include_history=True))[0]
+    assert deleted["state"] == "deleted" and deleted["object"] == ""
+    assert (await api.delete(f"/api/v1/memories/{deleted['id']}?hard=true")).status_code == 200
+    await runtime.user_profile.synchronize()
+    assert await runtime.memory.list(include_history=True) == []
+
+
+async def test_purge_closes_native_generations_and_allows_fresh_index(
+    runtime: Runtime, api: httpx.AsyncClient, tmp_path: Path
+) -> None:
+    index = vectors(runtime, tmp_path)
+    await runtime.memory.repository.consolidate(runtime.memory.owner, [fact()], Provenance("manual"))
+    while await runtime.memory.maintain():
+        pass
+    assert await index.search("tea", runtime.memory.owner, 5)
+    await index.start_rebuild()
+    assert index._active is not None and index._building is not None
+    assert index._query_cache._values
+    preview = (await api.post("/api/v1/memory/purge", json={"prepare": True})).json()
+    accepted = await api.post(
+        "/api/v1/memory/purge",
+        json={"confirmation_id": preview["confirmation_id"], "confirmation_text": "DELETE ALL MEMORY"},
+    )
+    assert accepted.status_code == 202
+    assert await runtime.memory_tasks.run_once()
+    operation = await runtime.operations.get(accepted.json()["id"])
+    assert operation.state == "succeeded", operation.error
+    assert not index.root.exists()
+    assert index._active is None and index._building is None and not index._query_cache._values
+    assert (await runtime.memory.status())["pending_index_operations"] == 0
+    fresh = await api.post("/api/v1/memories", json={"text": "Fresh tea preference", "object": "tea"})
+    assert fresh.status_code == 202
+    assert await runtime.memory_tasks.run_once()
+    while await runtime.memory.maintain():
+        pass
+    assert len(await index.search("tea", runtime.memory.owner, 5)) == 1
+
+
+@pytest.mark.parametrize("failure", ["filesystem", "active_chat"])
+async def test_purge_failure_never_claims_erasure_or_removes_facts(
+    runtime: Runtime, api: httpx.AsyncClient, monkeypatch: pytest.MonkeyPatch, failure: str
+) -> None:
+    item = (
+        await runtime.memory.repository.consolidate(runtime.memory.owner, [fact()], Provenance("manual"))
+    )[0]
+    if failure == "filesystem":
+
+        def fail(_root: Path) -> None:
+            raise OSError("Synthetic filesystem failure")
+
+        monkeypatch.setattr("shovel.runtime.memory_reset.remove_memory_partition", fail)
+    else:
+        monkeypatch.setattr(runtime.chat, "_active_runs", 1)
+    preview = (await api.post("/api/v1/memory/purge", json={"prepare": True})).json()
+    accepted = await api.post(
+        "/api/v1/memory/purge",
+        json={"confirmation_id": preview["confirmation_id"], "confirmation_text": "DELETE ALL MEMORY"},
+    )
+    assert accepted.status_code == 202
+    assert await runtime.memory_tasks.run_once()
+    operation = await runtime.operations.get(accepted.json()["id"])
+    assert operation.state == "failed" and not operation.result.get("committed")
+    assert await runtime.memory.owned(item.id) == item
+    assert not runtime.chat._restarting
+    assert (await api.post(f"/api/v1/operations/{operation.id}/retry")).status_code == 409
 
 
 @pytest.mark.parametrize("provider", ["openai", "azure_openai", "ollama", "deepseek", "qianwen"])

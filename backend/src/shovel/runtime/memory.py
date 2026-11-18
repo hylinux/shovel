@@ -189,12 +189,39 @@ class MemoryService:
         scope = replace(self.owner, session_id=conversation_id)
         return [view(r) for r in await self.repository.list_records(scope, limit=limit, states=states)]
 
-    async def owned(self, identifier: str, *, conversation_id: str = "") -> MemoryRecord:
-        return await self.repository.get(replace(self.owner, session_id=conversation_id), identifier)
+    async def page(
+        self,
+        limit: int,
+        offset: int,
+        *,
+        include_history: bool,
+        conversation_id: str,
+        state: MemoryState | None,
+        all_scopes: bool,
+    ) -> dict[str, Any]:
+        rows, total = await self.repository.page(
+            replace(self.owner, session_id=conversation_id),
+            limit=limit,
+            offset=offset,
+            states=(state,) if state else tuple(MemoryState) if include_history else (MemoryState.ACTIVE,),
+            all_scopes=all_scopes,
+        )
+        return {"items": [view(row) for row in rows], "total": total, "limit": limit, "offset": offset}
+
+    async def owned(
+        self, identifier: str, *, conversation_id: str = "", all_scopes: bool = False
+    ) -> MemoryRecord:
+        return await self.repository.get(
+            replace(self.owner, session_id=conversation_id), identifier, all_scopes=all_scopes
+        )
 
     async def delete(self, identifier: str, *, hard: bool = False, conversation_id: str = "") -> None:
         await self.repository.transition(
-            replace(self.owner, session_id=conversation_id), identifier, MemoryState.DELETED, hard=hard
+            replace(self.owner, session_id=conversation_id),
+            identifier,
+            MemoryState.DELETED,
+            hard=hard,
+            all_scopes=True,
         )
 
     async def forget_conversation(self, identifier: str) -> None:
@@ -216,6 +243,15 @@ class MemoryService:
             kind=ScopeKind(payload.scope),
             session_id=payload.session_id,
         )
+        if operation.payload.get("replace_id"):
+            current = await self.owned(operation.payload["replace_id"], all_scopes=True)
+            if (
+                current.kind.value != payload.kind
+                or current.scope.kind.value != payload.scope
+                or current.scope.session_id != payload.session_id
+            ):
+                raise RuntimeFailure("更新不能更改 Memory 类型或 Scope。", status=409)
+            scope = current.scope
         if scope.kind == ScopeKind.SESSION:
             async with self.sessions() as session:
                 if await session.get(Conversation, scope.session_id) is None:

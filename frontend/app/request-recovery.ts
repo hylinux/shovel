@@ -32,7 +32,7 @@ function isPendingRequest(value: unknown): value is PendingRequest {
     && "workspace" in value && typeof value.workspace === "string"
     && "path" in value && typeof value.path === "string"
     && (/^\/resources(?:\/|$)/.test(value.path) || value.path === "/index/cleanup" || value.path === "/history/prune"
-      || /^\/memories(?:\/|$)/.test(value.path) || value.path === "/memory/index/rebuild"
+      || /^\/memories(?:\/|$)/.test(value.path) || value.path === "/memory/index/rebuild" || value.path === "/memory/purge"
       || platformReceipt(value.path, "body" in value ? value.body : undefined))
     && "method" in value && typeof value.method === "string" && ["POST", "PUT", "PATCH", "DELETE"].includes(value.method)
     && (!("body" in value) || typeof value.body === "string");
@@ -44,6 +44,14 @@ export function savePendingRequest(request: PendingRequest) {
 
 export function forgetPendingRequest(key: string) {
   localStorage.removeItem(prefix + key);
+}
+
+export function forgetMemoryRequests(workspace: string) {
+  for (const request of pendingRequests(workspace)) {
+    if (/^\/memories(?:\/|$)/.test(request.path) || request.path.startsWith("/memory/")) {
+      forgetPendingRequest(request.key);
+    }
+  }
 }
 
 export function pendingRequests(workspace: string): PendingRequest[] {

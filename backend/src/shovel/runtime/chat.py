@@ -68,6 +68,15 @@ class ChatService:
     def session_lock(self, identifier: str) -> asyncio.Lock:
         return self._locks.setdefault(identifier, asyncio.Lock())
 
+    async def clear_memory(self, operation_id: str) -> None:
+        if self._active_runs or self._restarting:
+            raise RuntimeFailure("Finish active chats or Agent restart before clearing Memory.", status=409)
+        self._restarting = True
+        try:
+            await self.runtime.memory_tasks.reset.run(operation_id)
+        finally:
+            self._restarting = False
+
     async def restart_agent(
         self, *, instructions: AgentInstructionsInput | None = None
     ) -> AgentInstructionsView:

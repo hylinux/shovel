@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import test from "node:test";
-import { forgetPendingRequest, makePendingRequest, pendingRequests, savePendingRequest } from "../app/request-recovery.ts";
+import { forgetMemoryRequests, forgetPendingRequest, makePendingRequest, pendingRequests, savePendingRequest } from "../app/request-recovery.ts";
 
 test("recovery receipts survive reload, match backend IDs and stay workspace scoped", async () => {
   const values = new Map();
@@ -27,6 +27,7 @@ test("recovery receipts survive reload, match backend IDs and stay workspace sco
     ["/resources/notes/profiles/text", "DELETE"],
     ["/history/prune", "POST"],
     ["/memory/index/rebuild", "POST"],
+    ["/memory/purge", "POST"],
     ["/memories", "POST"],
     ["/memories/native-fact", "PUT"],
   ]) {
@@ -38,6 +39,15 @@ test("recovery receipts survive reload, match backend IDs and stay workspace sco
   values.set("shovel.request.bad-method", JSON.stringify({ ...request, method: 123 }));
   assert.throws(() => pendingRequests("workspace-a"), /invalid recovery receipt/);
   values.delete("shovel.request.bad-method");
+  const owned = await makePendingRequest("workspace-a", "/memories", "POST", '{"text":"Private pending fact"}');
+  const unrelated = await makePendingRequest("workspace-a", "/resources", "POST", "{}");
+  const foreign = await makePendingRequest("workspace-b", "/memories", "POST", "{}");
+  for (const request of [owned, unrelated, foreign]) savePendingRequest(request);
+  forgetMemoryRequests("workspace-a");
+  assert.deepEqual(pendingRequests("workspace-a"), [unrelated]);
+  assert.deepEqual(pendingRequests("workspace-b"), [foreign]);
+  forgetPendingRequest(unrelated.key);
+  forgetPendingRequest(foreign.key);
   values.set("shovel.request.broken", JSON.stringify({ path: "/resources" }));
   assert.throws(() => pendingRequests("workspace-a"), /invalid recovery receipt/);
 });

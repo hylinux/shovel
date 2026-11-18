@@ -514,6 +514,16 @@ stateDiagram-v2
 保留的 deleted fingerprint（事件/程序还比较规范化正文）作为 tombstone，
 阻止同一写入 Scope 中的同一事实被再次整理激活。
 它不是对所有未来自然语言改写的永久语义封禁。
+同样的保护也适用于 rejected 记录。手动新建命中该保护时，
+持久 Operation 必须失败并明确说明冲突，不能静默跳过写入后回执成功。
+明确的手动替代更新允许重新记住：可编辑 active/deleted/rejected 记录，
+同一写入 Scope 下匹配的墓碑及被替代记录转为 superseded，指向新的 active
+记录；新事实、历史状态、索引 Outbox 和成功回执在同一事务提交。
+若编辑把已遗忘记录改成不同事实身份，旧事实仍保留 deleted/rejected 围栏，
+仅补充指向新事实的链接，不能借修改另一个事实解除旧事实的自动学习保护。
+自动提取仍可成功提交零条事实，不具有手动恢复权限。
+语义事实的身份基于规范化三元组与 topic，不只比较显示正文；
+仅更改正文不能绕过相同对象值的墓碑保护。
 
 ### 9.3 硬删除
 
@@ -522,6 +532,38 @@ stateDiagram-v2
 
 无论软删除还是硬删除，都不等于清除其他会话源消息、历史备份、旧索引目录，
 或撤回已经发送给模型供应商的数据。
+
+管理页面提供单条硬删除，包括已遗忘记录，并要求再次确认。
+仍在设置中生效的 Profile 字段由 General settings 管理；已清空字段留下的
+空值 deleted 墓碑可以硬删除，不会被空值 Profile 投影重新创建。
+
+### 9.3.1 清空当前所有者的全部 Memory
+
+`POST /memory/purge` 的 `prepare: true` 只生成当前工作区/用户的范围预览、
+统计和五分钟有效的进程内单次确认凭据，不删除数据。页面要求确认范围，
+勾选不可撤销提示并输入固定文字 `DELETE ALL MEMORY`，再提交凭据和该文字。
+清理意图覆盖实际执行时该所有者的全部 Memory，而不是冻结预览时的 ID 列表。
+确认后返回 HTTP 202 + `memory.purge` Operation，并支持同键回查。
+失败的清空不允许通过通用 retry 直接重放，必须重新预览并确认新的清空意图。
+
+复用 Memory worker，清空优先于其他排队 Memory 工作。执行时拒绝进行中的
+聊天/Agent restart，并在清理期间复用聊天准入围栏；获取 SQLite writer
+和 Memory maintenance 锁后，先关闭索引句柄并移除该所有者专属分区的所有代
+（含遗留代及当前未配置 embedder 时的旧目录），再原子提交 SQLite 清理。
+文件清理失败不提交事实删除，也不报告成功；SQLite 仍是权威，
+已移除的派生索引可从保留的事实重建。
+
+清理范围：三类长期事实全部状态/历史、Session Summary、Working Memory、
+经验候选、对应 links/revisions、索引 Outbox/状态，以及历史 Memory
+Operation 的正文、结果、错误和请求参数。清空 General profile 的四个文字字段
+并提升 revision，防止启动/重启投影重新生成被清空的 Profile 事实。
+索引查询缓存清空，MemoryEpoch 增长，旧 Memory Operation 被取消且擦除正文；
+仅保留不含正文的最小防重放记录及本次回执，旧请求键不能恢复已清空的数据。
+页面观察到成功后也移除本浏览器当前工作区的 Memory 请求恢复回执。
+
+不删除其他所有者的数据、Session/源消息、附件、知识库、头像、平台 Execution
+业务记录、外部备份或供应商已接收数据；也不承诺 SQLite/WAL/磁盘的取证级擦除。
+之后的新请求仍可创建新的 Memory，保留的源历史仍可能在后续使用时生成新上下文。
 
 ### 9.4 过期
 
@@ -1180,14 +1222,16 @@ provider、路径或模型版本变更通常需要重启 Host；
 
 | API | 语义 |
 | --- | --- |
-| `GET /memories` | 默认列出当前可见的 active、未过期记录，返回 `{"items": [...]}` |
+| `GET /memories` | 默认列出当前可见的 active、未过期记录，返回 items、total、limit、offset |
 | `GET /memories?include_history=true` | 同时查看生命周期历史；仍受 Scope 和 limit 约束 |
 | `GET /memories?conversation_id=...` | 在指定会话上下文中读取，包括该会话的 session Scope |
+| `GET /memories?all_scopes=true&include_history=true&limit=20&offset=0` | 管理视图读取当前工作区/用户的所有 Scope 和历史；state 在分页前过滤，稳定跨类型排序；不改变 Agent 召回可见性 |
 | `POST /memories` | 手动新建，HTTP 202，返回持久 Operation |
 | `PUT /memories/{id}` | 显式替代更新，HTTP 202，返回 Operation |
 | `DELETE /memories/{id}` | 默认软删除，返回 `{"deleted": true}` |
 | `DELETE /memories/{id}?hard=true` | 硬删除事实行，仍保留向量清理意图 |
 | `POST /memory/index/rebuild` | 排队重建，HTTP 202；需要配置 Memory embedder 才能执行成功 |
+| `POST /memory/purge` | 先 prepare 预览，再携带确认凭据和固定文字提交，HTTP 202，彻底清空当前所有者的 Memory |
 | `GET /operations`、`GET /operations/{id}` | 查看任务状态/回执 |
 | `POST /operations/{id}/retry` | 显式重试符合条件的失败任务 |
 | `GET /status` | 返回 Memory index_state、pending 数量、last_error 等 |
@@ -1217,9 +1261,11 @@ provider、路径或模型版本变更通常需要重启 Host；
 session Scope 必须提供存在的 `session_id`，其他 Scope 不允许附带 session_id。
 procedural 可经该路径显式维护，但不会自动提升为主 Agent instructions。
 
-当前 **Settings → Manage long-term Memory** 支持按需加载、查看、
-确认软删除和排队重建。后台任务页查看/重试失败 Operation。
-API 比页面丰富：不能因为 API 有手动创建/更新，就认为页面已有完整表单。
+当前 **Settings → Manage long-term Memory** 默认展开并读取所有状态/Scope，
+每页 20 条，支持服务端分页/状态过滤、手动创建/替代更新、已遗忘事实的明确恢复、
+确认软删除/硬删除、受确认保护的全部清空及排队重建。
+用户点击隐藏后停止列表读取，保留挂载的编辑状态。
+后台任务页查看/重试失败 Operation；接受 HTTP 202 不代表清理或保存已经完成。
 
 ## 20. 按依赖顺序理解实现步骤
 

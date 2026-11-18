@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import shutil
 import threading
 from collections.abc import Callable
+from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
@@ -27,6 +29,18 @@ def _literal(value: str) -> str:
     return '"' + value.replace("\\", "\\\\").replace('"', '\\"') + '"'
 
 
+def memory_index_root(settings: MemorySettings, scope: MemoryScope) -> Path:
+    partition = hashlib.sha256(f"{scope.workspace_id}|{scope.user_id}".encode()).hexdigest()[:24]
+    return settings.index_path.expanduser().resolve() / partition
+
+
+def remove_memory_partition(root: Path) -> None:
+    if root.is_symlink() or root.is_junction():
+        raise RuntimeError("Refusing to remove a redirected Memory partition.")
+    if root.exists():
+        shutil.rmtree(root)
+
+
 class ZvecMemoryIndex:
     def __init__(
         self,
@@ -39,8 +53,7 @@ class ZvecMemoryIndex:
         cache_seconds: float = 300,
     ) -> None:
         self.settings, self.scope, self.repository, self.embedder = settings, scope, repository, embedder
-        partition = hashlib.sha256(f"{scope.workspace_id}|{scope.user_id}".encode()).hexdigest()[:24]
-        self.root = settings.index_path.expanduser().resolve() / partition
+        self.root = memory_index_root(settings, scope)
         self._active: Any = None
         self._building: Any = None
         self._lock = asyncio.Lock()
@@ -275,3 +288,10 @@ class ZvecMemoryIndex:
                 await self._release_collections()
             finally:
                 await self.embedder.aclose()
+
+    async def purge(self) -> None:
+        async with self._lock:
+            await self._release_collections()
+            await self._io(lambda: remove_memory_partition(self.root))
+            cache = self._query_cache
+            self._query_cache = EmbeddingCache(cache.entries, cache.seconds, self.settings.dim)

@@ -89,6 +89,12 @@ class MemoryReviewInput(InputModel):
     conversation_id: str = Field(default="", max_length=200)
 
 
+class MemoryPurgeInput(InputModel):
+    prepare: bool = False
+    confirmation_id: str = Field(default="", max_length=128)
+    confirmation_text: str = Field(default="", max_length=64)
+
+
 class MCPConfigurationInput(BaseModel):
     model_config = ConfigDict(extra="forbid")
     content: str = Field(max_length=1_048_576)

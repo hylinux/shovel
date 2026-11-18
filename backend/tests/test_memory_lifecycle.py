@@ -23,8 +23,9 @@ from shovel.db.model.runtime import Operation
 from shovel.memory.domain import MemoryCandidate, MemoryState, MemoryType, Provenance
 from shovel.runtime.api import configure_api
 from shovel.runtime.diagnostics import development_logging
+from shovel.runtime.knowledge_worker import KnowledgeWorker
 from shovel.runtime.service import Runtime
-from shovel.vector.store import init_vector_store, open_collection
+from shovel.vector.store import init_vector_store
 from test_hosted_runtime import settings_at
 from test_memory_p0_live import _free_text_answer_correct
 from test_native_memory import vectors
@@ -427,15 +428,16 @@ async def _project_event(root: Path, settings: AppSettings, *, live: bool) -> No
                 )
             entered, release = asyncio.Event(), threading.Event()
             loop = asyncio.get_running_loop()
+            original_open = KnowledgeWorker.open
 
-            def blocked(path: str) -> Any:
+            def blocked(worker: KnowledgeWorker, path: str, **kwargs: Any) -> Any:
                 if Path(path).resolve() == Path(settings.zvec.knowledge_path).resolve():
                     loop.call_soon_threadsafe(entered.set)
                     if not release.wait(300):
                         raise TimeoutError("Isolated knowledge-opening barrier was not released.")
-                return open_collection(path)
+                return original_open(worker, path, **kwargs)
 
-            with patch("shovel.vector.store.open_collection", blocked):
+            with patch.object(KnowledgeWorker, "open", blocked):
                 warming = asyncio.create_task(runtime.sink(reason="warmup"))
                 try:
                     await asyncio.wait_for(entered.wait(), 20)

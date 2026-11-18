@@ -39,6 +39,7 @@ from shovel.config.settings import AppSettings, load_settings
 from shovel.runtime.diagnostics import development_logging, trace
 from shovel.runtime.errors import RuntimeFailure
 from shovel.runtime.hosting import build_host
+from shovel.runtime.process_guard import close_kill_job, create_kill_job, resume_suspended_process
 from shovel.runtime.shutdown import RuntimeHost, drain_task
 
 # -----------------------------------------------------------------------------
@@ -55,6 +56,7 @@ _getpgid: Callable[[int], int] | None = getattr(os, "getpgid", None)
 _killpg: Callable[[int, int], None] | None = getattr(os, "killpg", None)
 _SIGKILL: int = int(getattr(signal, "SIGKILL", signal.SIGTERM))
 _CREATE_NEW_PROCESS_GROUP: int = int(getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0))
+_CREATE_SUSPENDED = 0x00000004
 
 _PROJECT_MARKER = "pyproject.toml"
 _FRONTEND_DIR_NAME = "frontend"
@@ -362,7 +364,7 @@ async def _run_frontend(
     """启动 npm run dev, 退出上下文时保证整棵子进程树被关闭。"""
     kwargs: dict[str, Any] = {}
     if _IS_WINDOWS:
-        kwargs["creationflags"] = _CREATE_NEW_PROCESS_GROUP
+        kwargs["creationflags"] = _CREATE_NEW_PROCESS_GROUP | _CREATE_SUSPENDED
     else:
         kwargs["start_new_session"] = True
 
@@ -406,19 +408,27 @@ async def _run_frontend(
             )
         )
 
+    job: int | None = None
     try:
+        if _IS_WINDOWS:
+            job = create_kill_job(proc.pid)
+            resume_suspended_process(proc.pid)
         yield proc
     finally:
         try:
             await _terminate(proc)
         finally:
-            if pumps:
-                # 给泵一点时间把最后几行冲出来, 超时就砍掉
-                _, still_running = await asyncio.wait(
-                    pumps,
-                    timeout=_PUMP_DRAIN_TIMEOUT,
-                )
-                await _cancel_all(still_running)
+            try:
+                if job is not None:
+                    close_kill_job(job)
+            finally:
+                if pumps:
+                    # 给泵一点时间把最后几行冲出来, 超时就砍掉
+                    _, still_running = await asyncio.wait(
+                        pumps,
+                        timeout=_PUMP_DRAIN_TIMEOUT,
+                    )
+                    await _cancel_all(still_running)
         if proc.returncode is None:
             raise RuntimeFailure("Frontend process did not exit after termination.")
         trace("frontend.stopped", pid=proc.pid, exit_code=proc.returncode)

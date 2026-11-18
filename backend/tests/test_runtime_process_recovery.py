@@ -22,7 +22,7 @@ from shovel.pipeline.scan_service import ScanService
 from shovel.pipeline.sink import VectorRecord, ZvecChunkSink
 from shovel.runtime.client import manage_operation
 from shovel.runtime.hosting import build_cli_host, resolve_runtime
-from shovel.runtime.locking import RuntimeLock
+from shovel.runtime.locking import KnowledgeWorkerLock, RuntimeLock
 from shovel.runtime.operations import TERMINAL, OperationService
 from shovel.runtime.requests import request_operation_id
 from shovel.runtime.schemas import ResourceInput, ScanInput
@@ -163,6 +163,14 @@ async def test_real_process_exit_recovers_durable_state_and_releases_native_lock
         (tmp_path / "notes" / "notes.txt").unlink()
     monkeypatch.setattr(operations_module, "build_embedder", lambda *_args, **_kwargs: StaticEmbedder())
     settings = process_settings(tmp_path)
+    # Parent exit can precede delivery of the worker's parent-death signal.
+    async with asyncio.timeout(5):
+        while True:
+            try:
+                with KnowledgeWorkerLock(settings.zvec.knowledge_path):
+                    break
+            except OSError:
+                await asyncio.sleep(0.01)
     receipt = await asyncio.wait_for(
         manage_operation(settings, request_operation_id(f"crash-{point}"), wait=True), timeout=45
     )

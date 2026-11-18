@@ -388,10 +388,75 @@ async def test_frontend_cleanup_without_process_exit_is_not_reported_as_success(
 ) -> None:
     process = Mock(pid=123, returncode=None)
     monkeypatch.setattr(run_module.asyncio, "create_subprocess_exec", AsyncMock(return_value=process))
+    monkeypatch.setattr(run_module, "create_kill_job", Mock(return_value=456))
+    monkeypatch.setattr(run_module, "resume_suspended_process", Mock())
+    monkeypatch.setattr(run_module, "close_kill_job", Mock())
     monkeypatch.setattr(run_module, "_terminate", AsyncMock())
     with pytest.raises(RuntimeFailure, match="did not exit"):
         async with run_module._run_frontend(tmp_path, capture_output=False):
             pass
+
+
+@pytest.mark.parametrize("already_exited", [False, True])
+async def test_frontend_job_is_bound_before_execution_and_closed_after_shim_exit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, already_exited: bool
+) -> None:
+    process = Mock(pid=123, returncode=None)
+    events: list[str] = []
+    spawn = AsyncMock(return_value=process)
+    monkeypatch.setattr(run_module, "_IS_WINDOWS", True)
+    monkeypatch.setattr(run_module.asyncio, "create_subprocess_exec", spawn)
+    monkeypatch.setattr(
+        run_module, "create_kill_job", Mock(side_effect=lambda _pid: events.append("owned") or 456)
+    )
+    monkeypatch.setattr(
+        run_module, "resume_suspended_process", Mock(side_effect=lambda _pid: events.append("resumed"))
+    )
+    close_job = Mock(side_effect=lambda _job: events.append("closed"))
+    monkeypatch.setattr(run_module, "close_kill_job", close_job)
+
+    async def terminate(_process: Any) -> None:
+        events.append("terminate")
+        process.returncode = 1
+
+    monkeypatch.setattr(run_module, "_terminate", terminate)
+    async with run_module._run_frontend(tmp_path, capture_output=False):
+        assert events == ["owned", "resumed"]
+        if already_exited:
+            process.returncode = 1
+    assert events == ["owned", "resumed", "terminate", "closed"]
+    assert spawn.call_args.kwargs["creationflags"] & 4
+    close_job.assert_called_once_with(456)
+
+
+@pytest.mark.parametrize("stage", ["assignment", "resume"])
+async def test_frontend_containment_failure_cleans_up_without_publishing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, stage: str
+) -> None:
+    process = Mock(pid=123, returncode=1)
+    monkeypatch.setattr(run_module, "_IS_WINDOWS", True)
+    monkeypatch.setattr(run_module.asyncio, "create_subprocess_exec", AsyncMock(return_value=process))
+    monkeypatch.setattr(
+        run_module,
+        "create_kill_job",
+        Mock(return_value=456, side_effect=OSError("Containment failed.") if stage == "assignment" else None),
+    )
+    resume = Mock(side_effect=OSError("Containment failed.") if stage == "resume" else None)
+    monkeypatch.setattr(run_module, "resume_suspended_process", resume)
+    close_job = Mock()
+    monkeypatch.setattr(run_module, "close_kill_job", close_job)
+    terminate = AsyncMock()
+    monkeypatch.setattr(run_module, "_terminate", terminate)
+    with pytest.raises(OSError, match="Containment failed"):
+        async with run_module._run_frontend(tmp_path, capture_output=False):
+            pytest.fail("An unowned frontend must not be published.")
+    terminate.assert_awaited_once_with(process)
+    if stage == "assignment":
+        resume.assert_not_called()
+        close_job.assert_not_called()
+    else:
+        resume.assert_called_once_with(123)
+        close_job.assert_called_once_with(456)
 
 
 async def web_stop_child(root: Path, development: bool) -> int:

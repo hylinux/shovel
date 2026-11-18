@@ -96,6 +96,9 @@ uses one graceful deadline across service stopping and resource cleanup; dev
 also checks frontend cleanup against that deadline and closes Node concurrently
 with backend draining. Budget overruns are logged when they occur and produce
 a nonzero exit status without replacing the original stop cause.
+On Windows, dev creates the npm shim suspended, assigns a parent-owned
+kill-on-close Job, then resumes it. Node descendants are contained even when
+the shim exits first or the Python Host crashes.
 The knowledge collection's entire open/query/write/flush/optimize/close lifecycle
 runs in a private child process. Shutdown starts its admission drain immediately,
 in parallel with other cleanup. It reserves up to five seconds (20% of the

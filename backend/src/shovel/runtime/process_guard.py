@@ -83,6 +83,59 @@ def close_kill_job(handle: int) -> None:
             raise ctypes.WinError(ctypes.get_last_error())
 
 
+def resume_suspended_process(pid: int) -> None:
+    """Resume a newly created Windows process only after its Job is assigned."""
+    if sys.platform != "win32":
+        raise OSError("Suspended process startup requires Windows.")
+
+    class ThreadEntry(ctypes.Structure):
+        _fields_ = [
+            ("size", wintypes.DWORD),
+            ("usage", wintypes.DWORD),
+            ("thread_id", wintypes.DWORD),
+            ("owner_pid", wintypes.DWORD),
+            ("base_priority", wintypes.LONG),
+            ("delta_priority", wintypes.LONG),
+            ("flags", wintypes.DWORD),
+        ]
+
+    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel.CreateToolhelp32Snapshot.argtypes = [wintypes.DWORD, wintypes.DWORD]
+    kernel.CreateToolhelp32Snapshot.restype = wintypes.HANDLE
+    kernel.Thread32First.argtypes = [wintypes.HANDLE, ctypes.POINTER(ThreadEntry)]
+    kernel.Thread32Next.argtypes = [wintypes.HANDLE, ctypes.POINTER(ThreadEntry)]
+    kernel.OpenThread.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+    kernel.OpenThread.restype = wintypes.HANDLE
+    kernel.ResumeThread.argtypes = [wintypes.HANDLE]
+    kernel.ResumeThread.restype = wintypes.DWORD
+    kernel.CloseHandle.argtypes = [wintypes.HANDLE]
+    snapshot = kernel.CreateToolhelp32Snapshot(4, 0)  # TH32CS_SNAPTHREAD
+    if snapshot == ctypes.c_void_p(-1).value:
+        raise ctypes.WinError(ctypes.get_last_error())
+    try:
+        entry = ThreadEntry()
+        entry.size = ctypes.sizeof(entry)
+        more = kernel.Thread32First(snapshot, ctypes.byref(entry))
+        while more:
+            if entry.owner_pid == pid:
+                thread = kernel.OpenThread(2, False, entry.thread_id)  # THREAD_SUSPEND_RESUME
+                if not thread:
+                    raise ctypes.WinError(ctypes.get_last_error())
+                try:
+                    count = kernel.ResumeThread(thread)
+                    if count == 0xFFFFFFFF:
+                        raise ctypes.WinError(ctypes.get_last_error())
+                    if count != 1:
+                        raise OSError("Frontend startup thread was not suspended exactly once.")
+                    return
+                finally:
+                    kernel.CloseHandle(thread)
+            more = kernel.Thread32Next(snapshot, ctypes.byref(entry))
+        raise ProcessLookupError("Suspended frontend startup thread is unavailable.")
+    finally:
+        kernel.CloseHandle(snapshot)
+
+
 def arm_parent_death(parent_pid: int) -> None:
     if sys.platform == "linux":
         libc = ctypes.CDLL(None, use_errno=True)

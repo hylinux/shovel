@@ -32,7 +32,7 @@ from shovel.memory.domain import (
     ScopeKind,
 )
 from shovel.memory.service import MemoryService as NativeMemoryService
-from shovel.memory.service import view
+from shovel.memory.service import RecallCoverage, view
 from shovel.memory.sqlite_repository import SQLiteMemoryRepository
 from shovel.memory.working import WorkingMemoryService
 from shovel.memory.zvec_index import ZvecMemoryIndex
@@ -148,13 +148,17 @@ class MemoryService:
             "review_required": self.settings.memory.review_required,
         }
 
-    async def search(self, query: str, *, conversation_id: str = "") -> list[dict[str, Any]]:
+    async def search(
+        self, query: str, *, conversation_id: str = "", coverage: RecallCoverage | None = None
+    ) -> list[dict[str, Any]]:
         require_ordinary(EgressChannel.PROCESS, query)
         started = perf_counter()
         diagnostics: dict[str, int] = {}
         fallback = False
         try:
-            result = await self.application.retrieve(query, conversation_id, diagnostics=diagnostics)
+            result = await self.application.retrieve(
+                query, conversation_id, diagnostics=diagnostics, coverage=coverage
+            )
             self._index_error = None
         except _INDEX_ERRORS as exc:
             self._index_error = type(exc).__name__
@@ -162,7 +166,7 @@ class MemoryService:
             fallback = True
             diagnostics.clear()
             result = await self.application.retrieve(
-                query, conversation_id, use_index=False, diagnostics=diagnostics
+                query, conversation_id, use_index=False, diagnostics=diagnostics, coverage=coverage
             )
         trace(
             "memory.recall.completed",

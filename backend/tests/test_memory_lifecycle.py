@@ -4,6 +4,7 @@ import asyncio
 import hashlib
 import json
 import os
+import re
 import threading
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -67,6 +68,7 @@ async def _running(
     root: Path,
     live: bool,
     requests: list[list[dict[str, Any]]],
+    responses: list[str] | None = None,
 ) -> AsyncIterator[tuple[Runtime, httpx.AsyncClient]]:
     async with baseline_runtime(settings) as runtime:
         if not live:
@@ -76,15 +78,42 @@ async def _running(
         async def capture(request: httpx.Request) -> None:
             requests.append(_references(json.loads(await request.aread())))
 
+        async def capture_response(response: httpx.Response) -> None:
+            if responses is not None and response.is_success:
+                await response.aread()
+                for choice in response.json()["choices"]:
+                    if isinstance(content := choice.get("message", {}).get("content"), str):
+                        responses.append(content)
+
         def model(request: httpx.Request) -> httpx.Response:
+            payloads = _references(json.loads(request.content))
+            facts = {
+                (item["id"], item["revision"]): item
+                for payload in payloads
+                for item in payload.get("memory", [])
+            }
             supported = [
                 datetime.fromtimestamp(item["occurred_at"], UTC).date().isoformat()
                 if item["kind"] == "episodic"
                 else item["object"]
-                for payload in _references(json.loads(request.content))
+                for payload in payloads
                 for item in payload.get("memory", [])
                 if item.get("answer_support") == "supported"
             ]
+            answer = " / ".join(supported) if supported else "UNKNOWN"
+            for payload in payloads:
+                if "parts" in payload.get("memory_query", {}):
+                    lines = []
+                    for part in payload["memory_query"]["parts"]:
+                        dates = [
+                            datetime.fromtimestamp(facts[(ref["id"], ref["revision"])]["occurred_at"], UTC)
+                            .date()
+                            .isoformat()
+                            for ref in part["facts"]
+                        ]
+                        label = "开始时间" if part["action"] == "start" else "完成时间"
+                        lines.append(f"{label}: {', '.join(dates) if dates else 'UNKNOWN'}")
+                    answer = "\n".join(lines)
             return httpx.Response(
                 200,
                 json={
@@ -93,7 +122,7 @@ async def _running(
                         {
                             "message": {
                                 "role": "assistant",
-                                "content": " / ".join(supported) if supported else "UNKNOWN",
+                                "content": answer,
                             }
                         }
                     ],
@@ -102,7 +131,7 @@ async def _running(
 
         runtime.chat.agent._client = httpx.AsyncClient(
             transport=AnswerTransport() if live else httpx.MockTransport(model),
-            event_hooks={"request": [capture]},
+            event_hooks={"request": [capture], "response": [capture_response]},
         )
         app = FastAPI()
         configure_api(app, lambda: runtime, settings)
@@ -132,6 +161,34 @@ async def _drain(runtime: Runtime) -> None:
     status = await runtime.memory.status()
     assert status["index_state"] == "ready", status
     assert status["pending_index_operations"] == 0
+
+
+def _assert_event_answer(content: str, expected: dict[str, str | None]) -> None:
+    content = content.replace("**", "")
+    sections: dict[str, list[str]] = {"开始": [], "完成": []}
+    for clause in re.split(r"[\n;\uff1b。]", content):
+        labels = {label for label in sections if label in clause}
+        if len(labels) == 1:
+            sections[labels.pop()].append(clause)
+        elif len(labels) == 2:
+            for part in re.split(r"(?=(?:开始|完成)(?:时间|日期))", clause):
+                part_labels = {label for label in sections if label in part}
+                if len(part_labels) == 1:
+                    sections[part_labels.pop()].append(part)
+            if not any(expected.values()) and _free_text_answer_correct(clause, None):
+                for label in sections:
+                    sections[label].append(clause)
+    for action, date in expected.items():
+        label = "开始" if action == "start" else "完成"
+        section = " ".join(sections[label])
+        assert _free_text_answer_correct(section, date), content
+        if date is not None:
+            assert not re.search(r"无法确认|未找到|未记录|没有.*记录|不确定|未知|推测|可能", section), content
+        for other_action, other_date in expected.items():
+            if other_action != action and other_date is not None and other_date != date:
+                assert not _free_text_answer_correct(section, other_date), content
+        if date is None:
+            assert not re.search(r"(?<!\d)(?:19|20)\d{2}(?!\d)", section), content
 
 
 async def _read(
@@ -373,18 +430,20 @@ async def _project_event(root: Path, settings: AppSettings, *, live: bool, mixed
             ("我哪一天完成了紫鸢-V74项目\uff1f", False),
             ("我哪一天开始了赤狐-V74项目\uff1f", False),
             ("我哪一天开始了紫鸢-V75项目\uff1f", False),
-            ("紫鸢-V74项目何时开始、何时完成\uff1f请分别说明\uff1b没有记录的部分不要推测。", False),
+            ("紫鸢-V74项目何时开始、何时完成\uff1f请分别说明\uff1b没有记录的部分不要推测。", True),
         ]
     init_vector_store(settings.zvec)
     requests: list[list[dict[str, Any]]] = []
     report = _report(settings, live, _fingerprints())
     report["reads"] = []
+    report["model_answers"] = responses = []
 
     async def read(runtime: Runtime, api: httpx.AsyncClient, question: str, expected: bool) -> None:
         diagnostics: dict[str, int] = {}
         recalled = await runtime.memory.application.retrieve(
             question, record_access=False, diagnostics=diagnostics
         )
+        report["last_question"] = question
         answer = await _send(api, question)
         supported = [
             item
@@ -399,6 +458,10 @@ async def _project_event(root: Path, settings: AppSettings, *, live: bool, mixed
                 "diagnostics": diagnostics,
                 "supported": supported,
                 "answer": answer["content"],
+                "memory_query": next(
+                    (payload["memory_query"] for payload in requests[-1] if "memory_query" in payload),
+                    None,
+                ),
             }
         )
         assert [item["id"] for item in supported] == ([fact_id] if expected else [])
@@ -408,6 +471,17 @@ async def _project_event(root: Path, settings: AppSettings, *, live: bool, mixed
             if "memory_status" in payload
         )
         assert _free_text_answer_correct(answer["content"], "2026-10-12" if expected else None)
+        if mixed_name and question == questions[-1][0]:
+            _assert_event_answer(answer["content"], {"start": "2026-10-12", "finish": None})
+            query = next(payload["memory_query"] for payload in requests[-1] if "memory_query" in payload)
+            assert query["parts"] == [
+                {
+                    "action": "start",
+                    "status": "supported",
+                    "facts": [{"id": fact_id, "revision": supported[0]["revision"]}],
+                },
+                {"action": "finish", "status": "no_match_in_visible_memory", "facts": []},
+            ]
         if not expected:
             assert not _free_text_answer_correct(answer["content"], "2026-10-12")
         for item in supported:
@@ -419,7 +493,7 @@ async def _project_event(root: Path, settings: AppSettings, *, live: bool, mixed
             assert receipt.state == "succeeded" and receipt.result["memories"] == 0
 
     try:
-        async with _running(settings, root, live, requests) as (runtime, api):
+        async with _running(settings, root, live, requests, responses) as (runtime, api):
             if not live:
                 runtime.memory.extractor.extract = AsyncMock(
                     side_effect=lambda text, *_args: (
@@ -482,9 +556,9 @@ async def _project_event(root: Path, settings: AppSettings, *, live: bool, mixed
                     release.set()
                     await asyncio.wait_for(warming, 30)
             await read(runtime, api, questions[0][0], True)
-        async with _running(settings, root, live, requests) as (runtime, api):
+        async with _running(settings, root, live, requests, responses) as (runtime, api):
             assert (await runtime.operations.get(operation_id)).state == "succeeded"
-            for question, expected in questions[:2]:
+            for question, expected in [*questions[:2], *(questions[-1:] if mixed_name else [])]:
                 await read(runtime, api, question, expected)
             assert [item["id"] for item in await runtime.memory.list()] == [fact_id]
         assert _fingerprints() == report["source_sha256"]
@@ -514,6 +588,153 @@ async def test_live_project_event_reaches_agent_during_knowledge_open_and_after_
     settings = isolated_settings(AppSettings.load(Path(path)), tmp_path)
     assert settings.model.is_configured and settings.memory.embedder.is_configured
     await _project_event(tmp_path, settings, live=True, mixed_name=mixed_name)
+
+
+async def _compound_event(root: Path, settings: AppSettings, *, live: bool, actions: tuple[str, ...]) -> None:
+    prompt = "紫鸢-V74项目何时开始、何时完成\uff1f请分别说明\uff1b没有记录的部分不要推测。"
+    events = {
+        "start": ("开始", "2026年10月12日", 1791763200, "2026-10-12"),
+        "finish": ("完成", "2026年10月20日", 1792454400, "2026-10-20"),
+    }
+    inputs = {
+        f"请记住\uff1a我在{events[action][1]}{events[action][0]}了紫鸢-V74项目。": MemoryCandidate(
+            f"用户{events[action][0]}了紫鸢-V74项目。",
+            kind=MemoryType.EPISODIC,
+            evidence=f"请记住\uff1a我在{events[action][1]}{events[action][0]}了紫鸢-V74项目。",
+            occurred_at=events[action][2],
+            time_precision="day",
+        )
+        for action in actions
+    }
+    init_vector_store(settings.zvec)
+    requests: list[list[dict[str, Any]]] = []
+    report = _report(settings, live, _fingerprints())
+    report["known_actions"] = actions
+    report["model_answers"] = responses = []
+    try:
+        async with _running(settings, root, live, requests, responses) as (runtime, api):
+            original = runtime.memory.extractor.extract
+            extraction_inputs: list[str] = []
+
+            async def extract(source: str, *args: Any) -> list[MemoryCandidate]:
+                extraction_inputs.append(source)
+                if live:
+                    return await original(source, *args)
+                return [inputs[source]] if source in inputs else []
+
+            runtime.memory.extractor.extract = extract
+            for source in inputs:
+                seeded = await _send(api, source)
+                assert seeded["memory_operation_id"] and await runtime.memory_tasks.run_once()
+                receipt = await runtime.operations.get(seeded["memory_operation_id"])
+                assert receipt.state == "succeeded" and receipt.result["memories"] == 1
+            await _drain(runtime)
+            facts = await runtime.memory.list()
+            report["stored_facts"] = facts
+            assert {fact["occurred_at"] for fact in facts} == {events[action][2] for action in actions}
+            assert all(
+                fact["kind"] == "episodic"
+                and fact["episode_time_source"] == "explicit"
+                and fact["episode_time_precision"] == "day"
+                for fact in facts
+            )
+            result = await _send(api, prompt)
+            report["answer"] = result["content"]
+            report["references"] = payloads = requests[-1]
+            coverage = next(payload["memory_query"] for payload in payloads if "memory_query" in payload)
+            supported = [
+                fact
+                for payload in payloads
+                for fact in payload.get("memory", [])
+                if fact.get("answer_support") == "supported"
+            ]
+            assert {fact["id"] for fact in supported} == {fact["id"] for fact in facts}
+            assert coverage["parts"] == [
+                {
+                    "action": action,
+                    "status": "supported" if action in actions else "no_match_in_visible_memory",
+                    "facts": [
+                        {"id": fact["id"], "revision": fact["revision"]}
+                        for fact in facts
+                        if fact["occurred_at"] == events[action][2]
+                    ],
+                }
+                for action in ("start", "finish")
+            ]
+            _assert_event_answer(
+                result["content"],
+                {action: events[action][3] if action in actions else None for action in ("start", "finish")},
+            )
+            assert result["memory_operation_id"] and await runtime.memory_tasks.run_once()
+            receipt = await runtime.operations.get(result["memory_operation_id"])
+            assert receipt.state == "succeeded" and receipt.result["memories"] == 0
+            assert extraction_inputs == [*inputs, prompt], "Only original user messages may be extracted."
+            assert _fingerprints() == report["source_sha256"]
+            report["complete"] = True
+    finally:
+        _save(root, live, f"memory-compound-event-{'-'.join(actions) or 'neither'}", report)
+
+
+@pytest.mark.parametrize("actions", [("start",), ("finish",), ("start", "finish"), ()])
+async def test_compound_event_actual_agent_context(tmp_path: Path, actions: tuple[str, ...]) -> None:
+    await _compound_event(tmp_path, settings_at(tmp_path), live=False, actions=actions)
+
+
+@pytest.mark.live
+@pytest.mark.skipif(
+    os.environ.get("SHOVEL_RUN_LIVE_TESTS") != "1", reason="Explicit live endpoint opt-in required"
+)
+@pytest.mark.parametrize("actions", [("start",), ("finish",), ("start", "finish"), ()])
+async def test_live_compound_event_actual_agent_context(tmp_path: Path, actions: tuple[str, ...]) -> None:
+    path = os.environ.get("SHOVEL_LIVE_CONFIG")
+    assert path, "Select an existing settings.toml with SHOVEL_LIVE_CONFIG."
+    settings = isolated_settings(AppSettings.load(Path(path)), tmp_path)
+    assert settings.model.is_configured and settings.memory.embedder.is_configured
+    await _compound_event(tmp_path, settings, live=True, actions=actions)
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [
+        "开始时间: UNKNOWN\n完成时间: UNKNOWN",
+        "开始时间: 2026-10-20\n完成时间: 2026-10-12",
+        "开始时间: 无法确认,可能是2026-10-12\n完成时间: 2026-10-20",
+    ],
+)
+def test_compound_event_answer_scoring_rejects_lost_or_swapped_dates(answer: str) -> None:
+    with pytest.raises(AssertionError):
+        _assert_event_answer(answer, {"start": "2026-10-12", "finish": "2026-10-20"})
+
+
+@pytest.mark.parametrize(
+    "answer,start,finish",
+    [
+        (
+            "- 开始时间: 当前没有可确认的记录。本轮无法确认开始时间。\n- 完成时间: 2026年10月20日。",
+            None,
+            "2026-10-20",
+        ),
+        (
+            "已记录的信息显示\uff1a项目于2026年10月12日开始。\n关于完成时间\uff0c本轮没有可确认的记录。",
+            "2026-10-12",
+            None,
+        ),
+        (
+            "项目开始时间有记录\uff1a2026年10月12日。\n项目完成时间也有记录\uff1a2026年10月20日。",
+            "2026-10-12",
+            "2026-10-20",
+        ),
+        (
+            "本轮未找到项目的开始时间记录\uff0c也未找到完成时间记录\uff0c因此无法确认何时开始、何时完成。",
+            None,
+            None,
+        ),
+    ],
+)
+def test_compound_event_answer_scoring_allows_natural_partial_answers(
+    answer: str, start: str | None, finish: str | None
+) -> None:
+    _assert_event_answer(answer, {"start": start, "finish": finish})
 
 
 async def _profile_race(root: Path, settings: AppSettings, *, live: bool, clear: bool, review: bool) -> None:
@@ -688,3 +909,41 @@ async def test_final_agent_memory_budget_reports_drops_without_claiming_support(
         "recalled_memories=1" in context and "memory_budget_skipped=1" in context and "memories=0" in context
     )
     assert "Reference fragment" not in output and "Meridian" not in output and "SQLite" not in output
+
+
+async def test_final_agent_event_coverage_does_not_reference_budget_omissions(tmp_path: Path) -> None:
+    settings = settings_at(tmp_path)
+    settings.performance.context_profile = "compact"
+    requests: list[list[dict[str, Any]]] = []
+    async with _running(settings, tmp_path, False, requests) as (runtime, api):
+        await runtime.memory.repository.consolidate(
+            runtime.memory.owner,
+            [
+                MemoryCandidate(
+                    "The user started project 紫鸢-V74." + " " * 900,
+                    kind=MemoryType.EPISODIC,
+                    occurred_at=1791763200,
+                    time_precision="day",
+                )
+            ],
+            Provenance("manual"),
+        )
+        question = "紫鸢-V74项目何时开始、何时完成\uff1f"
+        assert len(await runtime.memory.search(question)) == 1
+        answer = await _send(api, question)
+        assert not any(payload.get("memory") for payload in requests[-1])
+        payload = next(payload for payload in requests[-1] if "memory_query" in payload)
+        assert payload["memory_status"] == "no_supported_fact"
+        assert payload["memory_query"]["parts"] == [
+            {"action": "start", "status": "omitted_by_budget", "facts": []},
+            {"action": "finish", "status": "no_match_in_visible_memory", "facts": []},
+        ]
+        _assert_event_answer(answer["content"], {"start": None, "finish": None})
+
+
+async def test_unsupported_event_pair_is_not_reported_as_missing_records(tmp_path: Path) -> None:
+    requests: list[list[dict[str, Any]]] = []
+    async with _running(settings_at(tmp_path), tmp_path, False, requests) as (_runtime, api):
+        await _send(api, "紫鸢-V74项目何时开始、赤狐-V74项目何时完成\uff1f")
+        payload = next(payload for payload in requests[-1] if "memory_query" in payload)
+        assert payload["memory_query"] == {"status": "unsupported_query"}

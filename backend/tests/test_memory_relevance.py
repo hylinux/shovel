@@ -17,7 +17,8 @@ from scripts.memory_support_evaluation import (
 from scripts.memory_support_evaluation import main as support_main
 
 from shovel.memory.domain import MemoryCandidate, MemoryRecord, MemoryType, Provenance
-from shovel.memory.relevance import Query, Support, assess, entities, literal_match
+from shovel.memory.relevance import Query, Support, assess, entities, event_question_parts, literal_match
+from shovel.memory.service import RecallCoverage
 from shovel.runtime.service import Runtime
 from test_hosted_runtime import api as api
 from test_hosted_runtime import runtime as runtime
@@ -546,6 +547,161 @@ async def test_issue_14_keyword_event_recall_without_vectors(runtime: Runtime, t
     query = "我哪一天开始了紫鸢-V74项目\uff1f"
     recalled = await runtime.memory.application.retrieve(query, "new-session", use_index=False)
     assert [item["id"] for item in recalled] == [saved[0].id]
+
+
+@pytest.mark.parametrize("actions", [("start",), ("finish",), ("start", "finish"), ()])
+async def test_compound_event_recall_preserves_each_known_part(
+    runtime: Runtime, actions: tuple[str, ...]
+) -> None:
+    candidates = [
+        MemoryCandidate(
+            "用户开始了紫鸢-V74项目。" if action == "start" else "The user completed project 紫鸢-V74.",
+            kind=MemoryType.EPISODIC,
+            object=action,
+            occurred_at=1791763200 if action == "start" else 1792454400,
+            time_precision="day",
+        )
+        for action in actions
+    ]
+    saved = await runtime.memory.repository.consolidate(
+        runtime.memory.owner, candidates, Provenance("manual")
+    )
+    coverage = RecallCoverage()
+    recalled = await runtime.memory.application.retrieve(
+        "紫鸢-V74项目何时开始、何时完成\uff1f请分别说明\uff1b没有记录的部分不要推测。",
+        "new-session",
+        use_index=False,
+        coverage=coverage,
+    )
+    assert {item["id"] for item in recalled} == {item.id for item in saved}
+    assert coverage.context(recalled) == {
+        "target": "紫鸢-v74",
+        "target_kind": "project",
+        "actor": None,
+        "parts": [
+            {
+                "action": action,
+                "status": "supported" if action in actions else "no_match_in_visible_memory",
+                "facts": [
+                    {"id": item.id, "revision": item.revision}
+                    for item in saved
+                    if item.occurred_at == (1791763200 if action == "start" else 1792454400)
+                ],
+            }
+            for action in ("start", "finish")
+        ],
+    }
+
+
+@pytest.mark.parametrize(
+    "question,actor,kind",
+    [
+        ("紫鸢-V74项目何时开始、何时完成\uff1f", None, "project"),
+        ("我何时开始、何时完成紫鸢-V74项目\uff1f", "user", "project"),
+        ("When did I start and finish project 紫鸢-V74?", "user", "project"),
+        ("When was project 紫鸢-V74 finished and started?", None, "project"),
+    ],
+)
+def test_event_pairs_preserve_target_actor_and_kind(question: str, actor: str | None, kind: str) -> None:
+    parts = event_question_parts(question)
+    assert len(parts) == 2
+    assert {part.event_action for part in parts} == {"start", "finish"}
+    assert all(
+        part.event is not None
+        and part.event.actor == actor
+        and part.event.target == "紫鸢-v74"
+        and part.event.target_kind == kind
+        for part in parts
+    )
+
+
+@pytest.mark.parametrize(
+    "question",
+    [
+        "紫鸢-V74项目何时开始、何时完成或取消\uff1f",
+        "紫鸢-V74项目何时开始、赤狐-V74项目何时完成\uff1f",
+        "When did Alice start and finish project 紫鸢-V74?",
+        "When did I plan to start and finish project 紫鸢-V74?",
+        "When did I not start and finish project 紫鸢-V74?",
+        "When did I start and finish project 紫鸢-V74 in 2026?",
+        "When did I start project 紫鸢-V74 and finish its evaluation?",
+        "When did the Solstice evaluation start and finish?",
+        "紫鸢-V74项目的离线评估何时开始、何时完成\uff1f",
+        "紫鸢-V74项目何时开始、何时完成\uff1f只限2026年的记录。",
+        "紫鸢-V74项目何时开始、何时完成\uff1f我之前没有开始这个项目。",
+        "紫鸢-V74项目何时开始、何时完成\uff1f还有哪个项目完成了\uff1f",
+    ],
+)
+def test_event_pairs_do_not_discard_unverified_conditions(question: str) -> None:
+    assert not event_question_parts(question)
+
+
+@pytest.mark.parametrize("limit", ["chars", "items"])
+async def test_event_coverage_obeys_shared_retrieval_limits(runtime: Runtime, limit: str) -> None:
+    await runtime.memory.repository.consolidate(
+        runtime.memory.owner,
+        [
+            MemoryCandidate(
+                f"The user {verb} project 紫鸢-V74.",
+                kind=MemoryType.EPISODIC,
+                object=verb,
+                occurred_at=occurred_at,
+                time_precision="day",
+            )
+            for verb, occurred_at in (("started", 1791763200), ("finished", 1792454400))
+        ],
+        Provenance("manual"),
+    )
+    service = runtime.memory.application
+    if limit == "chars":
+        service.max_chars = 1
+    else:
+        service.max_items = 1
+    coverage = RecallCoverage()
+    recalled = await service.retrieve(
+        "紫鸢-V74项目何时开始、何时完成\uff1f", use_index=False, coverage=coverage
+    )
+    assert len(recalled) == (0 if limit == "chars" else 1)
+    parts = coverage.context(recalled)["parts"]
+    assert isinstance(parts, list)
+    assert sum(part["status"] == "supported" for part in parts) == len(recalled)
+    assert sum(part["status"] == "omitted_by_budget" for part in parts) == 2 - len(recalled)
+    for part in parts:
+        assert part["facts"] == [
+            {"id": item["id"], "revision": item["revision"]}
+            for item in recalled
+            if ("started" if part["action"] == "start" else "finished") in str(item["memory"])
+        ]
+
+
+@pytest.mark.parametrize(
+    "text,occurred_at,precision",
+    [
+        ("Started project 紫鸢-V74.", 1791763200, "day"),
+        ("Alice started project 紫鸢-V74.", 1791763200, "day"),
+        ("The user plans to start project 紫鸢-V74.", 1791763200, "day"),
+        ("The user started the evaluation for project 紫鸢-V74.", 1791763200, "day"),
+        ("The user started project 紫鸢-V74.", None, "unknown"),
+        ("The user started project 紫鸢-V74.", 1791763200, "month"),
+    ],
+)
+async def test_compound_event_recall_retains_actor_kind_and_time_fences(
+    runtime: Runtime, text: str, occurred_at: int | None, precision: str
+) -> None:
+    await runtime.memory.repository.consolidate(
+        runtime.memory.owner,
+        [MemoryCandidate(text, kind=MemoryType.EPISODIC, occurred_at=occurred_at, time_precision=precision)],
+        Provenance("manual"),
+    )
+    coverage = RecallCoverage()
+    recalled = await runtime.memory.application.retrieve(
+        "When did I start and finish project 紫鸢-V74?", use_index=False, coverage=coverage
+    )
+    assert recalled == []
+    assert coverage.context(recalled)["parts"] == [
+        {"action": action, "status": "no_match_in_visible_memory", "facts": []}
+        for action in ("start", "finish")
+    ]
 
 
 @pytest.mark.parametrize(

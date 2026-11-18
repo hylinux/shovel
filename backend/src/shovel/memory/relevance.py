@@ -338,8 +338,10 @@ def entities(text: str, topic: str = "", *, include_aliases: bool = True) -> dic
 def query_terms(query: str) -> list[str]:
     query = factual_query(query)
     event = event_statement(query, question=True)
+    parts = event_question_parts(query)
     terms = [
         *([event.target] if event else []),
+        *(part.event.target for part in parts if part.event is not None),
         *(term for term in keyword_terms(_CHINESE_FUNCTIONS.sub(" ", query)) if term not in _FUNCTION_WORDS),
     ]
     for pattern, aliases in _DOMAINS.values():
@@ -477,6 +479,78 @@ class Query:
             tuple(query_terms(text)),
             event,
         )
+
+
+_PAIR_VERB = rf"(?:{'|'.join(_ACTIONS.values())})(?:了)?"
+_PAIR_SEPARATOR = r"\s*(?:、|\uff0c|,|和|与|及)\s*"
+_EVENT_PAIRS = (
+    (
+        re.compile(
+            rf"(?P<target>{_EVENT_PROJECT})\s*(?:是|在)?"
+            rf"{_CHINESE_EVENT_TIME}\s*(?P<first>{_PAIR_VERB}){_PAIR_SEPARATOR}"
+            rf"(?:{_CHINESE_EVENT_TIME}\s*)?(?P<second>{_PAIR_VERB})\s*的?",
+            re.I,
+        ),
+        "{target}何时{action}?",
+    ),
+    (
+        re.compile(
+            rf"(?P<actor>我|用户)\s*(?:是|在)?{_CHINESE_EVENT_TIME}\s*"
+            rf"(?P<first>{_PAIR_VERB}){_PAIR_SEPARATOR}(?:{_CHINESE_EVENT_TIME}\s*)?"
+            rf"(?P<second>{_PAIR_VERB})\s*(?P<target>{_EVENT_PROJECT})\s*的?",
+            re.I,
+        ),
+        "{actor}何时{action}{target}?",
+    ),
+    (
+        re.compile(
+            rf"when\s+did\s+(?P<actor>{_EVENT_ACTOR})\s+(?P<first>{_PAIR_VERB})"
+            rf"\s+and\s+(?P<second>{_PAIR_VERB})\s+(?P<target>.+)",
+            re.I,
+        ),
+        "When did {actor} {action} {target}?",
+    ),
+    (
+        re.compile(
+            rf"when\s+(?:did|was)\s+(?P<target>.+?)\s+(?P<first>{_PAIR_VERB})"
+            rf"\s+and\s+(?P<second>{_PAIR_VERB})",
+            re.I,
+        ),
+        "When did {target} {action}?",
+    ),
+)
+
+
+def event_question_parts(text: str) -> tuple[Query, ...]:
+    """Split only a complete shared-project start/finish pair, never arbitrary clauses."""
+    clauses = re.split(r"[。\uff01\uff1f\uff1b;!?\n]+", text.strip().rstrip("."))
+    if any(
+        clause.strip() not in ("请分别说明", "没有记录的部分不要推测")
+        and not _RESPONSE_DIRECTIVE.fullmatch(clause.strip())
+        for clause in clauses[1:]
+        if clause.strip()
+    ):
+        return ()
+    for pattern, template in _EVENT_PAIRS:
+        if match := pattern.fullmatch(clauses[0].strip()):
+            if relation_matches(f"{match['first']} {match['second']}", _ACTIONS) != {"start", "finish"}:
+                return ()
+            parts = tuple(
+                Query.parse(template.format(**match.groupdict(), action=match[name]))
+                for name in ("first", "second")
+            )
+            if (
+                all(
+                    part.event is not None
+                    and part.event.target_kind == "project"
+                    and part.known_request
+                    and not part.unverified_conditions
+                    for part in parts
+                )
+                and parts[0].event == parts[1].event
+            ):
+                return parts
+    return ()
 
 
 def assess(

@@ -44,13 +44,15 @@ from openai import APIError, AsyncAzureOpenAI, AsyncOpenAI
 from shovel.config.model_settings import DefaultAgentModelSettings, ModelProviderType
 from shovel.exceptions.pipeline import VectorSinkError
 from shovel.memory.domain import PROFILE_TOPICS
-from shovel.memory.service import context_entry
+from shovel.memory.relevance import Query
+from shovel.memory.service import RecallCoverage, context_entry
 from shovel.platform.agent_tools import agent_tools
 from shovel.protection.domain import ProtectionDeniedError
 from shovel.protection.egress import EgressChannel, require_ordinary
 from shovel.runtime.agent_extensions import AgentExtensions
 from shovel.runtime.agent_instructions import BUILTIN_INSTRUCTIONS as SYSTEM
 from shovel.runtime.agent_instructions import (
+    EVENT_MEMORY_INSTRUCTIONS,
     PROFILE_INSTRUCTIONS,
     AgentInstructionsView,
     compose_instructions,
@@ -327,6 +329,8 @@ class ShovelContextProvider(ContextProvider):
         self.runtime, self.identifier, self.request, self.history = runtime, identifier, request, history
         self.profile = profile
         self.instructions = instructions + (PROFILE_INSTRUCTIONS if profile and profile["revision"] else "")
+        if request.memory_enabled and Query.parse(request.content).asks_time:
+            self.instructions += EVENT_MEMORY_INSTRUCTIONS
         self.result = AgentResult()
         self.has_retrieval_matches = False
         self.search_completed = False
@@ -413,6 +417,7 @@ class ShovelContextProvider(ContextProvider):
         if budget < 500:
             raise RuntimeFailure("问题超过此模型的上下文预算,请缩短问题或调整 model.max_input_chars。")
         memory_context: list[dict[str, Any]] = []
+        memory_coverage = RecallCoverage()
         recalled_memories = 0
         compact = self.runtime.settings.performance.context_profile == "compact"
         tool_chars = 0
@@ -437,7 +442,11 @@ class ShovelContextProvider(ContextProvider):
             else None
         )
         memory_task = (
-            asyncio.create_task(self.runtime.memory.search(request.content, conversation_id=self.identifier))
+            asyncio.create_task(
+                self.runtime.memory.search(
+                    request.content, conversation_id=self.identifier, coverage=memory_coverage
+                )
+            )
             if request.memory_enabled and request.content.strip()
             else None
         )
@@ -472,6 +481,11 @@ class ShovelContextProvider(ContextProvider):
         if memory_task is not None:
             memories = memory_task.result()
             recalled_memories = len(memories)
+            if query_coverage := memory_coverage.context(memories):
+                # Reserve the largest fact bindings plus room for longer omission statuses.
+                budget -= len(json.dumps(query_coverage, ensure_ascii=False)) + 100
+                if budget < 200:
+                    raise RuntimeFailure("Memory 查询状态超过本轮模型预算,请调整模型配置。", status=503)
             memory_budget = min(self.runtime.settings.memory.context_max_chars, budget // 4)
             if compact:
                 memory_budget = min(memory_budget, 1000)
@@ -603,6 +617,11 @@ class ShovelContextProvider(ContextProvider):
                 "knowledge_policy": "required" if request.requires_knowledge else request.knowledge_policy,
                 "session_summary": summary,
                 **({"memory_status": memory_status} if request.memory_enabled else {}),
+                **(
+                    {"memory_query": query_coverage}
+                    if request.memory_enabled and (query_coverage := memory_coverage.context(memory_context))
+                    else {}
+                ),
             },
             ensure_ascii=False,
         )

@@ -6,7 +6,7 @@ import json
 import math
 import time
 from collections.abc import Mapping, Sequence
-from dataclasses import replace
+from dataclasses import dataclass, field, replace
 
 import structlog
 
@@ -24,7 +24,7 @@ from shovel.memory.domain import (
     normalize,
 )
 from shovel.memory.ports import MemoryExtractor, MemoryRepository, MemoryVectorIndex
-from shovel.memory.relevance import Query, Support, assess
+from shovel.memory.relevance import Query, Support, assess, event_question_parts
 from shovel.runtime.diagnostics import trace_duration
 from shovel.runtime.errors import NotFound
 
@@ -89,6 +89,53 @@ def context_entry(entry: Mapping[str, object]) -> dict[str, object]:
     if entry.get("kind") == MemoryType.SEMANTIC:
         result.update({key: entry[key] for key in ("subject", "predicate", "object") if key in entry})
     return result
+
+
+@dataclass
+class RecallCoverage:
+    parts: tuple[Query, ...] = ()
+    matches: dict[str, set[tuple[str, int]]] = field(default_factory=dict)
+    unsupported: bool = False
+
+    def context(self, entries: Sequence[Mapping[str, object]]) -> dict[str, object]:
+        if not self.parts:
+            return {"status": "unsupported_query"} if self.unsupported else {}
+        event = self.parts[0].event
+        if event is None:
+            raise ValueError("Event coverage requires a bound event.")
+        available = {
+            (entry.get("id"), entry.get("revision"))
+            for entry in entries
+            if entry.get("answer_support") == Support.SUPPORTED
+        }
+        parts = []
+        for part in self.parts:
+            action = part.event_action
+            if action is None:
+                raise ValueError("Event coverage requires a bound action.")
+            matches = self.matches.get(action, set())
+            included = matches.intersection(available)
+            parts.append(
+                {
+                    "action": action,
+                    "status": (
+                        "supported"
+                        if included
+                        else "omitted_by_budget"
+                        if matches
+                        else "no_match_in_visible_memory"
+                    ),
+                    "facts": [
+                        {"id": identifier, "revision": revision} for identifier, revision in sorted(included)
+                    ],
+                }
+            )
+        return {
+            "target": event.target,
+            "target_kind": event.target_kind,
+            "actor": event.actor,
+            "parts": parts,
+        }
 
 
 class MemoryService:
@@ -246,6 +293,7 @@ class MemoryService:
         use_index: bool = True,
         record_access: bool = True,
         diagnostics: dict[str, int] | None = None,
+        coverage: RecallCoverage | None = None,
     ) -> list[dict[str, object]]:
         scope = replace(self.scope, session_id=conversation_id)
         now = int(time.time())
@@ -303,15 +351,34 @@ class MemoryService:
             record = found[identifier][0]
             found[identifier] = (record, rank(record, min(1, score * 61 / 2), now))
         intent = Query.parse(query)
-        verdicts = {
-            identifier: assess(
-                intent,
-                record,
-                semantic_match="vector" in channels[identifier],
-                diagnostics=diagnostics,
+        parts = event_question_parts(query)
+        if coverage is not None:
+            coverage.parts = parts
+            coverage.matches.clear()
+            coverage.unsupported = (
+                intent.asks_time
+                and (not intent.known_request or intent.unverified_conditions or intent.unresolved_entity)
+                and not parts
             )
-            for identifier, (record, _) in found.items()
-        }
+        verdicts = {}
+        for identifier, (record, _) in found.items():
+            assessments = []
+            for part in parts or (intent,):
+                verdict = assess(
+                    part,
+                    record,
+                    semantic_match="vector" in channels[identifier],
+                    diagnostics=diagnostics,
+                )
+                assessments.append(verdict)
+                if coverage is not None and parts and verdict == Support.SUPPORTED:
+                    if part.event_action is None:
+                        raise ValueError("Event support requires a bound action.")
+                    coverage.matches.setdefault(part.event_action, set()).add((identifier, record.revision))
+            verdicts[identifier] = next(
+                (verdict for verdict in assessments if verdict in (Support.SUPPORTED, Support.BACKGROUND)),
+                assessments[0],
+            )
         rejected = {verdict: sum(v == verdict for v in verdicts.values()) for verdict in Support}
         for identifier, verdict in verdicts.items():
             if verdict == Support.BACKGROUND:

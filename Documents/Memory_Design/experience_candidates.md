@@ -125,6 +125,13 @@ Memory/PERSISTENCE/DISPLAY 复用 `require_ordinary`，新表纳入已有数据�
 这些防线不是完整敏感信息分类、加密存储或物理擦除证明。
 遗忘只删除候选副本，不删除原 Execution，也不承诺 WAL、备份和磁盘介质已经清除。
 
+**2026-11-18 清空集成缺口**：正常候选属于 Platform 用户，原生 Memory 清空却按
+原生 owner 筛选 `memory_experience`，默认归属不同会遗漏内容删除。
+generation 变化后的 `invalidated` 不是已擦除内容；当前不得用“清空成功”
+推断所有 P3 候选已删除。该问题已列入
+[当前设计与进度](memory_system_design_and_status.md) §10.1，尚未修复；
+须覆盖实际人工采集链路及其他所有者保护，不能只手工播种同原生 owner 的行。
+
 `backend\tests\test_memory_experience.py` 使用合成材料和隔离存储，
 通过真实发布/Invocation/ExecutionEngine、REST/CLI、迁移和完整 Runtime 重开验证。
 覆盖通过/失败观察、Condition 结果、类型/缺失差异、非合格来源、

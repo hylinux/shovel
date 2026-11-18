@@ -1,8 +1,9 @@
 # Shovel 原生记忆系统：原理、架构与详细实现
 
 本文最初于 2026-10-29 整理，后续补充了治理、Working 和召回修复，
-描述已经接入运行链路的行为。当前状态与开发中改动见
-[Memory 设计与进度总览](README.md)；旧 HTML 是历史导出，不自动同步。
+描述已经接入运行链路的行为。当前整体设计、进度及已确认缺口见
+[Memory 系统当前设计与开发进度](memory_system_design_and_status.md)；
+[目录与历史盘点](README.md) 保留早期记录，旧 HTML 是历史导出，不自动同步。
 设置驱动的 User Profile 已在 `ca66c7e` 引入；2026-11-10 对齐了属性投影、
 关键词降级及 P0 支持性限定，并完成隔离真实模型补验，见
 [P0 基线结果](memory_baseline.md#2026-11-10-p0-真实模型补验)。
@@ -569,12 +570,18 @@ stateDiagram-v2
 已移除的派生索引可从保留的事实重建。
 
 清理范围：三类长期事实全部状态/历史、Session Summary、Working Memory、
-经验候选、对应 links/revisions、索引 Outbox/状态，以及历史 Memory
+同原生所有者谓词匹配的经验候选、对应 links/revisions、索引 Outbox/状态，以及历史 Memory
 Operation 的正文、结果、错误和请求参数。清空 General profile 的四个文字字段
 并提升 revision，防止启动/重启投影重新生成被清空的 Profile 事实。
 索引查询缓存清空，MemoryEpoch 增长，旧 Memory Operation 被取消且擦除正文；
 仅保留不含正文的最小防重放记录及本次回执，旧请求键不能恢复已清空的数据。
 页面观察到成功后也移除本浏览器当前工作区的 Memory 请求恢复回执。
+
+**已确认缺口（2026-11-18）**：P3 候选按 Platform 用户保存，而清空对
+`MemoryExperience` 使用原生 Memory 用户筛选。默认 `owner` 与 `local-user`
+不一致，正常 Platform 候选不会被该删除谓词匹配；Epoch 变化只使相关候选失效，
+不擦除其内容。现有清空回归的同原生 owner 播种不能证明此链路已覆盖。
+该功能尚未修复，不能宣称清空已无遗漏覆盖经验候选；依据和后续验收见新总览 §10.1。
 
 不删除其他所有者的数据、Session/源消息、附件、知识库、头像、平台 Execution
 业务记录、外部备份或供应商已接收数据；也不承诺 SQLite/WAL/磁盘的取证级擦除。
@@ -1430,6 +1437,8 @@ Zvec 可重建不代表“随时删除正在使用的索引目录”是安全操
 9. 旧索引 generation 不自动回收；软删除、硬删除不擦除备份或所有源内容。
 10. 本机单 owner/loopback 边界不是多用户 SaaS 权限体系，
     SQLite/Zvec 也不是默认加密的秘密存储。
+11. 全部清空尚有 P3 Platform 用户与原生 Memory owner 的映射缺口，见 §9.3.1；
+    不能把 generation 失效当作经验内容已经擦除。
 
 这些限制不应被文档中的“理论分类”或“数据库字段已经存在”掩盖。
 后续扩展应保持现有权威存储、来源、Scope、事务和遗忘围栏不变量。

@@ -16,7 +16,7 @@ from scripts.memory_support_evaluation import (
 )
 from scripts.memory_support_evaluation import main as support_main
 
-from shovel.memory.domain import MemoryRecord, Provenance
+from shovel.memory.domain import MemoryCandidate, MemoryRecord, MemoryType, Provenance
 from shovel.memory.relevance import Query, Support, assess, entities, literal_match
 from shovel.runtime.service import Runtime
 from test_hosted_runtime import api as api
@@ -505,6 +505,77 @@ def test_project_event_support_survives_language_and_episode_projection(text: st
 
 
 @pytest.mark.parametrize(
+    "text",
+    [
+        "我在2026年10月12日开始了紫鸢-V74项目。",
+        "用户开始了紫鸢-V74项目。",
+        "The user started project 紫鸢-V74 on 2026-10-12.",
+    ],
+)
+@pytest.mark.parametrize(
+    "question",
+    [
+        "我哪一天开始了紫鸢-V74项目\uff1f",
+        "我哪天开始了紫鸢-V74项目\uff1f",
+        "我什么时候开始了紫鸢-V74项目\uff1f",
+        "我何时开始了 紫鸢-V74 项目\uff1f",
+        "紫鸢-V74项目何时开始\uff1f",
+    ],
+)
+def test_issue_14_mixed_name_event_recall(text: str, question: str) -> None:
+    fact = record(text=text, kind="episodic", object="紫鸢-V74", occurred_on="2026-10-12")
+    assert assess(Query.parse(question), fact, semantic_match=False) == Support.SUPPORTED
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "我在2026年10月12日开始了紫鸢-V74项目。",
+        "The user started project 紫鸢-V74 on 2026-10-12.",
+    ],
+)
+async def test_issue_14_keyword_event_recall_without_vectors(runtime: Runtime, text: str) -> None:
+    fact = MemoryCandidate(
+        text,
+        kind=MemoryType.EPISODIC,
+        object="紫鸢-V74",
+        occurred_at=1791763200,
+        time_precision="day",
+    )
+    saved = await runtime.memory.repository.consolidate(runtime.memory.owner, [fact], Provenance("manual"))
+    query = "我哪一天开始了紫鸢-V74项目\uff1f"
+    recalled = await runtime.memory.application.retrieve(query, "new-session", use_index=False)
+    assert [item["id"] for item in recalled] == [saved[0].id]
+
+
+@pytest.mark.parametrize(
+    "question,changes",
+    [
+        ("我哪一天完成了紫鸢-V74项目\uff1f", {}),
+        ("我哪一天开始了赤狐-V74项目\uff1f", {}),
+        ("我哪一天开始了紫鸢-V75项目\uff1f", {}),
+        ("我哪一天没有开始紫鸢-V74项目\uff1f", {}),
+        ("我哪一天可能开始紫鸢-V74项目\uff1f", {}),
+        ("我哪一天计划开始紫鸢-V74项目\uff1f", {}),
+        ("紫鸢-V74项目何时开始、何时完成\uff1f请分别说明\uff1b没有记录的部分不要推测。", {}),
+        ("我哪一天开始了紫鸢-V74项目\uff1f", {"text": "其他人开始了紫鸢-V74项目。"}),
+        ("我哪一天开始了紫鸢-V74项目\uff1f", {"text": "用户可能开始了紫鸢-V74项目。"}),
+        ("我哪一天开始了紫鸢-V74项目\uff1f", {"text": "用户没有开始紫鸢-V74项目。"}),
+        ("我哪一天开始了紫鸢-V74项目\uff1f", {"topic": "project.赤狐-v74"}),
+        ("我哪一天开始了紫鸢-V74项目\uff1f", {"occurred_at": None}),
+        ("我哪一天开始了紫鸢-V74项目\uff1f", {"episode_time_source": "recorded"}),
+    ],
+)
+def test_issue_14_event_recall_preserves_unknown_and_conflicting_evidence(
+    question: str, changes: dict[str, Any]
+) -> None:
+    fact = record(
+        text="用户开始了紫鸢-V74项目。", kind="episodic", object="紫鸢-V74", occurred_on="2026-10-12"
+    )
+    assert assess(Query.parse(question), replace(fact, **changes), semantic_match=True) != Support.SUPPORTED
+
+
+@pytest.mark.parametrize(
     "question",
     [
         "When did Alice start the WARMUP-LIVE-36-X project?",
@@ -580,6 +651,9 @@ def test_project_event_time_must_remain_explicit(change: dict[str, Any]) -> None
         ("When did Alice start project Cedar?", {}, "unsupported_question"),
         ("When did I start project Cedar?", {"text": "Project Cedar started."}, "event_actor"),
         ("When did I start project Cedar?", {"episode_time_precision": "month"}, "event_time"),
+        ("When did I start project Birch?", {}, "entity_conflict"),
+        ("When did I start project Cedar?", {"text": "The user started a task."}, "entity_missing"),
+        ("When did I start project Cedar?", {"topic": "project.birch"}, "entity_binding"),
     ],
 )
 def test_event_rejection_diagnostics_are_fixed_content_free_codes(
@@ -589,9 +663,10 @@ def test_event_rejection_diagnostics_are_fixed_content_free_codes(
         text="The user started project Cedar.", kind="episodic", object="Cedar", occurred_on="2026-10-12"
     )
     diagnostics: dict[str, int] = {}
+    expected = Support.CONFLICT if reason == "entity_conflict" else Support.UNKNOWN
     assert (
         assess(Query.parse(question), replace(fact, **changes), semantic_match=True, diagnostics=diagnostics)
-        == Support.UNKNOWN
+        == expected
     )
     assert diagnostics == {f"support_rejected_{reason}": 1}
 
@@ -668,6 +743,7 @@ def test_free_text_abstention_scoring_does_not_confuse_conditional_examples_with
         ("Completed on August 21, 2026.", True),
         ("Completed on 21 August 2026.", True),
         ("完成于2026年8月21日。", True),
+        ("完成于 2026 年 8 月 21 日。", True),
         ("Completed on August 22, 2026.", False),
         ("Completed on 2026-08-210.", False),
     ],

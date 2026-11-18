@@ -7,6 +7,7 @@ import os
 import threading
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -355,7 +356,7 @@ async def test_live_restart_correction_and_forget_lifecycle(tmp_path: Path) -> N
     await _lifecycle(tmp_path, settings, live=True)
 
 
-async def _project_event(root: Path, settings: AppSettings, *, live: bool) -> None:
+async def _project_event(root: Path, settings: AppSettings, *, live: bool, mixed_name: bool = False) -> None:
     source = "请记住\uff1a我在2026年10月12日启动了测试项目 WARMUP-LIVE-36-X。"
     questions = [
         ("When did I start the WARMUP-LIVE-36-X project?", True),
@@ -364,6 +365,16 @@ async def _project_event(root: Path, settings: AppSettings, *, live: bool) -> No
         ("When did I start project OTHER-MEMORY-37?", False),
         ("When did I finish project WARMUP-LIVE-36-X?", False),
     ]
+    if mixed_name:
+        source = "请记住\uff1a我在2026年10月12日开始了紫鸢-V74项目。"
+        questions = [
+            ("我哪一天开始了紫鸢-V74项目\uff1f", True),
+            ("我哪天开始了紫鸢-V74项目\uff1f", True),
+            ("我哪一天完成了紫鸢-V74项目\uff1f", False),
+            ("我哪一天开始了赤狐-V74项目\uff1f", False),
+            ("我哪一天开始了紫鸢-V75项目\uff1f", False),
+            ("紫鸢-V74项目何时开始、何时完成\uff1f请分别说明\uff1b没有记录的部分不要推测。", False),
+        ]
     init_vector_store(settings.zvec)
     requests: list[list[dict[str, Any]]] = []
     report = _report(settings, live, _fingerprints())
@@ -414,9 +425,11 @@ async def _project_event(root: Path, settings: AppSettings, *, live: bool) -> No
                     side_effect=lambda text, *_args: (
                         [
                             MemoryCandidate(
-                                "用户在2026年10月12日启动了测试项目 WARMUP-LIVE-36-X。",
+                                "我在2026年10月12日开始了紫鸢-V74项目。"
+                                if mixed_name
+                                else "用户在2026年10月12日启动了测试项目 WARMUP-LIVE-36-X。",
                                 kind=MemoryType.EPISODIC,
-                                object="WARMUP-LIVE-36-X",
+                                object="紫鸢-V74" if mixed_name else "WARMUP-LIVE-36-X",
                                 evidence=source,
                                 occurred_at=1791763200,
                                 time_precision="day",
@@ -447,8 +460,19 @@ async def _project_event(root: Path, settings: AppSettings, *, live: bool) -> No
                     assert (await runtime.operations.get(operation_id)).state == "succeeded"
                     facts = await runtime.memory.list()
                     assert len(facts) == 1 and facts[0]["kind"] == "episodic"
+                    assert facts[0]["state"] == "active"
+                    assert facts[0]["occurred_at"] == 1791763200
+                    assert facts[0]["episode_time_source"] == "explicit"
                     report["stored_fact"] = facts[0]
                     fact_id = facts[0]["id"]
+                    if mixed_name:
+                        scope = replace(runtime.memory.owner, session_id="keyword-only-new-session")
+                        candidates = await runtime.memory.repository.keyword(scope, questions[0][0], limit=40)
+                        assert [item.id for item in candidates] == [fact_id]
+                        keyword_only = await runtime.memory.application.retrieve(
+                            questions[0][0], scope.session_id, use_index=False
+                        )
+                        assert [item["id"] for item in keyword_only] == [fact_id]
                     await _drain(runtime)
                     for question, expected in questions:
                         await read(runtime, api, question, expected)
@@ -466,25 +490,30 @@ async def _project_event(root: Path, settings: AppSettings, *, live: bool) -> No
         assert _fingerprints() == report["source_sha256"]
         report["complete"] = True
     finally:
-        _save(root, live, "memory-project-event", report)
+        name = "memory-project-event-mixed-name" if mixed_name else "memory-project-event"
+        _save(root, live, name, report)
 
 
-async def test_project_event_reaches_agent_during_knowledge_open_and_after_restart(tmp_path: Path) -> None:
-    await _project_event(tmp_path, settings_at(tmp_path), live=False)
+@pytest.mark.parametrize("mixed_name", [False, True])
+async def test_project_event_reaches_agent_during_knowledge_open_and_after_restart(
+    tmp_path: Path, mixed_name: bool
+) -> None:
+    await _project_event(tmp_path, settings_at(tmp_path), live=False, mixed_name=mixed_name)
 
 
 @pytest.mark.live
 @pytest.mark.skipif(
     os.environ.get("SHOVEL_RUN_LIVE_TESTS") != "1", reason="Explicit live endpoint opt-in required"
 )
+@pytest.mark.parametrize("mixed_name", [False, True])
 async def test_live_project_event_reaches_agent_during_knowledge_open_and_after_restart(
-    tmp_path: Path,
+    tmp_path: Path, mixed_name: bool
 ) -> None:
     path = os.environ.get("SHOVEL_LIVE_CONFIG")
     assert path, "Select an existing settings.toml with SHOVEL_LIVE_CONFIG."
     settings = isolated_settings(AppSettings.load(Path(path)), tmp_path)
     assert settings.model.is_configured and settings.memory.embedder.is_configured
-    await _project_event(tmp_path, settings, live=True)
+    await _project_event(tmp_path, settings, live=True, mixed_name=mixed_name)
 
 
 async def _profile_race(root: Path, settings: AppSettings, *, live: bool, clear: bool, review: bool) -> None:

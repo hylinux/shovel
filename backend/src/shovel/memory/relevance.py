@@ -197,13 +197,14 @@ _EVENT_EVALUATION = (
 )
 _EVENT_ACTOR = r"(?:i|the user|user)"
 _EVENT_VERB = rf"(?P<verb>{'|'.join(_ACTIONS.values())})(?:了)?"
+_CHINESE_EVENT_TIME = r"(?:什么时候|何时|哪一天|哪天)"
 _EVENT_QUESTIONS = tuple(
     re.compile(pattern, re.I)
     for pattern in (
         rf"when\s+did\s+(?P<actor>{_EVENT_ACTOR})\s+{_EVENT_VERB}\s+(?P<target>.+)",
         rf"when\s+(?:did|was)\s+(?P<target>.+?)\s+{_EVENT_VERB}",
-        rf"(?P<actor>我|用户)\s*(?:是|在)?(?:什么时候|何时|哪天)\s*{_EVENT_VERB}\s*(?P<target>.+?)\s*的?",
-        rf"(?P<target>.+?)\s*(?:是|在)?(?:什么时候|何时|哪天)\s*{_EVENT_VERB}\s*的?",
+        rf"(?P<actor>我|用户)\s*(?:是|在)?{_CHINESE_EVENT_TIME}\s*{_EVENT_VERB}\s*(?P<target>.+?)\s*的?",
+        rf"(?P<target>.+?)\s*(?:是|在)?{_CHINESE_EVENT_TIME}\s*{_EVENT_VERB}\s*的?",
     )
 )
 _EVENT_STATEMENTS = tuple(
@@ -239,7 +240,9 @@ _CALENDAR = re.compile(
     r"|(?<![a-z0-9_])(?:19|20)\d{2}(?:-\d{2}(?:-\d{2})?|\s*年)(?![a-z0-9_])",
     re.IGNORECASE,
 )
-_QUESTION_WORD = re.compile(r"\b(?:what|which|when|who|why|how)\b|什么|何时|哪种|哪个|哪家|谁", re.I)
+_QUESTION_WORD = re.compile(
+    r"\b(?:what|which|when|who|why|how)\b|什么|何时|哪一天|哪天|哪种|哪个|哪家|谁", re.I
+)
 _RESPONSE_DIRECTIVE = re.compile(
     r"(?:请)?(?:只|仅)(?:依据|根据|基于)(?:已保存的)?(?:我的)?(?:个人)?(?:记忆|记录)(?:来)?(?:回答|作答)"
     r"|(?:如果|若)?(?:没有|未找到|找不到)(?:对应的?|相关的?)?(?:记忆|记录)"
@@ -334,8 +337,10 @@ def entities(text: str, topic: str = "", *, include_aliases: bool = True) -> dic
 
 def query_terms(query: str) -> list[str]:
     query = factual_query(query)
+    event = event_statement(query, question=True)
     terms = [
-        term for term in keyword_terms(_CHINESE_FUNCTIONS.sub(" ", query)) if term not in _FUNCTION_WORDS
+        *([event.target] if event else []),
+        *(term for term in keyword_terms(_CHINESE_FUNCTIONS.sub(" ", query)) if term not in _FUNCTION_WORDS),
     ]
     for pattern, aliases in _DOMAINS.values():
         if re.search(pattern, query, re.IGNORECASE):
@@ -376,6 +381,18 @@ def event_statement(text: str, *, question: bool = False) -> Event | None:
     return None
 
 
+def _event_entities(
+    text: str, event: Event | None, topic: str = "", *, include_aliases: bool = True
+) -> dict[str, set[str]]:
+    if event is None:
+        return entities(text, topic, include_aliases=include_aliases)
+    # Only a completely bound clause can separate a Chinese name from its actor/verb.
+    result = {"project": {event.target}}
+    for kind, names in _topic_entities(topic, result).items():
+        result.setdefault(kind, set()).update(names)
+    return result
+
+
 @dataclass(frozen=True)
 class Query:
     entities: dict[str, set[str]]
@@ -396,7 +413,11 @@ class Query:
     @classmethod
     def parse(cls, text: str) -> Query:
         text = factual_query(text)
-        conditions = entities(text)
+        actions = relation_matches(text, _ACTIONS)
+        action = next(iter(actions)) if len(actions) == 1 else None
+        asks_time = bool(re.search(rf"\bwhen\b|{_CHINESE_EVENT_TIME}|日期", text, re.I))
+        event = event_statement(text, question=True) if asks_time and action else None
+        conditions = _event_entities(text, event)
         entity_hint = bool(re.search(rf"\b(?:{_ENTITY_KIND})\b|项目|仓库|团队|客户", text, re.I))
         domains = frozenset(name for name, (pattern, _) in _DOMAINS.items() if re.search(pattern, text, re.I))
         if conditions and re.search(r"\blanguages?\b|语言", text, re.I):
@@ -407,11 +428,7 @@ class Query:
             if not entity_hint and "programming" not in domains and re.search(pattern, text, re.I)
         )
         predicates = relation_matches(text, _PREDICATES)
-        actions = relation_matches(text, _ACTIONS)
         predicate = next(iter(predicates)) if len(predicates) == 1 else None
-        action = next(iter(actions)) if len(actions) == 1 else None
-        asks_time = bool(re.search(r"\bwhen\b|何时|什么时候|哪天|日期", text, re.I))
-        event = event_statement(text, question=True) if asks_time and action else None
         actor = re.search(r"\b(?:do|does|did)\s+(.+?)\s+(?:use|prefer|like|dislike)\b", text, re.I)
         unknown_actor = bool(
             actor and normalize(actor[1]) not in {"i", "the user"} and not entities(actor[1])
@@ -434,7 +451,7 @@ class Query:
             predicate,
             action,
             asks_time,
-            bool(re.search(r"[?\uff1f]|\b(?:what|which|when|who|why|how)\b|什么|何时|哪种|哪个", text, re.I)),
+            bool(re.search(r"[?\uff1f]", text) or _QUESTION_WORD.search(text)),
             known_request,
             (entity_hint and not conditions) or unknown_actor,
             unverified_qualifier(text)
@@ -477,12 +494,16 @@ def assess(
             "event_binding",
             "event_actor",
             "event_time",
+            "entity_missing",
+            "entity_binding",
+            "entity_conflict",
         ],
+        verdict: Support = Support.UNKNOWN,
     ) -> Support:
         if diagnostics is not None:
             key = f"support_rejected_{reason}"
             diagnostics[key] = diagnostics.get(key, 0) + 1
-        return Support.UNKNOWN
+        return verdict
 
     if record.subject == "user" and record.predicate in PROFILE_TOPICS:
         return (
@@ -502,31 +523,36 @@ def assess(
     if query.personal_actor and record.kind == MemoryType.SEMANTIC and record.subject != "user":
         return Support.RELATED
     body = " ".join((record.text, record.object, record.topic))
+    actual_event = event_statement(record.text) if record.kind == MemoryType.EPISODIC else None
+    actual_entities = _event_entities(record.text, actual_event, record.topic)
+    text_entities = _event_entities(record.text, actual_event)
     if (
         unverified_qualifier(record.text)
         or len(relation_matches(record.text, _PREDICATES)) > 1
         or len(relation_matches(record.text, _ACTIONS)) > 1
         or (record.kind == MemoryType.SEMANTIC and _CALENDAR.search(record.text))
-        or any(
-            len(names) > 1 for names in entities(record.text, record.topic, include_aliases=False).values()
-        )
     ):
         return Support.UNKNOWN
-    actual_entities = entities(record.text, record.topic)
-    text_entities = entities(record.text)
-    topic_entities = _topic_entities(record.topic, entities(record.text, include_aliases=False))
+    if any(
+        len(names) > 1
+        for names in _event_entities(record.text, actual_event, record.topic, include_aliases=False).values()
+    ):
+        return reject("entity_binding")
+    topic_entities = _topic_entities(
+        record.topic, _event_entities(record.text, actual_event, include_aliases=False)
+    )
     for kind, requested in query.entities.items():
         actual = actual_entities.get(kind)
         if not actual:
-            return Support.UNKNOWN
+            return reject("entity_missing")
         if (
             text_entities.get(kind)
             and topic_entities.get(kind)
             and text_entities[kind].isdisjoint(topic_entities[kind])
         ):
-            return Support.UNKNOWN
+            return reject("entity_binding")
         if requested.isdisjoint(actual):
-            return Support.CONFLICT
+            return reject("entity_conflict", Support.CONFLICT)
     if query.audience:
         audiences = {
             audience
@@ -551,7 +577,6 @@ def assess(
     if query.asks_time or query.event_action:
         if record.kind != MemoryType.EPISODIC:
             return Support.RELATED
-        actual_event = event_statement(record.text)
         if query.event is None or actual_event is None or query.event.target_kind != actual_event.target_kind:
             return reject("event_binding")
         if query.event.target != actual_event.target:

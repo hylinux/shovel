@@ -40,7 +40,7 @@ def _free_text_answer_correct(content: str, expected: str | None) -> bool:
                 re.search(
                     rf"\b{expected}\b|\b{month}\s+{day.day},?\s+{day.year}\b"
                     rf"|\b{day.day}\s+{month}\s+{day.year}\b"
-                    rf"|{day.year}年{day.month}月{day.day}日",
+                    rf"|{day.year}\s*年\s*{day.month}\s*月\s*{day.day}\s*日",
                     content,
                     re.I,
                 )

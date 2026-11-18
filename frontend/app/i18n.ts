@@ -5,6 +5,10 @@ export const defaultLocale: Locale = "en";
 export type TranslationValues = Record<string, string | number | boolean | null | undefined>;
 
 export const chinese: Readonly<Record<string, string>> = {
+  "Memory management controls": "记忆管理操作",
+  "Saved Memory": "已保存的记忆",
+  "Actions apply only to the Memory card they appear in.": "卡片内的操作仅针对该条记忆。",
+  "Memory {p0}": "记忆 {p0}",
   "Formatting": "格式",
   "Formatting · {p0}": "格式 · {p0}",
   "Write a message, paste an image, or attach a file…": "输入消息，粘贴图片或添加附件…",

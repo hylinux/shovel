@@ -12,6 +12,7 @@ const predicates = ["prefers", "dislikes", "uses", "works_at", "has_name", "has_
 function pollOperation(operation: Operation) { return active(operation.state); }
 type MemoryPage = Items<Memory> & { total: number };
 type PurgePreview = { confirmation_id: string; expires_at: number; workspace_id: string; counts: Record<string, number> };
+type MemoryDecision = "approve" | "reject" | "forget" | "delete";
 const pageSize = 20;
 
 export function MemoryManagement({ status, sessionId = "" }: { status?: Status; sessionId?: string }) {
@@ -40,7 +41,7 @@ function Memories({ enabled, indexEnabled, sessionId }: { enabled: boolean; inde
   const [history, setHistory] = useState(true);
   const [state, setState] = useState("");
   const [editor, setEditor] = useState<{ original?: Memory; draft: MemoryInput }>();
-  const [confirm, setConfirm] = useState<{ item: Memory; decision: "approve" | "reject" | "forget" | "delete" }>();
+  const [confirm, setConfirm] = useState<{ item: Memory; decision: MemoryDecision }>();
   const [operation, setOperation] = useState<Operation>();
   const [pending, setPending] = useState(false);
   const [localError, setLocalError] = useState("");
@@ -72,9 +73,15 @@ function Memories({ enabled, indexEnabled, sessionId }: { enabled: boolean; inde
     const result = await action.run<Operation>(editor.original ? `/memories/${segment(editor.original.id)}` : "/memories", payload, editor.original ? "PUT" : "POST");
     if (result) { watch(result); setEditor(undefined); }
   }
-  async function decide() {
-    if (!confirm || busy) return;
-    const { item, decision } = confirm;
+  function edit(item?: Memory) {
+    setLocalError(""); setConfirm(undefined); setPurge(undefined);
+    setEditor({ original: item, draft: memoryInput(item, sessionId) });
+  }
+  function requestDecision(item: Memory, decision: MemoryDecision) {
+    setEditor(undefined); setPurge(undefined); setConfirm({ item, decision });
+  }
+  async function decide(item: Memory, decision: MemoryDecision) {
+    if (busy || confirm?.item.id !== item.id || confirm.decision !== decision) return;
     if (decision === "forget" || decision === "delete") {
       const result = await action.run<{ deleted: boolean }>(`/memories/${segment(item.id)}?conversation_id=${segment(item.session_id || "")}${decision === "delete" ? "&hard=true" : ""}`, undefined, "DELETE");
       if (result?.deleted) { setConfirm(undefined); setPage(0); memories.refresh(); action.setNotice(decision === "delete" ? "Memory permanently deleted. Vector cleanup continues in the background." : "Memory forgotten."); }
@@ -82,6 +89,7 @@ function Memories({ enabled, indexEnabled, sessionId }: { enabled: boolean; inde
   }
   async function preparePurge() {
     if (busy) return;
+    setEditor(undefined); setConfirm(undefined);
     setPurgeText(""); setPurgeAcknowledged(false);
     setPurge(await action.run<PurgePreview>("/memory/purge", { prepare: true }));
   }
@@ -91,9 +99,31 @@ function Memories({ enabled, indexEnabled, sessionId }: { enabled: boolean; inde
       confirmation_id: purge.confirmation_id, confirmation_text: purgeText,
     }));
   }
+  const editorForm = editor && <form className="memory-editor" onSubmit={save}>
+    <h3>{t(editor.original ? "Edit Memory (creates a replacement)" : "Create Memory")}</h3>
+    <fieldset disabled={busy}>
+      <label>{t("Memory text")}<textarea rows={3} maxLength={1500} required value={editor.draft.text} onChange={event => setEditor({ ...editor, draft: { ...editor.draft, text: event.target.value } })} /></label>
+      <div className="memory-fields">
+        <label>{t("Kind")}<select disabled={Boolean(editor.original)} value={editor.draft.kind} onChange={event => setEditor({ ...editor, draft: { ...editor.draft, kind: event.target.value as MemoryInput["kind"], occurred_at: event.target.value === "episodic" ? editor.draft.occurred_at : null, time_precision: event.target.value === "episodic" ? editor.draft.time_precision : undefined } })}>{kinds.map(value => <option key={value} value={value}>{t(value)}</option>)}</select></label>
+        <label>{t("Scope")}<select disabled={Boolean(editor.original)} value={editor.draft.scope} onChange={event => setEditor({ ...editor, draft: { ...editor.draft, scope: event.target.value as MemoryInput["scope"], session_id: event.target.value === "session" ? sessionId : "" } })}>{scopes.map(value => <option key={value} value={value} disabled={value === "session" && !sessionId}>{t(value)}</option>)}</select></label>
+        <label>{t("Subject")}<input maxLength={200} required value={editor.draft.subject} onChange={event => setEditor({ ...editor, draft: { ...editor.draft, subject: event.target.value } })} /></label>
+        <label>{t("Predicate")}<select value={editor.draft.predicate} onChange={event => setEditor({ ...editor, draft: { ...editor.draft, predicate: event.target.value } })}>{predicates.map(value => <option key={value} value={value}>{t(value)}</option>)}</select></label>
+        <label>{t("Object")}<input maxLength={1000} value={editor.draft.object} onChange={event => setEditor({ ...editor, draft: { ...editor.draft, object: event.target.value } })} /></label>
+        <label>{t("Topic")}<input maxLength={200} value={editor.draft.topic} onChange={event => setEditor({ ...editor, draft: { ...editor.draft, topic: event.target.value } })} /></label>
+        <label>{t("Importance")}<input type="number" min={0} max={1} step="any" required value={editor.draft.importance} onChange={event => setEditor({ ...editor, draft: { ...editor.draft, importance: Number(event.target.value) } })} /></label>
+        {(["expires_at", ...(editor.draft.kind === "episodic" ? ["occurred_at" as const] : [])] as const).map(field => <label key={field}>{t(field === "expires_at" ? "Expires at (UTC Unix seconds)" : "Occurred at (UTC Unix seconds)")}<input type="number" min={0} step={1} value={editor.draft[field] ?? ""} onChange={event => setEditor({ ...editor, draft: { ...editor.draft, [field]: event.target.value ? Number(event.target.value) : null, ...(field === "occurred_at" ? { time_precision: undefined } : {}) } })} /></label>)}
+      </div>
+      {editor.draft.scope === "session" && <p>{t("Session")}: <code>{editor.draft.session_id}</code></p>}
+      <p className="muted">{t("Kind and scope cannot change on edit. Saving queues an Operation; the list updates only after it succeeds.")}</p>
+      {editor.original && <p className="warning">{t("Saving an explicit edit can remember a forgotten or rejected fact again. Automatic extraction cannot do this.")}</p>}
+      <div className="button-row"><button className="primary" type="submit">{t("Save Memory")}</button><button type="button" onClick={() => setEditor(undefined)}>{t("Cancel")}</button></div>
+    </fieldset>
+  </form>;
   return <div className="memory-panel">
+    <section className="memory-controls" aria-label={t("Memory management controls")}>
+    <h3>{t("Memory management controls")}</h3>
     <div className="button-row">
-      <button disabled={busy} onClick={() => { setLocalError(""); setEditor({ draft: memoryInput(undefined, sessionId) }); }}>{t("Create Memory")}</button>
+      <button disabled={busy} onClick={() => edit()}>{t("Create Memory")}</button>
       <button disabled={busy || !indexEnabled} onClick={async () => watch(await action.run<Operation>("/memory/index/rebuild"))}>{t("Rebuild semantic index")}</button>
       <button disabled={action.busy} onClick={memories.refresh}>{t("Refresh")}</button>
       <button className="danger" disabled={busy} onClick={preparePurge}>{t("Clear all long-term Memory…")}</button>
@@ -103,6 +133,7 @@ function Memories({ enabled, indexEnabled, sessionId }: { enabled: boolean; inde
       </select></label>
     </div>
     <p className="muted">{t("All Memory scopes in this workspace, including other Sessions and forgotten facts.")}</p>
+    </section>
     <Feedback error={currentError} retry={memories.refresh} /><Feedback error={action.error || localError} notice={action.notice} />
     {cleanupError && <p className="warning" role="alert">{t("Memory was cleared, but browser recovery receipts could not be removed.")} {cleanupError}</p>}
     {operation && <MemoryOperation key={operation.id} initial={operation} onSettled={settled => {
@@ -125,50 +156,38 @@ function Memories({ enabled, indexEnabled, sessionId }: { enabled: boolean; inde
       <label>{t("Type DELETE ALL MEMORY to confirm")}<input autoComplete="off" value={purgeText} onChange={event => setPurgeText(event.target.value)} /></label>
       <div className="button-row"><button className="danger" disabled={busy || !purgeAcknowledged || purgeText !== "DELETE ALL MEMORY"} onClick={clearAll}>{t("Confirm clear all Memory")}</button><button disabled={busy} onClick={() => setPurge(undefined)}>{t("Cancel")}</button></div>
     </div>}
-    {editor && <form className="memory-editor" onSubmit={save}>
-      <h3>{t(editor.original ? "Edit Memory (creates a replacement)" : "Create Memory")}</h3>
-      <fieldset disabled={busy}>
-        <label>{t("Memory text")}<textarea rows={3} maxLength={1500} required value={editor.draft.text} onChange={event => setEditor({ ...editor, draft: { ...editor.draft, text: event.target.value } })} /></label>
-        <div className="memory-fields">
-          <label>{t("Kind")}<select disabled={Boolean(editor.original)} value={editor.draft.kind} onChange={event => setEditor({ ...editor, draft: { ...editor.draft, kind: event.target.value as MemoryInput["kind"], occurred_at: event.target.value === "episodic" ? editor.draft.occurred_at : null, time_precision: event.target.value === "episodic" ? editor.draft.time_precision : undefined } })}>{kinds.map(value => <option key={value} value={value}>{t(value)}</option>)}</select></label>
-          <label>{t("Scope")}<select disabled={Boolean(editor.original)} value={editor.draft.scope} onChange={event => setEditor({ ...editor, draft: { ...editor.draft, scope: event.target.value as MemoryInput["scope"], session_id: event.target.value === "session" ? sessionId : "" } })}>{scopes.map(value => <option key={value} value={value} disabled={value === "session" && !sessionId}>{t(value)}</option>)}</select></label>
-          <label>{t("Subject")}<input maxLength={200} required value={editor.draft.subject} onChange={event => setEditor({ ...editor, draft: { ...editor.draft, subject: event.target.value } })} /></label>
-          <label>{t("Predicate")}<select value={editor.draft.predicate} onChange={event => setEditor({ ...editor, draft: { ...editor.draft, predicate: event.target.value } })}>{predicates.map(value => <option key={value} value={value}>{t(value)}</option>)}</select></label>
-          <label>{t("Object")}<input maxLength={1000} value={editor.draft.object} onChange={event => setEditor({ ...editor, draft: { ...editor.draft, object: event.target.value } })} /></label>
-          <label>{t("Topic")}<input maxLength={200} value={editor.draft.topic} onChange={event => setEditor({ ...editor, draft: { ...editor.draft, topic: event.target.value } })} /></label>
-          <label>{t("Importance")}<input type="number" min={0} max={1} step="any" required value={editor.draft.importance} onChange={event => setEditor({ ...editor, draft: { ...editor.draft, importance: Number(event.target.value) } })} /></label>
-          {(["expires_at", ...(editor.draft.kind === "episodic" ? ["occurred_at" as const] : [])] as const).map(field => <label key={field}>{t(field === "expires_at" ? "Expires at (UTC Unix seconds)" : "Occurred at (UTC Unix seconds)")}<input type="number" min={0} step={1} value={editor.draft[field] ?? ""} onChange={event => setEditor({ ...editor, draft: { ...editor.draft, [field]: event.target.value ? Number(event.target.value) : null, ...(field === "occurred_at" ? { time_precision: undefined } : {}) } })} /></label>)}
-        </div>
-        {editor.draft.scope === "session" && <p>{t("Session")}: <code>{editor.draft.session_id}</code></p>}
-        <p className="muted">{t("Kind and scope cannot change on edit. Saving queues an Operation; the list updates only after it succeeds.")}</p>
-        {editor.original && <p className="warning">{t("Saving an explicit edit can remember a forgotten or rejected fact again. Automatic extraction cannot do this.")}</p>}
-        <div className="button-row"><button className="primary" type="submit">{t("Save Memory")}</button><button type="button" onClick={() => setEditor(undefined)}>{t("Cancel")}</button></div>
-      </fieldset>
-    </form>}
-    {waiting ? <p role="status">{t("Loading saved Memory…")}</p> : rows.length === 0 ? <Empty title={t("No saved facts")}>{t("Long-term facts extracted from your messages will appear here.")}</Empty> : rows.map(item => <article className="memory-row" key={item.id}>
+    {!editor?.original && editorForm}
+    <section className="memory-list" aria-labelledby="saved-memory-list-heading">
+    <header><h3 id="saved-memory-list-heading">{t("Saved Memory")}</h3><p className="muted">{t("Actions apply only to the Memory card they appear in.")}</p></header>
+    <div className="memory-cards">
+    {waiting ? <p role="status">{t("Loading saved Memory…")}</p> : rows.length === 0 ? <Empty title={t("No saved facts")}>{t("Long-term facts extracted from your messages will appear here.")}</Empty> : rows.map((item, index) => <article className="memory-row" key={item.id} aria-label={t("Memory {p0}", { p0: page * pageSize + index + 1 })} data-selected={editor?.original?.id === item.id || confirm?.item.id === item.id}>
+      <header className="memory-row-heading"><h4>{t("Memory {p0}", { p0: page * pageSize + index + 1 })}</h4><code className="muted">{item.id}</code></header>
       <p className="preserve">{item.memory}</p>
       <p className="muted">{[item.kind, item.scope, item.state].map(value => t(value === "deleted" ? "Forgotten (record retained)" : value)).join(" · ")}</p>
       <MemoryEvidence item={item} />
       {item.provenance?.some(source => source.source_kind === "user_settings") ? <div>
         <p className="muted">{t("Managed in General settings. Edit or clear the profile field there.")}</p>
-        {item.state === "deleted" && !item.object && <button className="danger" disabled={busy} onClick={() => setConfirm({ item, decision: "delete" })}>{t("Permanently delete…")}</button>}
-      </div> : <div className="button-row">
-        {["active", "deleted", "rejected"].includes(item.state) && <button disabled={busy} onClick={() => { setLocalError(""); setEditor({ original: item, draft: memoryInput(item, sessionId) }); }}>{t(item.state === "active" ? "Edit" : "Edit and remember again…")}</button>}
-        {item.state === "candidate" && <button disabled={busy} onClick={() => setConfirm({ item, decision: "approve" })}>{t("Approve candidate…")}</button>}
-        {(item.state === "candidate" || item.state === "active") && <button disabled={busy} onClick={() => setConfirm({ item, decision: "reject" })}>{t("Reject…")}</button>}
-        {item.state !== "deleted" && <button disabled={busy} onClick={() => setConfirm({ item, decision: "forget" })}>{t("Forget…")}</button>}
-        <button className="danger" disabled={busy} onClick={() => setConfirm({ item, decision: "delete" })}>{t("Permanently delete…")}</button>
+        {item.state === "deleted" && !item.object && <button className="danger" disabled={busy} onClick={() => requestDecision(item, "delete")}>{t("Permanently delete…")}</button>}
+      </div> : <div className="button-row memory-row-actions">
+        {["active", "deleted", "rejected"].includes(item.state) && <button disabled={busy} onClick={() => edit(item)}>{t(item.state === "active" ? "Edit" : "Edit and remember again…")}</button>}
+        {item.state === "candidate" && <button disabled={busy} onClick={() => requestDecision(item, "approve")}>{t("Approve candidate…")}</button>}
+        {(item.state === "candidate" || item.state === "active") && <button disabled={busy} onClick={() => requestDecision(item, "reject")}>{t("Reject…")}</button>}
+        {item.state !== "deleted" && <button disabled={busy} onClick={() => requestDecision(item, "forget")}>{t("Forget…")}</button>}
+        <button className="danger" disabled={busy} onClick={() => requestDecision(item, "delete")}>{t("Permanently delete…")}</button>
       </div>}
+      {editor?.original?.id === item.id && editorForm}
       {confirm?.item.id === item.id && <div className="confirmation">
         <p>{t(confirm.decision === "delete" ? "Permanently delete this fact and its tombstone? It may be learned again. Source messages and backups are not erased; vector cleanup is retried in the background." : confirm.decision === "forget" ? "Forget this saved fact? Its vector will also be cleaned up." : confirm.decision === "approve" ? "Approve this candidate for active recall? Approval is not verification of truth." : "Reject this fact? The same rejected fact will not be automatically recreated.")}</p>
-        <div className="button-row"><button className={confirm.decision === "approve" ? "primary" : "danger"} disabled={busy} onClick={decide}>{t(confirm.decision === "delete" ? "Confirm permanent delete" : confirm.decision === "forget" ? "Confirm forget" : confirm.decision === "approve" ? "Confirm approve" : "Confirm reject")}</button><button disabled={busy} onClick={() => setConfirm(undefined)}>{t("Cancel")}</button></div>
+        <div className="button-row"><button className={confirm.decision === "approve" ? "primary" : "danger"} disabled={busy} onClick={() => decide(item, confirm.decision)}>{t(confirm.decision === "delete" ? "Confirm permanent delete" : confirm.decision === "forget" ? "Confirm forget" : confirm.decision === "approve" ? "Confirm approve" : "Confirm reject")}</button><button disabled={busy} onClick={() => setConfirm(undefined)}>{t("Cancel")}</button></div>
       </div>}
     </article>)}
-    <nav className="button-row" aria-label={t("Memory pagination")}>
+    </div>
+    <nav className="button-row memory-pagination" aria-label={t("Memory pagination")}>
       <button disabled={busy || page === 0 || waiting} onClick={() => { setConfirm(undefined); setPage(page - 1); }}>{t("Previous page")}</button>
       <span role="status">{t("Page {p0} of {p1} · {p2} facts", { p0: page + 1, p1: Math.max(1, Math.ceil(total / pageSize)), p2: total })}</span>
       <button disabled={busy || waiting || (page + 1) * pageSize >= total} onClick={() => { setConfirm(undefined); setPage(page + 1); }}>{t("Next page")}</button>
     </nav>
+    </section>
   </div>;
 }
 

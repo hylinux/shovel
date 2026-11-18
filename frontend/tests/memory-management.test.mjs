@@ -559,6 +559,80 @@ test("Memory management queues scoped create/review actions and waits for the Op
   });
 });
 
+test("Non-first Memory cards own their editor and all decisions even after polling reorders the list", async () => {
+  for (const language of ["en", "zh-CN"]) {
+    let current, index;
+    const scopes = new Map(), calls = [];
+    const originals = [0, 1, 2].map(number => ({
+      ...fact, id: `fact/${number}?`, memory: `Distinct fact ${number}`, object: `Object ${number}`, session_id: `session/${number}`,
+    }));
+    let records = [...originals];
+    const { MemoryManagement } = loadComponent("memories.tsx", {
+      react: { useState: initial => {
+        const slot = index++, state = current;
+        if (!(slot in state)) state[slot] = initial;
+        return [state[slot], value => { state[slot] = typeof value === "function" ? value(state[slot]) : value; }];
+      } },
+      "./api": {
+        active: () => false, segment: encodeURIComponent,
+        useQuery: path => ({ data: { items: records, total: records.length }, dataPath: path, error: "", refresh() {} }),
+        useAction: () => ({ busy: false, error: "", notice: "", setNotice() {}, run: async (path, body, method) => {
+          calls.push({ path, body, method });
+          return method === "DELETE" ? { deleted: true } : { id: `operation-${calls.length}`, state: "succeeded" };
+        } }),
+      },
+      "./memory-model": model, "./locale-context": { useI18n: () => locale(language) },
+      "./ui": { Feedback: () => null, Empty: () => null },
+    });
+    function render(component, props) {
+      if (!scopes.has(component)) scopes.set(component, []);
+      current = scopes.get(component); index = 0;
+      return elements(component(props));
+    }
+    const child = render(MemoryManagement, { status: { memory_configured: true } })
+      .find(node => typeof node.type === "function" && node.type.name === "Memories");
+    const panel = () => render(child.type, child.props);
+    const cards = () => panel().filter(node => node.type === "article");
+    const card = target => cards().find(node => elements(node).some(part => part.type === "p" && part.props.children === target.memory));
+    const button = (tree, text) => elements(tree).find(node => node.type === "button" && node.props.children === translate(text, language));
+    for (const target of originals.slice(1)) {
+      button(card(target), "Edit").props.onClick();
+      records = [...records].reverse();
+      const editor = elements(card(target)).find(node => node.type === "form");
+      assert.ok(editor, "The editor must be inside the clicked Memory card, not above the first record.");
+      assert.equal(elements(editor).find(node => node.type === "textarea").props.value, target.memory);
+      assert.equal(cards().filter(node => elements(node).some(part => part.type === "form")).length, 1);
+      elements(editor).find(node => node.type === "textarea").props.onChange({ target: { value: `Updated ${target.id}` } });
+      await elements(card(target)).find(node => node.type === "form").props.onSubmit({ preventDefault() {} });
+      assert.equal(calls.at(-1).path, `/memories/${encodeURIComponent(target.id)}`);
+      assert.equal(calls.at(-1).method, "PUT");
+      assert.equal(calls.at(-1).body.text, `Updated ${target.id}`);
+      assert.equal(calls.at(-1).body.object, target.object);
+      assert.equal(calls.at(-1).body.session_id, target.session_id);
+      for (const [decision, trigger, confirmation] of [
+        ["reject", "Reject…", "Confirm reject"],
+        ["forget", "Forget…", "Confirm forget"],
+        ["delete", "Permanently delete…", "Confirm permanent delete"],
+      ]) {
+        button(card(target), trigger).props.onClick();
+        records = [...records].reverse();
+        assert.ok(button(card(target), confirmation));
+        assert.equal(cards().filter(node => button(node, confirmation)).length, 1);
+        await button(card(target), confirmation).props.onClick();
+        const call = calls.at(-1);
+        if (decision === "reject") {
+          assert.equal(call.path, `/memories/${encodeURIComponent(target.id)}/review`);
+          assert.deepEqual(call.body, { decision, conversation_id: target.session_id });
+        } else {
+          assert.equal(call.method, "DELETE");
+          assert.equal(call.path, `/memories/${encodeURIComponent(target.id)}?conversation_id=${encodeURIComponent(target.session_id)}${decision === "delete" ? "&hard=true" : ""}`);
+        }
+      }
+    }
+    assert.ok(calls.every(call => !call.path.startsWith(`/memories/${encodeURIComponent(originals[0].id)}`)));
+  }
+});
+
 test("Memory defaults open, paginates on the server, restores forgotten facts and confirms destructive actions", async () => {
   for (const language of ["en", "zh-CN"]) {
     let current, index = 0, refreshed = 0, receipt;

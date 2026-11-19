@@ -127,7 +127,7 @@ uv run shovel init
 API version、隐藏的 API key、知识库名和 Memory collection 名。
 API key 可以留空；Azure 留空使用非交互式 Azure CLI 认证，API version 则必须填写。
 名称仅允许英文字母、数字和下划线，不能使用系统保留文件名。
-索引维度默认 3072，可修改，知识库和 Memory 自动保持一致；Ollama 模型须原生输出该维度，
+索引维度默认 1024，可修改，知识库和 Memory 自动保持一致；Ollama 模型须原生输出该维度，
 配置文件不会包含其不支持的 `dimensions` 请求参数。
 Memory 的模型配置由向导复制，无需重复填写。
 

@@ -103,8 +103,8 @@ def _prompt_store_name(label: str, default: str) -> str:
 
 def _initial_settings(*, interactive: bool) -> AppSettings:
     model = DefaultAgentModelSettings(max_input_chars=240000, max_output_tokens=32768, timeout_seconds=300)
-    embedding = EmbeddingSettings(dimensions=3072, batch_size=8, timeout_seconds=300)
-    dimension = 3072
+    embedding = EmbeddingSettings(dimensions=1024, batch_size=8, timeout_seconds=300)
+    dimension = 1024
     knowledge_name, memory_name = "shovel_chunk", "shovel_memory"
 
     if interactive:
@@ -133,7 +133,7 @@ def _initial_settings(*, interactive: bool) -> AppSettings:
         endpoint = _prompt_endpoint("Embedding endpoint", provider)
         name = _prompt_required("Embedding model / deployment")
         while True:
-            dimension = typer.prompt("Embedding / index dimensions", type=int, default=3072)
+            dimension = typer.prompt("Embedding / index dimensions", type=int, default=1024)
             if dimension > 0:
                 break
             console.warning("Dimensions must be a positive integer.")

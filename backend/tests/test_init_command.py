@@ -83,7 +83,7 @@ def test_init_wizard_persists_inputs_defaults_and_independent_memory_copies(
     assert raw["model"]["timeout_seconds"] == 300
     assert raw["agent"]["max_tool_iterations"] == 5
     assert raw["performance"]["max_local_model_requests"] == 3
-    assert raw["embedding"]["dimensions"] == raw["zvec"]["dim"] == raw["memory"]["dim"] == 3072
+    assert raw["embedding"]["dimensions"] == raw["zvec"]["dim"] == raw["memory"]["dim"] == 1024
     assert raw["embedding"]["batch_size"] == 8
     assert raw["embedding"]["timeout_seconds"] == 300
     assert raw["memory"]["max_items"] == 20
@@ -127,21 +127,21 @@ def test_init_provider_choices_optional_keys_and_dimension_override(
             model_version="2025-04-01-preview" if model_provider == "azure_openai" else "",
             embedding_provider=embedding_choice,
             embedding_version="2025-04-01-preview" if embedding_provider == "azure_openai" else "",
-            dimension="1024",
+            dimension="3072",
         ),
     )
     assert result.exit_code == 0, result.output
     raw = tomllib.loads((profile / "config" / "settings.toml").read_text(encoding="utf-8"))
     assert raw["model"]["model_provider_type"] == model_provider
     assert raw["embedding"]["provider"] == embedding_provider
-    assert raw["zvec"]["dim"] == raw["memory"]["dim"] == 1024
+    assert raw["zvec"]["dim"] == raw["memory"]["dim"] == 3072
     assert raw["model"]["security_key"] == raw["embedding"]["api_key"] == ""
     if embedding_provider == "ollama":
         assert "dimensions" not in raw["embedding"]
         assert "dimensions" not in raw["memory"]["embedder"]
         assert "Ollama does not accept a dimensions parameter" in result.output
     else:
-        assert raw["embedding"]["dimensions"] == raw["memory"]["embedder"]["dimensions"] == 1024
+        assert raw["embedding"]["dimensions"] == raw["memory"]["embedder"]["dimensions"] == 3072
     assert raw["model"] == raw["memory"]["llm"]
     assert raw["embedding"] == raw["memory"]["embedder"]
 
@@ -220,7 +220,13 @@ def test_init_no_input_creates_unconfigured_profile_without_persisting_environme
     assert not settings.model.is_configured and not settings.embedding.is_configured
     assert not settings.memory.llm.is_configured and not settings.memory.embedder.is_configured
     assert settings.model.max_output_tokens == settings.memory.llm.max_output_tokens == 32768
-    assert settings.zvec.dim == settings.memory.dim == settings.embedding.dimensions == 3072
+    assert (
+        settings.zvec.dim
+        == settings.memory.dim
+        == settings.embedding.dimensions
+        == settings.memory.embedder.dimensions
+        == 1024
+    )
     assert Path(settings.zvec.knowledge_path) == profile / "knowledge" / "shovel_chunk"
     assert settings.memory.index_path == profile / "memory" / "shovel_memory"
 

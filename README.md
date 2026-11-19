@@ -88,7 +88,7 @@ requires an API version; other providers may leave it empty.
 Knowledge and Memory names accept only ASCII letters, digits and underscores
 (not reserved filenames). Their stores are created under
 `~/.shovel/knowledge/<name>` and `~/.shovel/memory/<name>`. Embedding dimensions
-default to 3072 and set both index dimensions. Ollama must produce the chosen
+default to 1024 and set both index dimensions. Ollama must produce the chosen
 dimension natively; its unsupported `dimensions` request parameter is omitted.
 Memory receives independent copies of the chat and embedding settings.
 

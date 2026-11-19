@@ -244,9 +244,18 @@ _QUESTION_WORD = re.compile(
     r"\b(?:what|which|when|who|why|how)\b|什么|何时|哪一天|哪天|哪种|哪个|哪家|谁", re.I
 )
 _RESPONSE_DIRECTIVE = re.compile(
-    r"(?:请)?(?:只|仅)(?:依据|根据|基于)(?:已保存的)?(?:我的)?(?:个人)?(?:记忆|记录)(?:来)?(?:回答|作答)"
+    r"(?:请)?(?:只|仅)(?:依据|根据|基于)(?:我(?:已)?保存的|已保存的(?:我的)?|我的)?"
+    r"(?:个人)?(?:记忆|记录)(?:来)?(?:回答|作答)"
     r"|(?:如果|若)?(?:没有|未找到|找不到)(?:对应的?|相关的?)?(?:记忆|记录)"
     r"(?:就请|则请|就|则|请)(?:明确|直接|如实)?(?:说明|告知|回答)(?:没有(?:记录)?|不知道|未知)?"
+)
+_MEMORY_RECHECK = re.compile(
+    r"(?:请)?(?:你)?(?:再)?(?:查一下|查查|查询|检索|检查一下|看看)(?:长期)?记忆"
+    r"(?:[\uff0c,]\s*(?:再)?看看记忆里(?:有没有|是否有|没有)记录)?"
+    r"|记忆里(?:有没有|没有)记录(?:吗)?"
+    r"|(?:please\s+)?(?:recheck|check(?:\s+again)?)\s+(?:the\s+)?"
+    r"(?:saved\s+)?(?:long-term\s+)?memory(?:\s+again)?",
+    re.I,
 )
 
 
@@ -551,6 +560,32 @@ def event_question_parts(text: str) -> tuple[Query, ...]:
             ):
                 return parts
     return ()
+
+
+def resolve_memory_query(text: str, previous_question: str | None) -> str | None:
+    """Resolve only an explicit recheck against one immediately preceding user question."""
+    if not _MEMORY_RECHECK.fullmatch(text.strip().rstrip(".。!?\uff01\uff1f").strip()):
+        return text
+    if not previous_question:
+        return None
+    query = Query.parse(previous_question)
+    if event_question_parts(previous_question):
+        return previous_question
+    single_target = (
+        len(query.entities) <= 1
+        and all(len(names) == 1 for names in query.entities.values())
+        and bool(query.domains or query.predicate or query.event)
+    ) or (len(query.profiles) == 1 and not query.entities)
+    if (
+        not single_target
+        or not query.question
+        or not query.known_request
+        or query.unresolved_entity
+        or len(query.domains) > 1
+        or len(_QUESTION_WORD.findall(factual_query(previous_question))) > 1
+    ):
+        return None
+    return previous_question
 
 
 def assess(

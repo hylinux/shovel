@@ -44,7 +44,7 @@ from openai import APIError, AsyncAzureOpenAI, AsyncOpenAI
 from shovel.config.model_settings import DefaultAgentModelSettings, ModelProviderType
 from shovel.exceptions.pipeline import VectorSinkError
 from shovel.memory.domain import PROFILE_TOPICS
-from shovel.memory.relevance import Query
+from shovel.memory.relevance import Query, resolve_memory_query
 from shovel.memory.service import RecallCoverage, context_entry
 from shovel.platform.agent_tools import agent_tools
 from shovel.protection.domain import ProtectionDeniedError
@@ -329,7 +329,20 @@ class ShovelContextProvider(ContextProvider):
         self.runtime, self.identifier, self.request, self.history = runtime, identifier, request, history
         self.profile = profile
         self.instructions = instructions + (PROFILE_INSTRUCTIONS if profile and profile["revision"] else "")
-        if request.memory_enabled and Query.parse(request.content).asks_time:
+        previous_question = (
+            history[-2].contents[0].text
+            if len(history) >= 2
+            and history[-1].role == "assistant"
+            and history[-2].role == "user"
+            and history[-2].contents
+            else None
+        )
+        self.memory_query = (
+            resolve_memory_query(request.content, previous_question)
+            if not request.attachment_ids
+            else request.content
+        )
+        if request.memory_enabled and self.memory_query and Query.parse(self.memory_query).asks_time:
             self.instructions += EVENT_MEMORY_INSTRUCTIONS
         self.result = AgentResult()
         self.has_retrieval_matches = False
@@ -444,10 +457,10 @@ class ShovelContextProvider(ContextProvider):
         memory_task = (
             asyncio.create_task(
                 self.runtime.memory.search(
-                    request.content, conversation_id=self.identifier, coverage=memory_coverage
+                    self.memory_query, conversation_id=self.identifier, coverage=memory_coverage
                 )
             )
-            if request.memory_enabled and request.content.strip()
+            if request.memory_enabled and self.memory_query and self.memory_query.strip()
             else None
         )
         search_task = (
@@ -1046,8 +1059,11 @@ class ShovelAgent:
         if len(content) > self.runtime.settings.memory.context_max_chars:
             raise RuntimeFailure("用户背景超过 memory.context_max_chars;请只询问一个属性。", status=422)
         await self.runtime.memory.repository.touch(scope, [row.id for row in selected])
-        result = AgentResult(content=content, warnings=await self.runtime.memory.warnings())
         trace("agent.memory_profile.answered", count=len(selected), history_messages=len(history))
+        return await self._text_response(content, on_event)
+
+    async def _text_response(self, content: str, on_event: EventSink | None) -> AgentResult:
+        result = AgentResult(content=content, warnings=await self.runtime.memory.warnings())
         if on_event is not None:
             message_id = uuid4().hex
             await on_event(TextMessageStartEvent(message_id=message_id, role="assistant"))
@@ -1073,6 +1089,25 @@ class ShovelAgent:
         )
         if profile is not None:
             return profile
+        knowledge = ShovelContextProvider(
+            self.runtime,
+            identifier,
+            request,
+            history,
+            instructions=self.instructions,
+            profile=await self.runtime.user_profile.read(),
+        )
+        if request.memory_enabled and knowledge.memory_query is None:
+            chinese = bool(re.search(r"[\u4e00-\u9fff]", request.content))
+            content = (
+                "请明确你想重新查询的项目或具体事实。当前追问没有唯一明确的查询目标,"
+                "我还没有执行这次长期记忆查询。"
+                if chinese
+                else "Please specify the project or fact you want me to recheck. "
+                "This follow-up has no unambiguous target, so I have not queried long-term memory yet."
+            )
+            trace("agent.memory_recheck.needs_clarification", history_messages=len(history))
+            return await self._text_response(content, on_event)
         client = self.client()
         extensions_started = perf_counter()
         trace("agent.extensions.started")
@@ -1082,14 +1117,6 @@ class ShovelAgent:
             tools=len(self.extensions.tools),
             skills_enabled=self.extensions.skills is not None,
             elapsed_ms=round((perf_counter() - extensions_started) * 1000, 2),
-        )
-        knowledge = ShovelContextProvider(
-            self.runtime,
-            identifier,
-            request,
-            history,
-            instructions=self.instructions,
-            profile=await self.runtime.user_profile.read(),
         )
 
         async def list_resources() -> dict[str, Any]:

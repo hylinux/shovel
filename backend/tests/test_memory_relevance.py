@@ -16,8 +16,17 @@ from scripts.memory_support_evaluation import (
 )
 from scripts.memory_support_evaluation import main as support_main
 
-from shovel.memory.domain import MemoryCandidate, MemoryRecord, MemoryType, Provenance
-from shovel.memory.relevance import Query, Support, assess, entities, event_question_parts, literal_match
+from shovel.memory.domain import MemoryCandidate, MemoryRecord, MemoryState, MemoryType, Provenance, ScopeKind
+from shovel.memory.relevance import (
+    Query,
+    Support,
+    assess,
+    entities,
+    event_question_parts,
+    factual_query,
+    literal_match,
+    resolve_memory_query,
+)
 from shovel.memory.service import RecallCoverage
 from shovel.runtime.service import Runtime
 from test_hosted_runtime import api as api
@@ -63,6 +72,9 @@ def test_entity_and_relation_support_is_not_theme_similarity(query: str, expecte
         "",
         "请只依据已保存的个人记录回答。",
         "请只依据已保存的个人记录回答\uff1b没有记录就明确说明。",
+        "请只依据我保存的个人记录回答\uff1b没有记录就明确说明。",
+        "请仅根据我的个人记忆作答。",
+        "请只基于我已保存的记录来回答。",
     ],
 )
 def test_saved_record_response_instructions_do_not_qualify_the_fact(instruction: str) -> None:
@@ -72,7 +84,9 @@ def test_saved_record_response_instructions_do_not_qualify_the_fact(instruction:
         object="SQLite",
         topic="project.青鹭-q47.database",
     )
-    query = Query.parse(f"我在青鹭-Q47项目中使用什么数据库\uff1f{instruction}")
+    question = f"我在青鹭-Q47项目中使用什么数据库\uff1f{instruction}"
+    query = Query.parse(question)
+    assert factual_query(question).strip("。;?\uff1f\uff1b") == "我在青鹭-Q47项目中使用什么数据库"
     assert assess(query, fact, semantic_match=True) == Support.SUPPORTED
 
 
@@ -113,6 +127,7 @@ def test_project_context_does_not_replace_the_personal_actor() -> None:
         "我在青鹭-Q47项目中以前使用什么数据库\uff1f",
         "我在青鹭-Q47和赤狐-R82项目中分别使用什么数据库\uff1f",
         "我在青鹭-Q47项目中使用什么数据库和编程语言\uff1f",
+        "我在青鹭-Q47项目中使用什么数据库\uff1f请只依据我保存的个人记录回答\uff0c但只限以前的记录。",
     ],
 )
 def test_response_instructions_never_remove_factual_qualifiers(question: str) -> None:
@@ -198,7 +213,7 @@ async def test_issue_14_saved_fact_reaches_new_session_with_source_evidence(
     for project, expected in (("青鹭-Q47", "SQLite"), ("赤狐-Q47", "PostgreSQL"), ("银杉-S96", None)):
         session_b = (await api.post("/api/v1/conversations", json={})).json()["id"]
         question = (
-            f"我在{project}项目中使用什么数据库\uff1f请只依据已保存的个人记录回答\uff1b没有记录就明确说明。"
+            f"我在{project}项目中使用什么数据库\uff1f请只依据我保存的个人记录回答\uff1b没有记录就明确说明。"
         )
         response = await api.post(f"/api/v1/conversations/{session_b}/messages", json={"content": question})
         assert response.status_code == 200, response.text
@@ -209,6 +224,194 @@ async def test_issue_14_saved_fact_reaches_new_session_with_source_evidence(
         if expected == "SQLite":
             assert supported[0]["id"] == saved_fact["id"]
         assert not captured[-1]["sources"]
+
+
+@pytest.mark.parametrize(
+    "previous,followup,expected,clarify,boundary",
+    [
+        (
+            "我在青鹭-Q47项目中使用什么数据库\uff1f请只依据我保存的个人记录回答\uff1b没有记录就明确说明。",
+            "你查一下记忆\uff0c看看记忆里没有记录\uff1f",
+            "SQLite database",
+            False,
+            "",
+        ),
+        ("我在青鹭-Q47项目中使用什么数据库\uff1f", "再查一下记忆。", "SQLite database", False, ""),
+        (
+            "Which database do I use for project 青鹭-Q47?",
+            "Please check memory again.",
+            "SQLite database",
+            False,
+            "",
+        ),
+        (None, "再查一下记忆。", None, True, ""),
+        ("谢谢\uff0c换个话题。", "再查一下记忆。", None, True, ""),
+        ("青鹭-Q47和赤狐-Q47项目使用什么数据库\uff1f", "再查一下记忆。", None, True, ""),
+        ("我在青鹭-Q47项目中以前使用什么数据库\uff1f", "再查一下记忆。", None, False, ""),
+        ("我在青鹭-Q47项目中没有使用什么数据库\uff1f", "再查一下记忆。", None, False, ""),
+        (
+            "我在青鹭-Q47项目中使用什么数据库\uff1f",
+            "再查一下记忆\uff0c赤狐-Q47项目使用什么数据库\uff1f",
+            None,
+            False,
+            "",
+        ),
+    ]
+    + [
+        ("我在青鹭-Q47项目中使用什么数据库?", "再查一下记忆。", None, boundary == "failed-turn", boundary)
+        for boundary in ("other-session", "deleted", "expired", "candidate", "failed-turn")
+    ],
+)
+async def test_memory_recheck_resolves_only_the_immediate_completed_user_question(
+    runtime: Runtime,
+    api: httpx.AsyncClient,
+    previous: str | None,
+    followup: str,
+    expected: str | None,
+    clarify: bool,
+    boundary: str,
+) -> None:
+    import json
+
+    from shovel.db.model.runtime import ChatMessage, Conversation
+
+    owner = runtime.memory.owner
+    if boundary == "other-session":
+        owner = replace(owner, kind=ScopeKind.SESSION, session_id="unrelated-session")
+    saved_fact = (
+        await runtime.memory.repository.consolidate(
+            owner,
+            [
+                MemoryCandidate(
+                    "User uses SQLite database in the 青鹭-Q47 project.",
+                    predicate="uses",
+                    object="SQLite database",
+                    topic="project.青鹭-Q47.database",
+                    expires_at=1 if boundary == "expired" else None,
+                )
+            ],
+            Provenance("manual"),
+            review_required=boundary == "candidate",
+        )
+    )[0]
+    if boundary == "deleted":
+        await runtime.memory.repository.transition(owner, saved_fact.id, MemoryState(boundary))
+    question = "我在青鹭-Q47项目中使用什么数据库\uff1f"
+    async with runtime.sessions() as session:
+        conversation = Conversation()
+        session.add(conversation)
+        await session.flush()
+        messages = [
+            ChatMessage(conversation_id=conversation.id, sequence=1, role="user", content=question),
+            ChatMessage(
+                conversation_id=conversation.id,
+                sequence=2,
+                role="assistant",
+                content="其他项目使用 PostgreSQL。",
+            ),
+        ]
+        if previous is not None:
+            messages.extend(
+                [
+                    ChatMessage(conversation_id=conversation.id, sequence=3, role="user", content=previous),
+                    ChatMessage(
+                        conversation_id=conversation.id,
+                        sequence=4,
+                        role="assistant",
+                        content="我没有找到记录\uff1b也许是 PostgreSQL。",
+                        state="failed" if boundary == "failed-turn" else "completed",
+                    ),
+                ]
+            )
+        else:
+            messages.clear()
+        session.add_all(messages)
+        await session.commit()
+        identifier = conversation.id
+    captured: dict[str, Any] = {}
+
+    def chat(request: httpx.Request) -> httpx.Response:
+        for message in json.loads(request.content)["messages"]:
+            content = message.get("content")
+            if isinstance(content, str) and content.startswith(("Host ", "本轮未受信任的参考数据")):
+                captured.update(json.loads(content.split("\n", 1)[1]))
+        supported = [item for item in captured.get("memory", []) if item["answer_support"] == "supported"]
+        answer = str(supported[0]["object"]) if supported else "未知。"
+        return httpx.Response(
+            200, json={"created": 1, "choices": [{"message": {"role": "assistant", "content": answer}}]}
+        )
+
+    runtime.chat.agent._client = httpx.AsyncClient(transport=httpx.MockTransport(chat))
+    response = await api.post(
+        f"/api/v1/conversations/{identifier}/messages",
+        json={"content": followup, "knowledge_policy": "disabled"},
+    )
+    assert response.status_code == 200, response.text
+    supported = [item for item in captured.get("memory", []) if item["answer_support"] == "supported"]
+    assert [item["id"] for item in supported] == ([saved_fact.id] if expected else [])
+    if clarify:
+        assert not captured
+        assert "请明确" in response.json()["content"]
+        assert "还没有执行" in response.json()["content"]
+    else:
+        assert captured["memory_status"] == ("supported" if expected else "no_supported_fact")
+    if expected:
+        assert response.json()["content"] == expected
+    history = await runtime.chat.messages(identifier)
+    assert next(item.content for item in reversed(history) if item.role == "user") == followup
+
+
+@pytest.mark.parametrize(
+    "question",
+    [
+        "我在青鹭-Q47项目中以前使用什么数据库?",
+        "我在青鹭-Q47项目中没有使用什么数据库?",
+        "Which notebook application do I use for personal notes?",
+        "青鹭-Q47项目什么时候开始、什么时候完成?",
+    ],
+)
+def test_memory_recheck_preserves_the_entire_original_factual_question(question: str) -> None:
+    assert resolve_memory_query("再查一下记忆。", question) == question
+
+
+@pytest.mark.parametrize(
+    "question,clarification",
+    [("再查一下记忆。", "请明确"), ("Please check memory again.", "Please specify")],
+)
+async def test_unresolved_memory_recheck_streams_clarification_without_model_or_extraction(
+    runtime: Runtime, api: httpx.AsyncClient, question: str, clarification: str
+) -> None:
+    import json
+
+    def unexpected_model(request: httpx.Request) -> httpx.Response:
+        raise AssertionError("An ambiguous Memory recheck must not call the model.")
+
+    runtime.chat.agent._client = httpx.AsyncClient(transport=httpx.MockTransport(unexpected_model))
+    identifier = (await api.post("/api/v1/conversations", json={})).json()["id"]
+    response = await api.post(
+        "/api/v1/agent",
+        json={
+            "threadId": identifier,
+            "runId": "memory-recheck",
+            "messages": [{"id": "question", "role": "user", "content": question}],
+            "tools": [],
+            "context": [],
+            "state": {},
+            "forwardedProps": {"knowledge_policy": "disabled", "memory_enabled": True},
+        },
+    )
+    assert response.status_code == 200, response.text
+    events = [json.loads(line[6:]) for line in response.text.splitlines() if line.startswith("data: ")]
+    assert events[-1]["type"] == "RUN_FINISHED"
+    assert not any(event["type"] == "RUN_ERROR" for event in events)
+    history = await runtime.chat.messages(identifier)
+    assert history[-2].content == question
+    assert history[-1].state == "completed" and history[-1].memory_operation_id is None
+    assert clarification in history[-1].content
+    assert (
+        "".join(event["delta"] for event in events if event["type"] == "TEXT_MESSAGE_CONTENT")
+        == history[-1].content
+    )
 
 
 def test_explicit_aliases_unknown_conditions_and_event_direction() -> None:

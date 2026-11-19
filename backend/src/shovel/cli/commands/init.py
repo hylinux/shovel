@@ -1,23 +1,187 @@
 from __future__ import annotations
 
+import os
+import re
 import time
 from collections.abc import Callable
 from pathlib import Path
+from typing import Annotated
+from urllib.parse import urlsplit
 
 import typer
 
 from shovel.cli.context import cli_context
 from shovel.cli.decorators import command_handler
 from shovel.cli.ui.console import console
-from shovel.config.settings import load_settings
+from shovel.config.embedding_config import EmbeddingSettings
+from shovel.config.model_settings import DefaultAgentModelSettings, ModelProviderType
+from shovel.config.settings import AppSettings, load_settings
 from shovel.db.database import init_database
 from shovel.services.health import HealthResult, HealthStatus, check_model
 from shovel.vector import init_vector_store
 
-app = typer.Typer(help="Initial shovel agent", invoke_without_command=True, no_args_is_help=False)
+app = typer.Typer(
+    help="Configure a new Shovel profile and initialize local stores.",
+    invoke_without_command=True,
+    no_args_is_help=False,
+)
 
 #: 每个检查步骤前的停顿, 纯粹是为了让 spinner 能被看见。
 _STEP_PAUSE_SECONDS = 2
+
+_MODEL_PROVIDERS = (
+    ("Azure OpenAI", "azure_openai"),
+    ("OpenAI", "openai"),
+    ("DeepSeek", "deepseek"),
+    ("Qianwen", "qianwen"),
+)
+_EMBEDDING_PROVIDERS = (
+    ("Azure OpenAI", "azure_openai"),
+    ("OpenAI", "openai"),
+    ("Qianwen", "qianwen"),
+    ("Ollama", "ollama"),
+)
+
+
+def _prompt_provider(label: str, providers: tuple[tuple[str, str], ...]) -> str:
+    for number, (name, _) in enumerate(providers, start=1):
+        console.print(f"  {number}. {name}")
+    while True:
+        choice: int = typer.prompt(label, type=int, default=1)
+        if 1 <= choice <= len(providers):
+            return providers[choice - 1][1]
+        console.warning(f"Choose a number from 1 to {len(providers)}.")
+
+
+def _prompt_required(label: str) -> str:
+    while True:
+        value: str = typer.prompt(label)
+        if value.strip():
+            return value.strip()
+        console.warning("This value cannot be empty.")
+
+
+def _prompt_endpoint(label: str, provider: str) -> str:
+    while True:
+        value = _prompt_required(label)
+        try:
+            url = urlsplit(value)
+            valid = (
+                url.scheme in {"http", "https"}
+                and bool(url.hostname)
+                and (url.port is None or 1 <= url.port <= 65535)
+                and not (url.username or url.password or url.query or url.fragment)
+                and not any(character.isspace() for character in value)
+                and "\\" not in value
+            )
+        except ValueError:
+            valid = False
+        if not valid:
+            console.warning("Enter an HTTP(S) endpoint without credentials, query or fragment.")
+        elif provider == "azure_openai" and url.path.rstrip("/"):
+            console.warning("Azure OpenAI requires the resource root endpoint, without a deployment path.")
+        else:
+            return value
+
+
+def _prompt_api_version(label: str, provider: str) -> str:
+    while True:
+        value: str = typer.prompt(label, default="", show_default=False)
+        value = value.strip()
+        if value or provider != "azure_openai":
+            return value
+        console.warning("Azure OpenAI requires an API version.")
+
+
+def _prompt_store_name(label: str, default: str) -> str:
+    while True:
+        value: str = typer.prompt(label, default=default)
+        if re.fullmatch(r"[A-Za-z0-9_]+", value) and not (os.name == "nt" and os.path.isreserved(value)):
+            return value
+        console.warning("Use only ASCII letters, digits and underscores; reserved filenames are not allowed.")
+
+
+def _initial_settings(*, interactive: bool) -> AppSettings:
+    model = DefaultAgentModelSettings(max_input_chars=240000, max_output_tokens=32768, timeout_seconds=300)
+    embedding = EmbeddingSettings(dimensions=3072, batch_size=8, timeout_seconds=300)
+    dimension = 3072
+    knowledge_name, memory_name = "shovel_chunk", "shovel_memory"
+
+    if interactive:
+        console.info("Configure the chat model. API keys are hidden; an empty Azure key uses Azure CLI.")
+        provider = _prompt_provider("Model provider", _MODEL_PROVIDERS)
+        endpoint = _prompt_endpoint("Model endpoint", provider)
+        name = _prompt_required("Model name / deployment")
+        version = _prompt_api_version("Model API version (empty for non-Azure providers)", provider)
+        key: str = typer.prompt(
+            "Model API key (may be empty)", default="", hide_input=True, show_default=False
+        )
+        model = DefaultAgentModelSettings.model_validate(
+            {
+                **model.model_dump(),
+                "model_provider_type": ModelProviderType(provider),
+                "base_endpoint": endpoint,
+                "model_name": name,
+                "api_version": version,
+                "security_key": key,
+            }
+        )
+        knowledge_name = _prompt_store_name("Knowledge name", knowledge_name)
+
+        console.info("Configure embeddings. Memory will use a copy of these model and embedding settings.")
+        provider = _prompt_provider("Embedding provider", _EMBEDDING_PROVIDERS)
+        endpoint = _prompt_endpoint("Embedding endpoint", provider)
+        name = _prompt_required("Embedding model / deployment")
+        while True:
+            dimension = typer.prompt("Embedding / index dimensions", type=int, default=3072)
+            if dimension > 0:
+                break
+            console.warning("Dimensions must be a positive integer.")
+        if provider == "ollama":
+            console.info(
+                "Ollama does not accept a dimensions parameter. Its model output must match the index "
+                "dimensions; the request parameter will be omitted."
+            )
+        key = typer.prompt(
+            "Embedding API key (may be empty)", default="", hide_input=True, show_default=False
+        )
+        version = _prompt_api_version("Embedding API version (empty for non-Azure providers)", provider)
+        embedding = EmbeddingSettings(
+            provider=provider,
+            base_url=endpoint,
+            model=name,
+            dimensions=None if provider == "ollama" else dimension,
+            api_key=key,
+            api_version=version,
+            batch_size=8,
+            timeout_seconds=300,
+        )
+        memory_name = _prompt_store_name("Memory collection name", memory_name)
+
+    return AppSettings.from_file_data(
+        {
+            "model": model.model_dump(mode="python"),
+            "agent": {
+                "workspace_path": cli_context.get_default_workspace(),
+                "max_tool_iterations": 5,
+            },
+            "performance": {"max_local_model_requests": 3},
+            "zvec": {
+                "knowledge_path": str(cli_context.get_default_knowledge_dir() / knowledge_name),
+                "dim": dimension,
+            },
+            "embedding": embedding.model_dump(mode="python"),
+            "memory": {
+                "collection": memory_name,
+                "index_path": cli_context.get_default_memory_dir() / memory_name,
+                "dim": dimension,
+                "max_items": 20,
+                "history_messages": 10,
+                "llm": model.model_dump(mode="python"),
+                "embedder": embedding.model_dump(mode="python"),
+            },
+        }
+    )
 
 
 def _ensure_dir(path: Path, label: str) -> None:
@@ -67,9 +231,23 @@ def _report_health(label: str, result: HealthResult) -> None:
 
 @app.callback()
 @command_handler()
-def init() -> None:
+def init(
+    no_input: Annotated[
+        bool,
+        typer.Option("--no-input", help="Create an unconfigured profile without interactive prompts."),
+    ] = False,
+) -> None:
 
     console.info("Begin initial Shovel Agent.")
+
+    config_file = cli_context.get_default_config_file()
+    initial: AppSettings | None = None
+    if not config_file.exists():
+        try:
+            initial = _initial_settings(interactive=not no_input)
+        except typer.Abort:
+            console.warning("Initialization cancelled; configuration was not saved.")
+            raise typer.Exit(code=1) from None
 
     # check profile 文件目录
     console.info("Checking the default directories.")
@@ -104,15 +282,14 @@ def init() -> None:
     ):
         time.sleep(_STEP_PAUSE_SECONDS)
 
-    config_file = cli_context.get_default_config_file()
-
     if config_file.exists():
         # 如果配置文件已经存在,则检查配置想是否正确
         console.success(f"The default configuration file {config_file} is exists.")
     else:
         # 如果配置文件不存在,则生成默认的配置文件:
         console.warning(f"The default configuration file {config_file} is not exists. We will generate it.")
-        cli_context.create_default_config_file()
+        assert initial is not None
+        initial.save(config_file)
         console.success(f"The default configuration file {config_file} was created.")
 
     # 读取配置: 数据库 URL 与向量库参数都以配置文件为准,

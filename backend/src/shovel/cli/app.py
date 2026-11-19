@@ -55,7 +55,7 @@ app.add_typer(
 app.add_typer(
     init_app,
     name="init",
-    help="Shovel will initial all setup.",
+    help="Configure a new profile and initialize local stores.",
 )
 
 

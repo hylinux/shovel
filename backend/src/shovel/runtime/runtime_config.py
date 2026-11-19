@@ -20,7 +20,7 @@ from shovel.services.config_server import shovel_context
 # Only these scalar fields can be written; no raw TOML or caller-selected paths.
 _SECTIONS = {
     "": (
-        "service_name agent_host agent_port http_host dev_http_host dev_http_port "
+        "service_name http_host dev_http_host dev_http_port "
         "dev_frontend_port http_port frontend_path log_level"
     ),
     "model": (

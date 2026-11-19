@@ -77,10 +77,32 @@ uv run shovel run dev
 On platforms with supported native dependencies, use
 `uv sync --locked --all-extras --dev` with the appropriate Python interpreter.
 
-`shovel init` initializes configuration and local stores. The default Windows
-configuration file is `%USERPROFILE%\.shovel\config\settings.toml`.
-The workbench and keyword indexing can run without model credentials;
-configure providers before using chat or semantic retrieval.
+On first run, `shovel init` asks for the chat provider (Azure OpenAI, OpenAI,
+DeepSeek or Qianwen), endpoint, model/deployment, API version and hidden API key;
+then the knowledge name, embedding provider (Azure OpenAI, OpenAI, Qianwen or
+Ollama), endpoint, model/deployment, dimensions, hidden API key, API version and
+Memory collection name. Blank keys are allowed; Azure blank keys select
+non-interactive Azure CLI authentication, not an interactive login. Azure
+requires an API version; other providers may leave it empty.
+
+Knowledge and Memory names accept only ASCII letters, digits and underscores
+(not reserved filenames). Their stores are created under
+`~/.shovel/knowledge/<name>` and `~/.shovel/memory/<name>`. Embedding dimensions
+default to 3072 and set both index dimensions. Ollama must produce the chosen
+dimension natively; its unsupported `dimensions` request parameter is omitted.
+Memory receives independent copies of the chat and embedding settings.
+
+New profiles use chat budgets of 240000 input characters / 32768 output tokens,
+300-second model/embedding timeouts, embedding batches of 8, 5 tool iterations
+and 3 concurrent local-model requests. These initialization defaults do not
+change existing profiles. Other settings remain available in the generated
+file and the workbench configuration editor.
+
+The default Windows configuration file is
+`%USERPROFILE%\.shovel\config\settings.toml`. Re-running `shovel init` preserves
+an existing file without prompting or overwriting it. For automated or
+model-free setup, use `shovel init --no-input`; providers remain unconfigured
+until edited. The workbench and keyword indexing can run without model credentials.
 
 | Mode | Browser address | Backend |
 | --- | --- | --- |
@@ -338,7 +360,7 @@ not apply these settings. The check compares the active process with the file
 plus current environment; it does not restart the Host or test provider
 connectivity. Changed environment overrides remain visibly identified even
 when the active process matches. Listener edits remain loopback-only;
-`agent_port` does not create an independent Agent listener.
+Agent streaming shares the existing FastAPI listener.
 
 `model.max_output_tokens` is a user-configurable output budget per model request,
 not a whole-task quota. It defaults to 2048 and accepts positive integers without
@@ -899,7 +921,7 @@ Runtime writers.
 | REST | `/api/v1`; collections return `{"items": [...]}`. |
 | Durable legacy mutations | HTTP 202 plus Operation, not a completed resource. |
 | Platform run/resume | HTTP 202 plus Execution, not a completed result. |
-| Agent streaming | AG-UI `POST /api/v1/agent` on the existing FastAPI port; `agent_port` is not a separate listener. |
+| Agent streaming | AG-UI `POST /api/v1/agent` on the existing FastAPI listener; no separate Agent listener. |
 | Human confirmation | Exact preview, matching intent/IDs, single-use process-local ticket expiring after five minutes; durable ApprovalRequests are separate facts. |
 | Time/progress | Numeric UTC Unix seconds, not milliseconds; scan progress is a fraction from 0 to 1. |
 

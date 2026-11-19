@@ -7,6 +7,7 @@ from typing import Any
 
 import httpx
 import pytest
+import tomli_w
 
 from shovel.config.settings import AppSettings, load_settings
 from shovel.runtime.errors import RuntimeFailure
@@ -150,6 +151,8 @@ def test_model_budget_environment_override_above_previous_ceiling(
         "platform",
         "model",
         "zvec.chunk_collection",
+        "agent_host",
+        "agent_port",
     ],
 )
 def test_disallowed_paths_and_sections_cannot_be_written(
@@ -168,9 +171,7 @@ def test_disallowed_paths_and_sections_cannot_be_written(
         ({"http_host": "0.0.0.0"}, "http_host"),
         ({"dev_http_host": "remote.example"}, "dev_http_host"),
         ({"dev_http_host": "::1"}, "dev_http_host"),
-        ({"agent_host": "::"}, "agent_host"),
         ({"http_port": 0}, "http_port"),
-        ({"agent_port": 65536}, "agent_port"),
         ({"dev_frontend_port": 9999}, "dev_frontend_port"),
         ({"log_level": "secret-invalid"}, "log_level"),
         ({"service_name": " "}, "service_name"),
@@ -391,12 +392,25 @@ def test_hidden_external_changes_are_not_reported_as_applied(
     assert not configuration.read()["applied"]
 
 
+@pytest.mark.parametrize(
+    "legacy",
+    [
+        {"redis": {"host": "legacy"}},
+        {"agent_host": "legacy.invalid", "agent_port": 0},
+    ],
+)
 def test_legacy_removed_fields_are_preserved_without_rejecting_an_existing_profile(
     configuration: RuntimeConfigurationService,
+    legacy: dict[str, Any],
 ) -> None:
-    configuration.file.path.write_text("redis = { host = 'legacy' }\n" + configuration.file.path.read_text())
+    raw = tomllib.loads(configuration.file.path.read_text())
+    configuration.file.path.write_text(tomli_w.dumps({**raw, **legacy}))
+    view = configuration.read()
+    assert view["applied"] and not view["pending"]
+    assert not legacy.keys() & {item["key"] for item in view["items"]}
     save(configuration, {"log_level": "DEBUG"})
-    assert tomllib.loads(configuration.file.path.read_text())["redis"] == {"host": "legacy"}
+    raw = tomllib.loads(configuration.file.path.read_text())
+    assert {key: raw[key] for key in legacy} == legacy
 
 
 def test_environment_cannot_bypass_loopback_validation(

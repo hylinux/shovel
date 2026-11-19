@@ -60,6 +60,8 @@ def _to_toml_safe(value: Any) -> Any:
        mode="python" 拿到的是枚举对象本身, tomli_w 不认识它。
 
     4. Path -> posix 字符串
+
+    5. timeout_seconds 的整数秒写成 TOML 整数, 保留非整数秒精度。
     """
 
     if value is None:
@@ -75,7 +77,14 @@ def _to_toml_safe(value: Any) -> Any:
         return value.as_posix()
 
     if isinstance(value, dict):
-        return {k: cleaned for k, v in value.items() if (cleaned := _to_toml_safe(v)) is not None}
+        result = {}
+        for key, item in value.items():
+            cleaned = _to_toml_safe(item)
+            if cleaned is not None:
+                if key == "timeout_seconds" and isinstance(cleaned, float) and cleaned.is_integer():
+                    cleaned = int(cleaned)
+                result[key] = cleaned
+        return result
 
     if isinstance(value, (list, tuple)):
         return [cleaned for v in value if (cleaned := _to_toml_safe(v)) is not None]
@@ -95,8 +104,8 @@ def _to_toml_safe(value: Any) -> Any:
 #:
 #: 这里只丢弃"我们自己曾经写进去过"的键, 因此不会掩盖真正的错别字。
 _REMOVED_KEYS: dict[str | None, set[str]] = {
-    # 历史上的独立向量/缓存配置不再属于 Runtime。
-    None: {"qdrant", "redis"},
+    # 历史上的独立向量/缓存及 Agent 监听配置不再属于 Runtime。
+    None: {"qdrant", "redis", "agent_host", "agent_port"},
     # Zvec 只负责知识库了, 记忆的 collection 不再由它管
     "zvec": {"memory_path", "memory_collection"},
 }
@@ -134,8 +143,6 @@ class AppSettings(BaseSettings):
     )
 
     service_name: str = "shovel"
-    agent_host: str = "127.0.0.1"
-    agent_port: int = 19566
     http_host: str = "127.0.0.1"
     dev_http_host: str = "127.0.0.1"
     dev_http_port: int = 9999

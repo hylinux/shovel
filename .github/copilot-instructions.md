@@ -159,7 +159,7 @@ are in `.github\workflows\ci.yml`.
   history, Session Summary, native Memory recall, and independent RAG evidence.
   Chat persists turns and referenced excerpts, expanding child chunks into parent
   context. Both AG-UI `POST /api/v1/agent` and the non-streaming message API use
-  this path on the existing FastAPI port; `agent_port` is not a separate listener.
+  this path on the existing FastAPI listener; no separate Agent listener is used.
 - Native Memory uses SQLite as authority and a separate, rebuildable Zvec index.
   `memory\domain.py` and `memory\service.py` own policies; Protocols in
   `memory\ports.py` separate SQLite, Zvec and MAF adapters. `runtime\memory.py`

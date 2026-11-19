@@ -6,6 +6,7 @@ import pytest
 from pydantic import SecretStr, ValidationError
 
 from shovel.config.embedding_config import EmbeddingSettings
+from shovel.config.errors import ConfigError
 from shovel.config.metadata import PRODUCT
 from shovel.config.settings import AppSettings, load_settings
 from shovel.pipeline.embedder import HttpEmbedder
@@ -27,6 +28,68 @@ def test_environment_overrides_file_but_file_only_load_is_isolated(
     assert file_only.http_port == 8081
     assert file_only.embedding.model == "from-file"
     assert load_settings(config).http_port == 8082
+
+
+def test_removed_agent_listener_settings_load_and_are_omitted_when_regenerated(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = tmp_path / "settings.toml"
+    original = (
+        'agent_host = "legacy.invalid"\nagent_port = 0\n'
+        'http_host = "localhost"\nhttp_port = 8081\n'
+        'dev_http_host = "127.0.0.1"\ndev_http_port = 9998\ndev_frontend_port = 3001\n'
+    )
+    config.write_text(original, encoding="utf-8")
+    monkeypatch.setenv("SHOVEL_AGENT_HOST", "ignored.invalid")
+    monkeypatch.setenv("SHOVEL_AGENT_PORT", "not-a-port")
+    for settings in (AppSettings.load(config), load_settings(config)):
+        assert not {"agent_host", "agent_port"} & settings.model_dump().keys()
+        assert (settings.http_host, settings.http_port) == ("localhost", 8081)
+        assert (settings.dev_http_host, settings.dev_http_port, settings.dev_frontend_port) == (
+            "127.0.0.1",
+            9998,
+            3001,
+        )
+    assert config.read_text(encoding="utf-8") == original
+    settings.save(config, overwrite=True, backup=False)
+    assert "agent_host" not in config.read_text(encoding="utf-8")
+    assert "agent_port" not in config.read_text(encoding="utf-8")
+    assert AppSettings.load(config) == settings
+
+
+def test_removed_listener_migration_does_not_hide_unknown_settings(tmp_path: Path) -> None:
+    config = tmp_path / "settings.toml"
+    config.write_text('agent_host = "legacy"\nagent_prt = 19566\n', encoding="utf-8")
+    for loader in (AppSettings.load, load_settings):
+        with pytest.raises(ConfigError, match="agent_prt"):
+            loader(config)
+
+
+@pytest.mark.parametrize("timeout,literal", [(300.0, "300"), (300.5, "300.5")])
+def test_timeout_toml_format_preserves_integer_and_fractional_seconds(
+    tmp_path: Path, timeout: float, literal: str
+) -> None:
+    config = tmp_path / "settings.toml"
+    settings = AppSettings.from_file_data(
+        {
+            "database": {"url": f"sqlite+aiosqlite:///{(tmp_path / 'test.db').as_posix()}"},
+            "model": {"timeout_seconds": timeout},
+            "embedding": {"timeout_seconds": timeout},
+            "memory": {
+                "llm": {"timeout_seconds": timeout},
+                "embedder": {"timeout_seconds": timeout},
+            },
+        }
+    )
+    settings.save(config)
+    text = config.read_text(encoding="utf-8")
+    assert [line for line in text.splitlines() if line.startswith("timeout_seconds =")] == [
+        f"timeout_seconds = {literal}"
+    ] * 4
+    restored = AppSettings.load(config)
+    assert restored == settings
+    assert settings.model.timeout_seconds == timeout
+    assert isinstance(settings.model.timeout_seconds, float)
 
 
 def test_embedding_identity_tracks_deployment_not_credentials() -> None:

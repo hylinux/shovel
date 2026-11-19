@@ -123,6 +123,17 @@ uv run shovel version --verbose
 uv run shovel init
 ```
 
+首次运行会交互选择聊天和 embedding 供应商，并输入端点、模型/部署名、
+API version、隐藏的 API key、知识库名和 Memory collection 名。
+API key 可以留空；Azure 留空使用非交互式 Azure CLI 认证，API version 则必须填写。
+名称仅允许英文字母、数字和下划线，不能使用系统保留文件名。
+索引维度默认 3072，可修改，知识库和 Memory 自动保持一致；Ollama 模型须原生输出该维度，
+配置文件不会包含其不支持的 `dimensions` 请求参数。
+Memory 的模型配置由向导复制，无需重复填写。
+
+已有配置再次运行不会被改写。自动化或暂不配置模型时，使用
+`uv run shovel init --no-input`，之后再编辑生成的配置文件。
+
 安装前端依赖并启动开发环境：
 
 ```powershell

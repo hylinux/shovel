@@ -96,8 +96,6 @@ CLI 登录不绕过资源防火墙、Private Endpoint 或 Shovel 的数据出口
 
 ```toml
 service_name = "shovel"
-agent_host = "127.0.0.1"
-agent_port = 19566
 http_host = "127.0.0.1"
 dev_http_host = "127.0.0.1"
 dev_http_port = 9999

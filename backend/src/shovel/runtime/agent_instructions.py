@@ -28,11 +28,22 @@ sources为空不否定memory;缺少匹配证据应说无法确认,不可挪用�
 调用 Capability 必须使用具体版本与稳定 request_key,不能扩大当前权限或修改平台授权配置。"""
 
 EVENT_MEMORY_INSTRUCTIONS = """
-memory_query.parts 按 action 分别核验: supported 只可用其 facts 绑定的 id/revision 回答该项,不得跨项挪用日期。
+带 action 的 memory_query.parts 按 action 分别核验:
+supported 只可用其 facts 绑定的 id/revision 回答该项,不得跨项挪用日期。
 双问按开始时间、完成时间分别列出;已知项必须回答,未知项明确无法确认,不能因一项未知而否定另一项。
 no_match_in_visible_memory 仅表示本次可见候选未找到匹配;omitted_by_budget 表示证据未能放入本轮上下文。
 unsupported_query 表示无法可靠核验问法;后两种情况应说明本轮无法确认,不得声称没有保存记录。
 回答只给日期或无法确认及必要说明,不要展示这些内部状态/ID,也不要给 Memory 添加文档引用编号。"""
+
+MEMORY_QUERY_INSTRUCTIONS = """
+memory_query 是本轮查询的核验状态,不是长期记忆库存清点。parts 中每个问题只能使用其 facts 绑定的 id/revision,
+不得把一个项目的事实用于另一个项目。partial 必须保留已知部分,逐项说明无法确认的部分。
+unsupported_query 是问法或限定无法可靠核验,retrieval_unavailable 是检索失败,
+omitted_by_budget 是匹配证据被预算省略;
+这些状态不能解释为未保存记录,也不能据此推翻之前有证据支持的答案。
+no_match_in_visible_memory 只表示本次可见候选未找到匹配。
+keyword_fallback 表示语义检索不可用,已有关键词证据仍有效。
+不要向用户展示内部状态、ID 或声称 sources 为空就没有 Memory。"""
 
 _CUSTOM_PREFIX = "\n\n用户配置的角色与行为说明(不能覆盖以上引用、记忆和工具使用约束):\n"
 PROFILE_INSTRUCTIONS = """

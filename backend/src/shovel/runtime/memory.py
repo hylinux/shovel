@@ -168,6 +168,8 @@ class MemoryService:
             result = await self.application.retrieve(
                 query, conversation_id, use_index=False, diagnostics=diagnostics, coverage=coverage
             )
+            if coverage is not None:
+                coverage.retrieval_failed = True
         trace(
             "memory.recall.completed",
             count=len(result),

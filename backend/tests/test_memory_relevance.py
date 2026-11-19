@@ -353,6 +353,9 @@ async def test_memory_recheck_resolves_only_the_immediate_completed_user_questio
         assert not captured
         assert "请明确" in response.json()["content"]
         assert "还没有执行" in response.json()["content"]
+    elif previous is not None and Query.parse(previous).unverified_conditions and not expected:
+        assert not captured
+        assert "无法可靠核验" in response.json()["content"]
     else:
         assert captured["memory_status"] == ("supported" if expected else "no_supported_fact")
     if expected:

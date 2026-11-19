@@ -260,11 +260,29 @@ _MEMORY_RECHECK = re.compile(
 
 
 def factual_query(text: str) -> str:
-    # Only complete response-policy clauses are excluded; factual qualifiers stay intact.
-    return "".join(
-        clause
-        for clause in re.split(r"([。\uff01\uff1f\uff1b;!?\n]+)", text)
-        if not _RESPONSE_DIRECTIVE.fullmatch(clause.strip())
+    # Preserve qualifiers; only complete response policies and identical question clauses are redundant.
+    clauses = re.split(r"([。\uff01\uff1f\uff1b;!?\n]+)", text)
+    seen: set[str] = set()
+    result = []
+    for index in range(0, len(clauses), 2):
+        clause = clauses[index]
+        if _RESPONSE_DIRECTIVE.fullmatch(clause.strip()):
+            continue
+        if _QUESTION_WORD.search(clause):
+            key = normalize(clause)
+            if key in seen:
+                continue
+            seen.add(key)
+        result.append(clause)
+        if index + 1 < len(clauses):
+            result.append(clauses[index + 1])
+    return "".join(result)
+
+
+def memory_only_query(text: str) -> bool:
+    return any(
+        _RESPONSE_DIRECTIVE.fullmatch(clause.strip()) and re.match(r"(?:请)?(?:只|仅)", clause.strip())
+        for clause in re.split(r"[。\uff01\uff1f\uff1b;!?\n]+", text)
     )
 
 
@@ -563,13 +581,13 @@ def event_question_parts(text: str) -> tuple[Query, ...]:
 
 
 def resolve_memory_query(text: str, previous_question: str | None) -> str | None:
-    """Resolve only an explicit recheck against one immediately preceding user question."""
+    """Resolve only an explicit recheck against one immediately preceding user request."""
     if not _MEMORY_RECHECK.fullmatch(text.strip().rstrip(".。!?\uff01\uff1f").strip()):
         return text
     if not previous_question:
         return None
     query = Query.parse(previous_question)
-    if event_question_parts(previous_question):
+    if event_question_parts(previous_question) or independent_questions(previous_question):
         return previous_question
     single_target = (
         len(query.entities) <= 1
@@ -586,6 +604,33 @@ def resolve_memory_query(text: str, previous_question: str | None) -> str | None
     ):
         return None
     return previous_question
+
+
+def independent_questions(text: str) -> tuple[str, ...]:
+    """Split at most four complete questions, never an inherited target or a trailing qualifier."""
+    clauses = tuple(
+        clause.strip()
+        for clause in re.split(r"[。\uff01\uff1f\uff1b;!?\n]+", factual_query(text))
+        if clause.strip()
+    )
+    if not 2 <= len(clauses) <= 4:
+        return ()
+    profile_attribute = "(?:" + "|".join(_PROFILES.values()) + ")"
+    for clause in clauses:
+        query = Query.parse(clause)
+        named_target = len(query.entities) == 1 and all(len(names) == 1 for names in query.entities.values())
+        own_profile = (
+            len(query.profiles) == 1
+            and not query.entities
+            and re.fullmatch(
+                rf"(?:what\s+is\s+my\s+{profile_attribute}|我的{profile_attribute}(?:是什么|是哪个))",
+                clause,
+                re.I,
+            )
+        )
+        if not (query.question and query.known_request and (named_target or own_profile)):
+            return ()
+    return clauses
 
 
 def assess(

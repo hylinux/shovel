@@ -44,7 +44,7 @@ from openai import APIError, AsyncAzureOpenAI, AsyncOpenAI
 from shovel.config.model_settings import DefaultAgentModelSettings, ModelProviderType
 from shovel.exceptions.pipeline import VectorSinkError
 from shovel.memory.domain import PROFILE_TOPICS
-from shovel.memory.relevance import Query, resolve_memory_query
+from shovel.memory.relevance import Query, memory_only_query, resolve_memory_query
 from shovel.memory.service import RecallCoverage, context_entry
 from shovel.platform.agent_tools import agent_tools
 from shovel.protection.domain import ProtectionDeniedError
@@ -53,6 +53,7 @@ from shovel.runtime.agent_extensions import AgentExtensions
 from shovel.runtime.agent_instructions import BUILTIN_INSTRUCTIONS as SYSTEM
 from shovel.runtime.agent_instructions import (
     EVENT_MEMORY_INSTRUCTIONS,
+    MEMORY_QUERY_INSTRUCTIONS,
     PROFILE_INSTRUCTIONS,
     AgentInstructionsView,
     compose_instructions,
@@ -344,6 +345,9 @@ class ShovelContextProvider(ContextProvider):
         )
         if request.memory_enabled and self.memory_query and Query.parse(self.memory_query).asks_time:
             self.instructions += EVENT_MEMORY_INSTRUCTIONS
+        if request.memory_enabled and self.memory_query and Query.parse(self.memory_query).question:
+            self.instructions += MEMORY_QUERY_INSTRUCTIONS
+        self.memory_failure_response: str | None = None
         self.result = AgentResult()
         self.has_retrieval_matches = False
         self.search_completed = False
@@ -624,6 +628,44 @@ class ShovelContextProvider(ContextProvider):
             if any(item.get("answer_support") == "supported" for item in memory_context)
             else "no_supported_fact"
         )
+        query_status = memory_coverage.status(memory_context)
+        if (
+            request.memory_enabled
+            and memory_task is not None
+            and Query.parse(self.memory_query or "").question
+        ):
+            chinese = bool(re.search(r"[\u4e00-\u9fff]", request.content))
+            limitations = {
+                "unsupported_query": (
+                    "本轮无法可靠核验这个问题及其限定条件。请拆成目标明确的单个问题;"
+                    "这不表示长期记忆中没有记录,也不能据此否定先前有证据支持的答案。",
+                    "This question or its conditions cannot be reliably verified. Please ask one explicit "
+                    "question at a time. This does not establish that no memory exists or invalidate an "
+                    "earlier evidence-supported answer.",
+                ),
+                "retrieval_unavailable": (
+                    "本轮长期记忆语义检索不可用,关键词回退未获得可用于回答的证据。"
+                    "当前无法确认,不能据此认定没有保存记录。",
+                    "Semantic memory retrieval is unavailable and keyword fallback supplied no supporting "
+                    "evidence. I cannot confirm the answer; this does not establish that no record "
+                    "was saved.",
+                ),
+                "omitted_by_budget": (
+                    "本轮找到了匹配的长期记忆,但上下文预算不足,证据未能进入回答上下文。"
+                    "当前无法确认;请缩短问题或调整 Memory/模型上下文预算。",
+                    "Matching memory was found, but its evidence did not fit the context budget. "
+                    "I cannot confirm the answer in this turn. Shorten the question or adjust the "
+                    "Memory/model context budget.",
+                ),
+            }
+            if query_status in limitations:
+                limitation = limitations[query_status][0 if chinese else 1]
+                if not request.attachment_ids and (
+                    request.knowledge_policy == "disabled" or memory_only_query(request.content)
+                ):
+                    self.memory_failure_response = limitation
+                else:
+                    self.result.warnings.append(limitation)
         evidence = json.dumps(
             {
                 "sources": self.result.sources,
@@ -729,6 +771,27 @@ class ShovelContextProvider(ContextProvider):
                 )
             else:
                 trace("memory.long_term.deferred")
+
+
+class MemoryQueryFailureMiddleware(ChatMiddleware):
+    def __init__(self, knowledge: ShovelContextProvider) -> None:
+        self.knowledge = knowledge
+
+    async def process(self, context: ChatContext, call_next: Callable[[], Awaitable[None]]) -> None:
+        content = self.knowledge.memory_failure_response
+        if content is None:
+            await call_next()
+            return
+        trace("agent.memory_query.answer_limited")
+        message = Message("assistant", [content])
+        if context.stream:
+
+            async def updates() -> AsyncIterator[ChatResponseUpdate]:
+                yield ChatResponseUpdate(role="assistant", contents=message.contents, finish_reason="stop")
+
+            context.result = ResponseStream(updates(), finalizer=ChatResponse.from_updates)
+        else:
+            context.result = ChatResponse(messages=[message], finish_reason="stop")
 
 
 class ContextBudgetMiddleware(ChatMiddleware):
@@ -1157,6 +1220,7 @@ class ShovelAgent:
             ],
             context_providers=providers,
             middleware=[
+                MemoryQueryFailureMiddleware(knowledge),
                 ContextBudgetMiddleware(
                     self.runtime.settings.model.max_input_chars,
                     provider=self.runtime.settings.model.model_provider_type.value,

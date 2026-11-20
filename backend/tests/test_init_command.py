@@ -49,7 +49,7 @@ def _answers(**overrides: str) -> str:
     }
     assert overrides.keys() <= values.keys()
     values.update(overrides)
-    return "\n".join(values.values()) + "\n"
+    return "\n" + "\n".join(values.values()) + "\n"
 
 
 def test_init_wizard_persists_inputs_defaults_and_independent_memory_copies(
@@ -188,8 +188,8 @@ def test_init_reprompts_invalid_choices_endpoints_names_dimensions_and_azure_ver
     "input_text",
     [
         "",
-        "1\n",
-        "1\nhttps://chat.example.test\n",
+        "\n1\n",
+        "\n1\nhttps://chat.example.test\n",
         _answers(model_key="chat-private-key", embedding_key="embedding-private-key").removesuffix(
             "Memory_42\n"
         ),
@@ -253,7 +253,7 @@ def test_init_existing_configuration_is_not_prompted_or_rewritten(profile: Path)
         encoding="utf-8",
     )
     before = path.read_bytes()
-    result = CliRunner().invoke(app, ["init"])
+    result = CliRunner().invoke(app, ["init"], input="\n")
     assert result.exit_code == 0, result.output
     assert path.read_bytes() == before
     assert AppSettings.load(path).model.max_output_tokens == 2048
@@ -264,7 +264,7 @@ def test_init_invalid_existing_configuration_is_not_overwritten(profile: Path) -
     path = profile / "config" / "settings.toml"
     path.parent.mkdir(parents=True)
     path.write_text("invalid TOML", encoding="utf-8")
-    result = CliRunner().invoke(app, ["init"])
+    result = CliRunner().invoke(app, ["init"], input="\n")
     assert result.exit_code != 0
     assert path.read_text(encoding="utf-8") == "invalid TOML"
     assert "Model provider" not in result.output

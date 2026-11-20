@@ -77,7 +77,35 @@ uv run shovel run dev
 On platforms with supported native dependencies, use
 `uv sync --locked --all-extras --dev` with the appropriate Python interpreter.
 
-On first run, `shovel init` asks for the chat provider (Azure OpenAI, OpenAI,
+`shovel init` first asks for its data root: `SHOVEL_ROOT_PATH` when set, otherwise
+the user's `.shovel` directory. Press Enter to keep it, or enter another directory
+(no extra `.shovel` is appended). Spaces and non-ASCII directory names are supported.
+`SHOVEL_ROOT_PATH` must be absolute; interactive/argument relative paths are resolved
+once against the current directory. Invalid roots fail without falling back.
+
+```powershell
+uv run shovel init --root-path 'D:\ShovelData'
+# Non-interactive setup; use --persist-root only to explicitly save a Windows user variable.
+uv run shovel init --root-path 'D:\ShovelData' --no-input
+$env:SHOVEL_ROOT_PATH = 'D:\ShovelData'
+uv run shovel run prd
+```
+
+The root contains `config\settings.toml`, `data`, `workspaces`, `knowledge`,
+`memory`, `logs` and `tmp`. All CLI commands use the same root. New profiles write
+absolute store paths; existing explicit paths remain authoritative and are not
+migrated. Changing the root does not move data, change the development source/
+frontend directory, or grant controlled enterprise installation trust.
+
+After successful custom-root initialization, Windows offers an opt-in user-level
+environment update. `--persist-root` requests it without prompting. Initialization
+failure or cancellation never writes that variable. Persistence does not modify
+the parent terminal: use the displayed `$env` command there and open a new terminal
+for the saved value. Other platforms display a shell export to add to the shell
+profile; automatic `--persist-root` is Windows-only. No machine-level variable is
+written. A running Host keeps its original root and actual configuration file.
+
+On first run, `shovel init` then asks for the chat provider (Azure OpenAI, OpenAI,
 DeepSeek or Qianwen), endpoint, model/deployment, API version and hidden API key;
 then the knowledge name, embedding provider (Azure OpenAI, OpenAI, Qianwen or
 Ollama), endpoint, model/deployment, dimensions, hidden API key, API version and
@@ -99,7 +127,7 @@ over file settings regardless of which spelling is used.
 
 Knowledge and Memory names accept only ASCII letters, digits and underscores
 (not reserved filenames). Their stores are created under
-`~/.shovel/knowledge/<name>` and `~/.shovel/memory/<name>`. The knowledge name
+`<root>\knowledge\<name>` and `<root>\memory\<name>`. The knowledge name
 also sets `zvec.chunk_collection`. Embedding dimensions default to 1024 and set
 both index dimensions. Ollama must produce the chosen
 dimension natively; its unsupported `dimensions` request parameter is omitted.
@@ -352,7 +380,7 @@ procedure**.
 
 **Settings → Runtime configuration** retains live provider, capacity and warmup
 monitors and adds a grouped editor for the current user's
-`.shovel\config\settings.toml`. The editor shows file values separately from the
+selected root's `config\settings.toml`. The editor shows file values separately from the
 active process and environment-overridden values. It cannot select another
 configuration file or change `agent.workspace_path`, `database.url`,
 `zvec.knowledge_path` or `memory.index_path`. Other undisplayed settings are

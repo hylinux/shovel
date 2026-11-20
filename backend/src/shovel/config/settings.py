@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Any
 
 import tomli_w
-from pydantic import Field, SecretStr, ValidationError
+from pydantic import Field, PrivateAttr, SecretStr, ValidationError
 from pydantic.fields import FieldInfo
 from pydantic_settings import BaseSettings, PydanticBaseSettingsSource, SettingsConfigDict
 
@@ -30,6 +30,7 @@ from .errors import (
 )
 from .memory_config import MemorySettings
 from .model_settings import DefaultAgentModelSettings, normalize_legacy_api_key
+from .paths import resolve_root_path, root_path_scope
 from .performance_config import PerformanceSettings
 from .platform_config import PlatformSettings
 from .zvec_config import ZvecSettings
@@ -175,7 +176,7 @@ class AppSettings(BaseSettings):
     dev_frontend_port: int = Field(default=3000, ge=1, le=65535)
     http_port: int = 8080
     frontend_path: str = ""
-    temp_path: Path = Field(default_factory=lambda: Path.home() / ".shovel" / "tmp")
+    temp_path: Path = Field(default_factory=lambda: resolve_root_path() / "tmp")
     log_level: str = "INFO"
 
     # default_factory: 推迟到实例化时才构造, 避免导入期副作用
@@ -194,6 +195,16 @@ class AppSettings(BaseSettings):
     #: 原生记忆: SQLite 权威数据与独立的可重建 Zvec 索引。
     memory: MemorySettings = Field(default_factory=MemorySettings)
     platform: PlatformSettings = Field(default_factory=PlatformSettings)
+    _root_path: Path = PrivateAttr(default_factory=resolve_root_path)
+    _config_path: Path | None = PrivateAttr(default=None)
+
+    @property
+    def root_path(self) -> Path:
+        return self._root_path
+
+    @property
+    def config_path(self) -> Path | None:
+        return self._config_path
 
     @classmethod
     def settings_customise_sources(
@@ -216,7 +227,7 @@ class AppSettings(BaseSettings):
     # ------------------------------------------------------------
 
     @classmethod
-    def load(cls, path: Path) -> AppSettings:
+    def load(cls, path: Path, *, root_path: Path | None = None) -> AppSettings:
         """从 TOML 文件载入配置(不叠加环境变量)。
 
         需要环境变量覆盖时请用模块级的 load_settings()。
@@ -226,16 +237,19 @@ class AppSettings(BaseSettings):
         drop_removed_keys(data)
 
         try:
-            return cls.from_file_data(data)
+            settings = cls.from_file_data(data, root_path=root_path)
+            settings._config_path = path.expanduser().resolve()
+            return settings
         except ValidationError as e:
             raise ConfigError(format_validation_error(path, e)) from e
 
     @classmethod
-    def from_file_data(cls, data: dict[str, Any]) -> AppSettings:
+    def from_file_data(cls, data: dict[str, Any], *, root_path: Path | None = None) -> AppSettings:
         """Validate file values without applying environment overrides."""
         token = _READ_ENVIRONMENT.set(False)
         try:
-            return cls.model_validate(data)
+            with root_path_scope(root_path):
+                return cls.model_validate(data)
         finally:
             _READ_ENVIRONMENT.reset(token)
 
@@ -280,6 +294,7 @@ class AppSettings(BaseSettings):
         data = _to_toml_safe(self.model_dump(mode="python"))
 
         _atomic_write_toml(path, data)
+        self._config_path = path.expanduser().resolve()
 
         return backup_path
 
@@ -345,7 +360,7 @@ def read_toml_file(path: Path) -> dict[str, Any]:
         raise ConfigError(format_toml_error(path, text, e)) from e
 
 
-def load_settings(config_path: Path | str) -> AppSettings:
+def load_settings(config_path: Path | str, *, root_path: Path | None = None) -> AppSettings:
     """从指定 TOML 文件加载 Shovel 配置, 并叠加环境变量。
 
     不使用 TomlConfigSettingsSource: 它在 pydantic 内部读文件,
@@ -359,6 +374,9 @@ def load_settings(config_path: Path | str) -> AppSettings:
     drop_removed_keys(data)
 
     try:
-        return AppSettings(**data)
+        with root_path_scope(root_path):
+            settings = AppSettings(**data)
+        settings._config_path = path
+        return settings
     except ValidationError as e:
         raise ConfigError(format_validation_error(path, e)) from e

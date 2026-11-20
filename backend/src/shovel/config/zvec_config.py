@@ -6,10 +6,11 @@
 # ---------------------------------------------------------------------
 from __future__ import annotations
 
-from pathlib import Path
 from typing import Literal
 
 from pydantic import BaseModel, Field, model_validator
+
+from shovel.config.paths import resolve_root_path
 
 
 class ZvecSettings(BaseModel):
@@ -45,7 +46,7 @@ class ZvecSettings(BaseModel):
 
     @model_validator(mode="after")
     def _resolve_default_paths(self) -> ZvecSettings:
-        profile = Path.home() / ".shovel"
+        profile = resolve_root_path()
 
         if not self.knowledge_path:
             object.__setattr__(

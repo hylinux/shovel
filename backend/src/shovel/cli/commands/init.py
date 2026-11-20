@@ -12,9 +12,17 @@ import typer
 
 from shovel.cli.context import cli_context
 from shovel.cli.decorators import command_handler
+from shovel.cli.root_environment import persist_root_environment, show_root_environment
 from shovel.cli.ui.console import console
 from shovel.config.embedding_config import EmbeddingSettings
+from shovel.config.errors import ConfigError
 from shovel.config.model_settings import DefaultAgentModelSettings, ModelProviderType
+from shovel.config.paths import (
+    default_root_path,
+    resolve_root_path,
+    root_path_scope,
+    validate_initialization_root,
+)
 from shovel.config.settings import AppSettings, load_settings
 from shovel.db.database import init_database
 from shovel.services.health import HealthResult, HealthStatus, check_model
@@ -164,6 +172,10 @@ def _initial_settings(*, interactive: bool) -> AppSettings:
     return AppSettings.from_file_data(
         {
             "model": model.model_dump(mode="python"),
+            "database": {
+                "url": f"sqlite+aiosqlite:///{cli_context.get_default_database().as_posix()}",
+            },
+            "temp_path": cli_context.get_default_temp_dir(),
             "agent": {
                 "workspace_path": cli_context.get_default_workspace(),
                 "max_tool_iterations": 5,
@@ -173,6 +185,7 @@ def _initial_settings(*, interactive: bool) -> AppSettings:
                 "knowledge_path": str(cli_context.get_default_knowledge_dir() / knowledge_name),
                 "chunk_collection": knowledge_name,
                 "dim": dimension,
+                "log_dir": str(cli_context.get_default_logs_dir()),
             },
             "embedding": embedding.model_dump(mode="python"),
             "memory": {
@@ -210,7 +223,10 @@ def _ensure_dir(path: Path, label: str) -> None:
     if not existed:
         console.warning(f"The {label} {path} is not exists. We will create it.")
 
-    path.mkdir(parents=True, exist_ok=True)
+    try:
+        path.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        raise ConfigError(f"Cannot create initialization directory {path} ({type(exc).__name__}).") from None
 
     if existed:
         console.success(f"The {label} {path} is exists.")
@@ -240,8 +256,45 @@ def init(
         bool,
         typer.Option("--no-input", help="Create an unconfigured profile without interactive prompts."),
     ] = False,
+    root_path: Annotated[
+        Path | None, typer.Option("--root-path", help="Initialize here instead of the selected data root.")
+    ] = None,
+    persist_root: Annotated[
+        bool,
+        typer.Option("--persist-root", help="After success, save SHOVEL_ROOT_PATH for your Windows user."),
+    ] = False,
 ) -> None:
+    selected = resolve_root_path(root_path)
+    if not no_input and root_path is None:
+        try:
+            while True:
+                value: str = typer.prompt("Shovel initialization root", default=str(selected))
+                try:
+                    selected = resolve_root_path(value)
+                    validate_initialization_root(selected)
+                    break
+                except ConfigError as exc:
+                    console.warning(exc.message)
+        except typer.Abort:
+            console.warning("Initialization cancelled; configuration was not saved.")
+            raise typer.Exit(code=1) from None
+    with root_path_scope(selected):
+        validate_initialization_root(selected)
+        _initialize(no_input=no_input)
 
+    if selected != default_root_path() or persist_root:
+        show_root_environment(selected)
+        save_root = persist_root
+        if not save_root and not no_input and os.name == "nt":
+            try:
+                save_root = typer.confirm("Save this root for your Windows user?", default=False)
+            except typer.Abort:
+                console.warning("Initialization completed; environment persistence cancelled.")
+        if save_root:
+            persist_root_environment(selected)
+
+
+def _initialize(*, no_input: bool) -> None:
     console.info("Begin initial Shovel Agent.")
 
     config_file = cli_context.get_default_config_file()

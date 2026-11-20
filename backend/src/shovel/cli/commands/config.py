@@ -52,7 +52,7 @@ def config(
         ),
     ] = False,
 ) -> None:
-    """Manage ``~/.shovel/config/settings.toml``."""
+    """Manage settings.toml in the selected Shovel data root."""
 
     config_file = cli_context.get_default_config_file()
 

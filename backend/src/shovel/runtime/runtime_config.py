@@ -13,10 +13,10 @@ import tomli_w
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, ValidationError
 
 from shovel.config.errors import ConfigError
+from shovel.config.paths import root_path_scope
 from shovel.config.settings import AppSettings, _to_toml_safe, drop_removed_keys, normalize_chat_api_keys
 from shovel.runtime.errors import RuntimeFailure
 from shovel.runtime.workspace_config import WorkspaceTextFile
-from shovel.services.config_server import shovel_context
 
 # Only these scalar fields can be written; no raw TOML or caller-selected paths.
 _SECTIONS = {
@@ -95,11 +95,14 @@ def _invalid(key: str, reason: str) -> None:
     raise RuntimeFailure(f"{key}: {reason}", status=422)
 
 
-def _validate_settings(raw: dict[str, Any], *, environment: bool = False) -> AppSettings:
+def _validate_settings(
+    raw: dict[str, Any], *, environment: bool = False, root_path: Path | None = None
+) -> AppSettings:
     data = deepcopy(raw)
     drop_removed_keys(data)
     try:
-        return AppSettings(**data) if environment else AppSettings.from_file_data(data)
+        with root_path_scope(root_path):
+            return AppSettings(**data) if environment else AppSettings.from_file_data(data)
     except ConfigError as exc:
         raise RuntimeFailure(exc.message, status=422) from None
     except ValidationError as exc:
@@ -117,7 +120,7 @@ def _validate_settings(raw: dict[str, Any], *, environment: bool = False) -> App
 class RuntimeConfigurationService:
     def __init__(self, active: AppSettings) -> None:
         self.active = active
-        self.file = WorkspaceTextFile(shovel_context.get_default_config_file())
+        self.file = WorkspaceTextFile(active.config_path or active.root_path / "config" / "settings.toml")
 
     def _read(self) -> tuple[dict[str, Any], AppSettings, str]:
         view = self.file.read()
@@ -127,14 +130,14 @@ class RuntimeConfigurationService:
             raw = tomllib.loads(view["content"])
         except tomllib.TOMLDecodeError:
             raise RuntimeFailure("settings.toml is invalid TOML. Repair it locally.", status=422) from None
-        return raw, _validate_settings(raw), view["revision"]
+        return raw, _validate_settings(raw, root_path=self.active.root_path), view["revision"]
 
     def read(self) -> dict[str, Any]:
         raw, saved, revision = self._read()
         return self._view(raw, saved, revision)
 
     def _view(self, raw: dict[str, Any], saved: AppSettings, revision: str) -> dict[str, Any]:
-        effective = _validate_settings(raw, environment=True)
+        effective = _validate_settings(raw, environment=True, root_path=self.active.root_path)
         values = _to_toml_safe(saved.model_dump(mode="python"))
         active = _to_toml_safe(self.active.model_dump(mode="python"))
         resolved = _to_toml_safe(effective.model_dump(mode="python"))
@@ -249,9 +252,9 @@ class RuntimeConfigurationService:
             if key in _SECRETS and value == "**********":
                 _invalid(key, "Enter a new key, keep the existing key, or explicitly clear it.")
             _set(raw, key, value)
-        after = _validate_settings(raw)
+        after = _validate_settings(raw, root_path=self.active.root_path)
         self._validate(after, body.changes)
-        effective = _validate_settings(raw, environment=True)
+        effective = _validate_settings(raw, environment=True, root_path=self.active.root_path)
         self._validate(effective, body.changes)
         self._vector_guard(before, after)
         self._vector_guard(self.active, effective)

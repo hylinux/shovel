@@ -88,6 +88,14 @@ interactive authentication require a separately approved target and operation;
 never run them automatically in CI. See `native\README.md`.
 
 Initialize local configuration/stores with `uv run shovel init`, then use
+`SHOVEL_ROOT_PATH` (an absolute directory) to select a custom data root; unset
+uses the user's `.shovel`. Init prompts for the root first and supports
+`--root-path` / `--no-input`. Defaults resolve without filesystem writes;
+SQLite/Runtime initialization creates required directories. Root selection
+and the actual loaded settings file stay pinned for each Host. Windows
+`--persist-root` is an explicit user-level environment write after successful
+initialization, not a parent-terminal update or enterprise installation trust.
+For the development server, use
 `uv run shovel run dev` from the root. This supervises Next.js on port 3000 and
 FastAPI on port 9999; either exiting stops both. Production is separate:
 `npm run build` in `frontend\` exports `frontend\out`, then

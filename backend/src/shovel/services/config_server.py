@@ -6,6 +6,7 @@ from importlib import metadata
 from pathlib import Path
 
 from shovel.config.metadata import PRODUCT
+from shovel.config.paths import resolve_root_path
 from shovel.config.settings import AppSettings
 
 
@@ -65,9 +66,7 @@ class ShovelContext:
         return platform.platform()
 
     def get_default_profile_dir(self) -> Path:
-        home = Path.home()
-
-        return home / ".shovel"
+        return resolve_root_path()
 
     def get_default_workspace(self) -> Path:
         workspace_dir = self.get_default_worksapce_dir()

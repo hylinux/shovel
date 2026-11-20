@@ -12,7 +12,7 @@ from typing import Any
 
 from sqlalchemy import create_engine, event
 from sqlalchemy import inspect as sa_inspect
-from sqlalchemy.engine import Engine
+from sqlalchemy.engine import Engine, make_url
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
     AsyncSession,
@@ -23,7 +23,25 @@ from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.sql.dml import Insert, Update
 from sqlalchemy.sql.selectable import Alias, FromClause
 
+from shovel.config.errors import ConfigError
 from shovel.db.base import Base
+
+
+def _prepare_sqlite_directory(url: str) -> None:
+    parsed = make_url(url)
+    if (
+        parsed.get_backend_name() == "sqlite"
+        and parsed.database
+        and parsed.database != ":memory:"
+        and not parsed.query.get("uri")
+    ):
+        directory = Path(parsed.database).expanduser().parent
+        try:
+            directory.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            raise ConfigError(
+                f"Cannot prepare SQLite directory {directory} ({type(exc).__name__})."
+            ) from None
 
 
 def sqlite_storage_binding(database: str | Path) -> str:
@@ -81,6 +99,7 @@ def create_database_engine(
             "以及 AppContainer.config 是否已 from_dict(settings.model_dump(mode='json'))。"
         )
 
+    _prepare_sqlite_directory(url)
     engine: Engine = create_engine(
         url,
         echo=echo,
@@ -147,6 +166,7 @@ async def create_async_database_engine(
             "以及 AppContainer.config 是否已 from_dict(settings.model_dump(mode='json'))。"
         )
 
+    _prepare_sqlite_directory(url)
     engine: AsyncEngine = create_async_engine(
         url,
         echo=echo,

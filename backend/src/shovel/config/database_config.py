@@ -10,6 +10,8 @@ from pathlib import Path
 
 from pydantic import BaseModel, model_validator
 
+from shovel.config.paths import resolve_root_path
+
 
 class DatabaseSettings(BaseModel):
     """数据库配置。
@@ -44,6 +46,4 @@ class DatabaseSettings(BaseModel):
 
 
 def _default_database_path() -> Path:
-    path = Path.home() / ".shovel" / "data" / "shovel.db"
-    path.parent.mkdir(parents=True, exist_ok=True)
-    return path
+    return resolve_root_path() / "data" / "shovel.db"

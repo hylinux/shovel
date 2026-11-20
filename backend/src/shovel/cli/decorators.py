@@ -2,11 +2,14 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from functools import wraps
+from pathlib import Path
 from typing import ParamSpec, TypeVar
 
 import typer
 
 from shovel.cli.exception import CliExceptionHandler
+from shovel.config.errors import ConfigError
+from shovel.config.paths import root_path_scope
 
 P = ParamSpec("P")
 R = TypeVar("R")
@@ -28,10 +31,14 @@ def command_handler() -> Callable[
         ) -> R | None:
 
             try:
-                return func(
-                    *args,
-                    **kwargs,
-                )
+                override = kwargs.get("root_path")
+                if override is not None and not isinstance(override, (str, Path)):
+                    raise ConfigError("Root path must be a directory path.")
+                with root_path_scope(override):
+                    return func(
+                        *args,
+                        **kwargs,
+                    )
             except typer.Exit:
                 raise
 

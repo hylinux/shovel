@@ -297,7 +297,8 @@ def _load_settings_or_exit() -> AppSettings:
 
     if not cli_context.validate_config_exists():
         console.error(
-            "Shovel configuration missing, please use command 'shovel init' to generate a default one."
+            f"Shovel configuration missing at {config_path}. "
+            "Run 'shovel init' for the selected data root, or correct SHOVEL_ROOT_PATH."
         )
         raise typer.Exit(code=1)
 

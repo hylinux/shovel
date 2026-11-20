@@ -8,6 +8,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from shovel.config.embedding_config import EmbeddingSettings
 from shovel.config.model_settings import DefaultAgentModelSettings
+from shovel.config.paths import resolve_root_path
 
 
 class MemoryModelSettings(DefaultAgentModelSettings):
@@ -34,7 +35,7 @@ class MemoryModelSettings(DefaultAgentModelSettings):
 class MemorySettings(BaseModel):
     model_config = ConfigDict(extra="forbid")
     collection: str = "shovel_memory"
-    index_path: Path = Field(default_factory=lambda: Path.home() / ".shovel" / "memory" / "zvec")
+    index_path: Path = Field(default_factory=lambda: resolve_root_path() / "memory" / "zvec")
     dim: int = Field(default=1024, ge=1)
     context_max_chars: int = Field(default=2000, ge=100, le=32000)
     max_items: int = Field(default=10, ge=1, le=100)

@@ -22,7 +22,6 @@ from pydantic_settings import BaseSettings, PydanticBaseSettingsSource, Settings
 
 from .agent_config import AgentSettings
 from .database_config import DatabaseSettings
-from .document_settings import DocumentSettings
 from .embedding_config import EmbeddingSettings
 from .errors import (
     ConfigError,
@@ -106,7 +105,7 @@ def _to_toml_safe(value: Any) -> Any:
 #: 这里只丢弃"我们自己曾经写进去过"的键, 因此不会掩盖真正的错别字。
 _REMOVED_KEYS: dict[str | None, set[str]] = {
     # 历史上的独立向量/缓存及 Agent 监听配置不再属于 Runtime。
-    None: {"qdrant", "redis", "agent_host", "agent_port"},
+    None: {"qdrant", "redis", "agent_host", "agent_port", "document"},
     # Zvec 只负责知识库了, 记忆的 collection 不再由它管
     "zvec": {"memory_path", "memory_collection"},
 }
@@ -180,7 +179,6 @@ class AppSettings(BaseSettings):
     log_level: str = "INFO"
 
     # default_factory: 推迟到实例化时才构造, 避免导入期副作用
-    document: DocumentSettings = Field(default_factory=DocumentSettings)
     model: DefaultAgentModelSettings = Field(default_factory=DefaultAgentModelSettings)
     agent: AgentSettings = Field(default_factory=AgentSettings)
     performance: PerformanceSettings = Field(default_factory=PerformanceSettings)

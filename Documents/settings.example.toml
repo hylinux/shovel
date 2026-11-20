@@ -7,8 +7,6 @@ http_port = 8080
 frontend_path = ""
 log_level = "INFO"
 
-[document]
-
 [model]
 model_provider_type = "ollama"
 base_endpoint = "http://127.0.0.1:11434"

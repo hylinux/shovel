@@ -355,9 +355,10 @@ monitors and adds a grouped editor for the current user's
 `.shovel\config\settings.toml`. The editor shows file values separately from the
 active process and environment-overridden values. It cannot select another
 configuration file or change `agent.workspace_path`, `database.url`,
-`zvec.knowledge_path` or `memory.index_path`. Other undisplayed settings,
-including the existing `document.root_dir`, are preserved. Saving rewrites
-TOML formatting and comments.
+`zvec.knowledge_path` or `memory.index_path`. Other undisplayed settings are
+preserved. The unused legacy `[document]` section is ignored on load and
+removed when saving; newly generated profiles omit it. Saving rewrites TOML
+formatting and comments.
 
 Saves use a content revision and atomic replacement; conflicting edits require
 reloading and merging. Credentials have separate **Keep**, **Replace** and

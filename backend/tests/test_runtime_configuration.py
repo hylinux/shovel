@@ -44,7 +44,6 @@ def configuration(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> RuntimeCon
                 "max_input_images": 7,
             },
             "embedding": {"api_key": "vector-private"},
-            "document": {"root_dir": "keep-document-root"},
         }
     )
     active.save(path)
@@ -67,12 +66,30 @@ def test_save_preserves_hidden_fields_fixed_paths_and_secrets_and_verifies_resta
     assert configuration.active.log_level == "INFO"
     assert not configuration.check_application(saved["revision"])["applied"]
     raw = tomllib.loads(configuration.file.path.read_text())
-    for key in ("model", "memory", "agent", "zvec", "database", "document", "platform"):
+    for key in ("model", "memory", "agent", "zvec", "database", "platform"):
         assert raw[key] == before[key]
     with pytest.raises(RuntimeFailure, match="Reload"):
         configuration.check_application(view["revision"])
     restarted = RuntimeConfigurationService(AppSettings.load(configuration.file.path))
     assert restarted.check_application(saved["revision"])["applied"]
+
+
+def test_editor_reads_legacy_document_section_and_removes_it_on_save(
+    configuration: RuntimeConfigurationService,
+) -> None:
+    raw = tomllib.loads(configuration.file.path.read_text())
+    raw["document"] = {"root_dir": "unused-legacy-root"}
+    configuration.file.path.write_text(tomli_w.dumps(raw))
+    original = configuration.file.path.read_bytes()
+    view = configuration.read()
+    assert view["applied"]
+    assert not any(item["section"] == "document" for item in view["items"])
+    assert configuration.file.path.read_bytes() == original
+    save(configuration, {"log_level": "DEBUG"})
+    persisted = tomllib.loads(configuration.file.path.read_text())
+    assert "document" not in persisted
+    assert persisted["model"] == raw["model"]
+    assert persisted["log_level"] == "DEBUG"
 
 
 @pytest.mark.parametrize("section", ["model", "memory.llm"])

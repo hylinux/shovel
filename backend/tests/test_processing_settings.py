@@ -145,6 +145,24 @@ def test_removed_listener_migration_does_not_hide_unknown_settings(tmp_path: Pat
             loader(config)
 
 
+@pytest.mark.parametrize("legacy_fields", ["", 'root_dir = "unused-legacy-root"\n'])
+def test_removed_document_section_loads_without_rewriting_and_is_omitted_on_save(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, legacy_fields: str
+) -> None:
+    config = tmp_path / "settings.toml"
+    original = f"http_port = 8081\n[document]\n{legacy_fields}"
+    config.write_text(original, encoding="utf-8")
+    monkeypatch.setenv("SHOVEL_DOCUMENT", '{"root_dir": "unused-environment-root"}')
+    monkeypatch.setenv("SHOVEL_DOCUMENT__ROOT_DIR", "unused-nested-environment-root")
+    for settings in (AppSettings.load(config), load_settings(config)):
+        assert "document" not in settings.model_dump()
+        assert settings.http_port == 8081
+    assert config.read_text(encoding="utf-8") == original
+    settings.save(config, overwrite=True, backup=False)
+    assert "document" not in tomllib.loads(config.read_text(encoding="utf-8"))
+    assert AppSettings.load(config) == settings
+
+
 @pytest.mark.parametrize("timeout,literal", [(300.0, "300"), (300.5, "300.5")])
 def test_timeout_toml_format_preserves_integer_and_fractional_seconds(
     tmp_path: Path, timeout: float, literal: str

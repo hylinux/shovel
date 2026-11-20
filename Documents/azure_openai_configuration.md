@@ -104,8 +104,6 @@ http_port = 8080
 frontend_path = ""
 log_level = "INFO"
 
-[document]
-
 [model]
 model_provider_type = "azure_openai"
 base_endpoint = "https://YOUR-RESOURCE.openai.azure.com"

@@ -89,7 +89,7 @@ def test_init_wizard_persists_inputs_defaults_and_independent_memory_copies(
     assert raw["memory"]["max_items"] == 20
     assert raw["memory"]["history_messages"] == 10
     assert raw["memory"]["collection"] == "Memory_42"
-    assert not {"agent_host", "agent_port"} & raw.keys()
+    assert not {"agent_host", "agent_port", "document"} & raw.keys()
     settings = AppSettings.load(config)
     assert settings.agent.workspace == profile / "workspaces" / "default"
     assert Path(settings.zvec.knowledge_path) == profile / "knowledge" / "Knowledge_42"
@@ -223,6 +223,7 @@ def test_init_no_input_creates_unconfigured_profile_without_persisting_environme
     result = CliRunner().invoke(app, ["init", "--no-input"])
     assert result.exit_code == 0, result.output
     settings = AppSettings.load(profile / "config" / "settings.toml")
+    assert "document" not in settings.model_dump()
     assert not settings.model.is_configured and not settings.embedding.is_configured
     assert not settings.memory.llm.is_configured and not settings.memory.embedder.is_configured
     assert settings.model.max_output_tokens == settings.memory.llm.max_output_tokens == 32768
@@ -247,7 +248,10 @@ def test_init_existing_configuration_is_not_prompted_or_rewritten(profile: Path)
         }
     )
     settings.save(path)
-    path.write_text("# Keep my comments and values.\n" + path.read_text(), encoding="utf-8")
+    path.write_text(
+        "# Keep my comments and values.\n" + path.read_text() + '\n[document]\nroot_dir = "legacy-root"\n',
+        encoding="utf-8",
+    )
     before = path.read_bytes()
     result = CliRunner().invoke(app, ["init"])
     assert result.exit_code == 0, result.output

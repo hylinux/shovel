@@ -234,6 +234,7 @@ class RuntimeConfigurationService:
                 status=409,
             )
         raw = normalize_chat_api_keys(raw)
+        raw.pop("document", None)
         for key, value in body.changes.items():
             if key not in _EDITABLE:
                 _invalid("configuration", "Field is not editable.")

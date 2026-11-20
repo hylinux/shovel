@@ -68,11 +68,15 @@ From the repository root, in PowerShell:
 ```powershell
 uv sync --python 3.14-x86_64 --locked --all-extras --dev
 uv run shovel init
-Set-Location frontend
-npm ci
-Set-Location ..
 uv run shovel run dev
 ```
+
+`shovel run dev` checks frontend dependencies before starting either server.
+If dependencies are missing or invalid, it runs `npm ci` using
+`frontend\package-lock.json`, including development and optional dependencies.
+Installation or verification failure stops startup. Node.js/npm must already be
+installed; the first dependency installation requires access to the configured
+npm registry. Production mode does not check or install npm packages.
 
 On platforms with supported native dependencies, use
 `uv sync --locked --all-extras --dev` with the appropriate Python interpreter.

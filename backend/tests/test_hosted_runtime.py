@@ -10,6 +10,7 @@ from contextlib import nullcontext
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
+from unittest.mock import AsyncMock
 
 import httpx
 import pytest
@@ -590,6 +591,8 @@ def test_dev_entry_scopes_logs_without_affecting_production(
 
     monkeypatch.setattr(run_module, "_load_settings_or_exit", lambda: settings_at(tmp_path))
     monkeypatch.setattr(run_module, "_resolve_frontend_dir", lambda _override: tmp_path)
+    dependencies = AsyncMock()
+    monkeypatch.setattr(run_module, "_ensure_frontend_dependencies", dependencies)
     monkeypatch.setattr(run_module, "build_host", host)
     monkeypatch.setattr(run_module, "_supervise", supervise)
     if fail:
@@ -602,6 +605,7 @@ def test_dev_entry_scopes_logs_without_affecting_production(
     trace("after.dev.must.not.trace")
     assert "must.not.trace" not in capsys.readouterr().out
     assert modes == [True, False]
+    dependencies.assert_awaited_once_with(tmp_path)
 
 
 async def test_concurrent_dev_requests_keep_separate_log_contexts(

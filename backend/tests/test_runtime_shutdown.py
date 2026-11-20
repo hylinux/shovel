@@ -361,6 +361,121 @@ async def test_dev_accounts_for_frontend_cleanup_after_clean_backend(
     assert host.exit_code == 0 and host.shutdown_outcome == ShutdownOutcome.CLEAN
 
 
+@pytest.mark.parametrize(
+    ("installed", "results", "expected_commands", "exit_code"),
+    [
+        (False, [0, 0], ["ci", "ls"], None),
+        (True, [0], ["ls"], None),
+        (True, [1, 0, 0], ["ls", "ci", "ls"], None),
+        (False, [7], ["ci"], 7),
+        (False, [0, 1], ["ci", "ls"], 1),
+    ],
+)
+async def test_dev_repairs_dependencies_using_lock_and_verifies_before_startup(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    installed: bool,
+    results: list[int],
+    expected_commands: list[str],
+    exit_code: int | None,
+) -> None:
+    (tmp_path / "package-lock.json").write_text("{}", encoding="utf-8")
+    if installed:
+        (tmp_path / "node_modules").mkdir()
+    commands: list[str] = []
+    codes = iter(results)
+
+    @asynccontextmanager
+    async def npm(directory: Path, *args: str, **kwargs: Any) -> AsyncIterator[Mock]:
+        assert directory == tmp_path
+        commands.append(args[0])
+        assert "--include=dev" in args and "--include=optional" in args
+        if args[0] == "ls":
+            assert kwargs["output"] == asyncio.subprocess.DEVNULL
+        yield Mock(wait=AsyncMock(return_value=next(codes)))
+
+    monkeypatch.setattr(run_module, "_run_npm", npm)
+    if exit_code is None:
+        await run_module._ensure_frontend_dependencies(tmp_path)
+    else:
+        with pytest.raises(typer.Exit) as error:
+            await run_module._ensure_frontend_dependencies(tmp_path)
+        assert error.value.exit_code == exit_code
+    assert commands == expected_commands
+
+
+async def test_dev_missing_lock_does_not_run_npm(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    spawn = AsyncMock()
+    monkeypatch.setattr(run_module.asyncio, "create_subprocess_exec", spawn)
+    with pytest.raises(typer.Exit):
+        await run_module._ensure_frontend_dependencies(tmp_path)
+    spawn.assert_not_awaited()
+
+
+async def test_dev_dependency_failure_prevents_host_creation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(run_module, "_load_settings_or_exit", lambda: settings_at(tmp_path))
+    monkeypatch.setattr(run_module, "_resolve_frontend_dir", lambda _override: tmp_path)
+    monkeypatch.setattr(
+        run_module, "_ensure_frontend_dependencies", AsyncMock(side_effect=typer.Exit(code=7))
+    )
+    build = Mock()
+    monkeypatch.setattr(run_module, "build_host", build)
+    with pytest.raises(typer.Exit) as error:
+        await run_module._run_dev_logged(tmp_path)
+    assert error.value.exit_code == 7
+    build.assert_not_called()
+
+
+async def test_dev_dependency_install_reports_missing_npm(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    (tmp_path / "package-lock.json").write_text("{}", encoding="utf-8")
+    monkeypatch.setattr(
+        run_module.asyncio, "create_subprocess_exec", AsyncMock(side_effect=FileNotFoundError)
+    )
+    with pytest.raises(typer.Exit):
+        await run_module._ensure_frontend_dependencies(tmp_path)
+    captured = capsys.readouterr()
+    assert "install Node.js" in captured.out + captured.err
+
+
+async def test_cancelled_npm_install_terminates_process_tree_and_closes_job(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    entered = asyncio.Event()
+    process = Mock(pid=123, returncode=None)
+    monkeypatch.setattr(run_module, "_IS_WINDOWS", True)
+    spawn = AsyncMock(return_value=process)
+    monkeypatch.setattr(run_module.asyncio, "create_subprocess_exec", spawn)
+    monkeypatch.setattr(run_module, "create_kill_job", Mock(return_value=456))
+    monkeypatch.setattr(run_module, "resume_suspended_process", Mock())
+    close_job = Mock()
+    monkeypatch.setattr(run_module, "close_kill_job", close_job)
+
+    async def terminate(_process: Any) -> None:
+        process.returncode = 1
+
+    cleanup = AsyncMock(side_effect=terminate)
+    monkeypatch.setattr(run_module, "_terminate", cleanup)
+
+    async def install() -> None:
+        async with run_module._run_npm(tmp_path, "ci", output=asyncio.subprocess.DEVNULL):
+            entered.set()
+            await asyncio.Event().wait()
+
+    task = asyncio.create_task(install())
+    await asyncio.wait_for(entered.wait(), 2)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    cleanup.assert_awaited_once_with(process)
+    close_job.assert_called_once_with(456)
+    assert spawn.call_args.args == ("npm.cmd", "ci")
+    assert spawn.call_args.kwargs["creationflags"] & 4
+
+
 @pytest.mark.parametrize("exit_code", [0, 1])
 def test_production_interrupt_preserves_shutdown_failure_status(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, exit_code: int

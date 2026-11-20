@@ -146,6 +146,7 @@ async def _run_dev_logged(frontend_dir_override: Path | None) -> None:
 
     settings = _load_settings_or_exit()
     frontend_dir = _resolve_frontend_dir(frontend_dir_override)
+    await _ensure_frontend_dependencies(frontend_dir)
 
     logger = structlog.get_logger(settings.service_name).bind(component="api")
     logger.info("shovel boot start", env="dev")
@@ -353,6 +354,40 @@ def _npm_cmd() -> str:
     return "npm.cmd" if _IS_WINDOWS else "npm"
 
 
+async def _check_frontend_dependencies(frontend_dir: Path) -> bool:
+    async with _run_npm(
+        frontend_dir,
+        "ls",
+        "--depth=0",
+        "--include=dev",
+        "--include=optional",
+        output=asyncio.subprocess.DEVNULL,
+    ) as proc:
+        return await proc.wait() == 0
+
+
+async def _ensure_frontend_dependencies(frontend_dir: Path) -> None:
+    if not (frontend_dir / "package-lock.json").is_file():
+        console.error("Frontend package-lock.json is missing; cannot install locked dependencies.")
+        raise typer.Exit(code=1)
+    if (frontend_dir / "node_modules").is_dir() and await _check_frontend_dependencies(frontend_dir):
+        return
+
+    console.info("Frontend dependencies are missing or invalid; running npm ci...")
+    async with _run_npm(
+        frontend_dir, "ci", "--include=dev", "--include=optional", "--no-audit", "--no-fund"
+    ) as proc:
+        rc = await proc.wait()
+    if rc != 0:
+        console.error(f"Frontend dependency installation failed (npm ci exited with code {rc}).")
+        raise typer.Exit(code=rc if rc > 0 else 1)
+    if not await _check_frontend_dependencies(frontend_dir):
+        console.error(
+            "Frontend dependencies are still invalid after npm ci; run npm ls --depth=0 for details."
+        )
+        raise typer.Exit(code=1)
+
+
 @asynccontextmanager
 async def _run_frontend(
     frontend_dir: Path,
@@ -363,12 +398,6 @@ async def _run_frontend(
     frontend_port: int = 3000,
 ) -> AsyncGenerator[asyncio.subprocess.Process]:
     """启动 npm run dev, 退出上下文时保证整棵子进程树被关闭。"""
-    kwargs: dict[str, Any] = {}
-    if _IS_WINDOWS:
-        kwargs["creationflags"] = _CREATE_NEW_PROCESS_GROUP | _CREATE_SUSPENDED
-    else:
-        kwargs["start_new_session"] = True
-
     env = dict(os.environ)
     # 保留开发服务器通过管道输出时的颜色。
     env["FORCE_COLOR"] = "1"
@@ -376,32 +405,52 @@ async def _run_frontend(
         env["SHOVEL_BACKEND_PORT"] = str(backend_port)
     env["SHOVEL_BACKEND_HOST"] = backend_host
 
-    if capture_output:
-        kwargs["stdout"] = asyncio.subprocess.PIPE
-        # 合并到 stdout, 用一个泵保证行间顺序
-        kwargs["stderr"] = asyncio.subprocess.STDOUT
+    async with _run_npm(
+        frontend_dir,
+        "run",
+        "dev",
+        "--",
+        "--hostname",
+        "127.0.0.1",
+        "--port",
+        str(frontend_port),
+        env=env,
+        output=asyncio.subprocess.PIPE if capture_output else None,
+    ) as proc:
+        trace("frontend.started", pid=proc.pid, port=frontend_port)
+        yield proc
+    trace("frontend.stopped", pid=proc.pid, exit_code=proc.returncode)
+
+
+@asynccontextmanager
+async def _run_npm(
+    frontend_dir: Path,
+    *args: str,
+    env: dict[str, str] | None = None,
+    output: int | None = asyncio.subprocess.PIPE,
+) -> AsyncGenerator[asyncio.subprocess.Process]:
+    kwargs: dict[str, Any] = {}
+    if _IS_WINDOWS:
+        kwargs["creationflags"] = _CREATE_NEW_PROCESS_GROUP | _CREATE_SUSPENDED
+    else:
+        kwargs["start_new_session"] = True
 
     try:
         proc = await asyncio.create_subprocess_exec(
             _npm_cmd(),
-            "run",
-            "dev",
-            "--",
-            "--hostname",
-            "127.0.0.1",
-            "--port",
-            str(frontend_port),
+            *args,
             cwd=str(frontend_dir),
             env=env,
+            stdout=output,
+            stderr=asyncio.subprocess.STDOUT,
             **kwargs,
         )
     except FileNotFoundError as exc:
         console.error("`npm` not found on PATH. Please install Node.js first.")
         raise typer.Exit(code=1) from exc
 
-    trace("frontend.started", pid=proc.pid, port=frontend_port)
     pumps: list[asyncio.Task[Any]] = []
-    if capture_output:
+    if output == asyncio.subprocess.PIPE:
         pumps.append(
             asyncio.create_task(
                 _pump_stream(proc.stdout, _WEB_PREFIX, _WEB_STYLE),
@@ -432,7 +481,6 @@ async def _run_frontend(
                     await _cancel_all(still_running)
         if proc.returncode is None:
             raise RuntimeFailure("Frontend process did not exit after termination.")
-        trace("frontend.stopped", pid=proc.pid, exit_code=proc.returncode)
 
 
 async def _terminate(proc: asyncio.subprocess.Process) -> None:

@@ -7,13 +7,13 @@ Embedding 已通过 Microsoft Agent Framework 客户端生成向量。
 
 ## 1. 修正原配置中的重复键
 
-`[model]` 和 `[memory.llm]` 内的 `security_key`、`api_version` 各只能出现一次。
+`[model]` 和 `[memory.llm]` 内的 `api_key`、`api_version` 各只能出现一次。
 TOML 不允许同一张表重复定义键；后面的空值不是覆盖前面的配置，而是解析错误。
 两段都应保留：
 
 ```toml
 api_version = "2025-04-01-preview"
-security_key = ""
+api_key = ""
 ```
 
 `max_input_chars = 240000` 是聊天模型的 Shovel 字符门槛，不是 240K token。
@@ -68,8 +68,8 @@ Azure 配置中的 `model` 必须填写 **embedding 部署名称**，不是任�
 
 | 用途 | 当前认证实现 | 配置字段 |
 | --- | --- | --- |
-| 主聊天 `[model]` | 空 Key 使用异步 `AzureCliCredential`，令牌缓存并按需续期；非空 Key 使用 API Key。 | `security_key` |
-| Memory LLM `[memory.llm]` | 与主聊天使用相同的客户端工厂和认证规则。 | `security_key` |
+| 主聊天 `[model]` | 空 Key 使用异步 `AzureCliCredential`，令牌缓存并按需续期；非空 Key 使用 API Key。 | `api_key` |
+| Memory LLM `[memory.llm]` | 与主聊天使用相同的客户端工厂和认证规则。 | `api_key` |
 | 知识 embedding `[embedding]` | 空 Key 使用 CLI 自动令牌；非空 Key 使用 API Key。 | `api_key` |
 | Memory embedding `[memory.embedder]` | 与知识 embedding 使用相同的 MAF 适配器和认证规则。 | `api_key` |
 
@@ -111,7 +111,7 @@ model_provider_type = "azure_openai"
 base_endpoint = "https://YOUR-RESOURCE.openai.azure.com"
 model_name = "gpt-5.2-chat"
 api_version = "2025-04-01-preview"
-security_key = ""
+api_key = ""
 max_input_chars = 240000
 max_output_tokens = 1024
 timeout_seconds = 300
@@ -170,7 +170,7 @@ model_provider_type = "azure_openai"
 base_endpoint = "https://YOUR-RESOURCE.openai.azure.com"
 model_name = "gpt-5.2-chat"
 api_version = "2025-04-01-preview"
-security_key = ""
+api_key = ""
 max_input_chars = 240000
 max_output_tokens = 2048
 timeout_seconds = 300
@@ -218,7 +218,7 @@ az login --tenant YOUR-TENANT-ID
 ```
 
 所有模型使用 CLI 时，不应设置覆盖空 Key 的
-`SHOVEL_MODEL__SECURITY_KEY`、`SHOVEL_MEMORY__LLM__SECURITY_KEY`、
+`SHOVEL_MODEL__API_KEY`、`SHOVEL_MEMORY__LLM__API_KEY`、
 `SHOVEL_EMBEDDING__API_KEY`、`SHOVEL_MEMORY__EMBEDDER__API_KEY`。
 同时取消 `AZURE_OPENAI_AD_TOKEN`，否则 CLI 模式会明确拒绝静态令牌配置。
 
@@ -279,7 +279,7 @@ MCP 文档搜索成功不等于知识 embedding 或 Memory embedding 已配置�
 
 | 情况 | 优先检查 |
 | --- | --- |
-| TOML 重复键错误 | 删除同一段内重复的 `security_key` 和 `api_version`。 |
+| TOML 重复键错误 | 删除同一段内重复的 `api_key` 和 `api_version`。 |
 | CLI 认证失败 | `az` 的 PATH、登录用户、租户、登录有效期及推理权限。 |
 | Embedding HTTP 401/403 | CLI 身份/权限或 API Key 是否匹配资源，以及资源网络访问规则。 |
 | DeploymentNotFound / HTTP 404 | 填写的是部署名称而非模型产品名称，地址是否对应部署所在资源。 |

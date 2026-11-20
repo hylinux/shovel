@@ -6,28 +6,32 @@
 # 三条贯穿性的原则:
 #
 # 1. 自检永远不能让 init 失败。
-#    init 的任务是把本地目录/数据库/向量库准备好, 而外部依赖在用户
-#    刚装完还没填 API Key 时必然是连不上的。把"没配"当成错误, 等于
-#    要求用户先手写配置文件才能跑初始化。
+#    init 的任务是把本地目录/数据库/向量库准备好。外部依赖连不上时
+#    仍须保留本地初始化结果, 并明确报告检查失败。
 #
 # 2. "没配置"和"配了但连不上"要分开报。
 #    前者是正常的待办事项, 后者才是需要用户去查的问题。
 #
 # 3. 不引入新依赖。
-#    探活复用已经在用的 httpx。
+#    探活复用现有 httpx 与 Azure CLI 认证客户端。
 #
 # 日期: 2026-09-29
 # 作者: HongWei Guo <hongweig@163.com>
 # ---------------------------------------------------------------------
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass
 from enum import Enum
+
+import httpx
+from openai import APIError, APIStatusError
 
 from shovel.config.model_settings import (
     DefaultAgentModelSettings,
     ModelProviderType,
 )
+from shovel.runtime.errors import RuntimeFailure
 
 
 class HealthStatus(Enum):
@@ -97,39 +101,62 @@ def check_model(settings: DefaultAgentModelSettings) -> HealthResult:
             ),
         )
 
-    url, headers = _probe_request(settings)
+    if (
+        settings.model_provider_type in (ModelProviderType.AZUREOPENAI, ModelProviderType.AZUREFOUNDRY)
+        and not settings.api_version
+    ):
+        return HealthResult(
+            status=HealthStatus.FAILED,
+            target=target,
+            detail="Azure model health checks require model.api_version.",
+        )
 
-    import httpx
+    url, headers = _probe_request(settings)
+    azure_cli = settings.model_provider_type is ModelProviderType.AZUREOPENAI and not settings.api_key
 
     try:
-        response = httpx.get(
-            url,
-            headers=headers,
-            timeout=_MODEL_TIMEOUT_SECONDS,
-        )
-
-    except Exception as exc:
+        if azure_cli:
+            asyncio.run(_probe_azure_cli(settings))
+            status = 200
+        else:
+            response = httpx.get(
+                url,
+                headers=headers,
+                timeout=_MODEL_TIMEOUT_SECONDS,
+            )
+            status = response.status_code
+    except APIStatusError as exc:
+        status = exc.status_code
+    except RuntimeFailure as exc:
         return HealthResult(
             status=HealthStatus.FAILED,
             target=target,
-            detail=f"Cannot reach the model endpoint {url}: {exc}",
+            detail=f"{exc.message} {exc.hint or ''}".strip(),
         )
-
-    if response.status_code in (401, 403):
+    except (httpx.HTTPError, httpx.InvalidURL, APIError) as exc:
         return HealthResult(
             status=HealthStatus.FAILED,
             target=target,
-            detail=(
-                f"The model endpoint rejected the credential "
-                f"(HTTP {response.status_code}). Check model.security_key."
-            ),
+            detail=f"Cannot reach the model endpoint {url} ({type(exc).__name__}).",
         )
 
-    if response.status_code >= 400:
+    if status in (401, 403):
+        guidance = (
+            "Check Azure CLI login, resource tenant and Azure OpenAI access permissions."
+            if azure_cli
+            else "Check model.api_key."
+        )
         return HealthResult(
             status=HealthStatus.FAILED,
             target=target,
-            detail=(f"The model endpoint returned HTTP {response.status_code} for {url}."),
+            detail=f"The model endpoint rejected the credential (HTTP {status}). {guidance}",
+        )
+
+    if status >= 400:
+        return HealthResult(
+            status=HealthStatus.FAILED,
+            target=target,
+            detail=f"The model endpoint returned HTTP {status} for {url}.",
         )
 
     return HealthResult(
@@ -139,6 +166,19 @@ def check_model(settings: DefaultAgentModelSettings) -> HealthResult:
     )
 
 
+async def _probe_azure_cli(settings: DefaultAgentModelSettings) -> None:
+    from shovel.runtime.azure_auth import AzureCliOpenAIClient
+
+    async with AzureCliOpenAIClient(
+        azure_endpoint=settings.base_endpoint,
+        api_version=settings.api_version,
+        api_key=None,
+        timeout=_MODEL_TIMEOUT_SECONDS,
+        max_retries=0,
+    ) as client:
+        await client.models.list()
+
+
 def _probe_request(
     settings: DefaultAgentModelSettings,
 ) -> tuple[str, dict[str, str]]:
@@ -146,7 +186,7 @@ def _probe_request(
 
     base = settings.base_endpoint.rstrip("/")
     provider = settings.model_provider_type
-    key = settings.security_key
+    key = settings.api_key
 
     if provider is ModelProviderType.OLLAMA:
         # Ollama 没有鉴权, 原生端点也比 /v1 兼容层更可靠
@@ -156,11 +196,9 @@ def _probe_request(
         ModelProviderType.AZUREOPENAI,
         ModelProviderType.AZUREFOUNDRY,
     ):
-        # Azure 的 api-version 是必填的, 缺了会被直接拒绝
-        version = settings.api_version or "2024-10-21"
         headers = {"api-key": key} if key else {}
 
-        return f"{base}/openai/models?api-version={version}", headers
+        return f"{base}/openai/models?api-version={settings.api_version}", headers
 
     if provider in _OPENAI_COMPATIBLE:
         headers = {"Authorization": f"Bearer {key}"} if key else {}

@@ -66,7 +66,7 @@ class Evidence:
                 "main": {
                     "provider": configured.model.model_provider_type.value,
                     "model": configured.model.model_name,
-                    "authentication": "configured-key" if configured.model.security_key else "empty-key",
+                    "authentication": "configured-key" if configured.model.api_key else "empty-key",
                 },
                 "memory": {
                     "provider": configured.memory.llm.model_provider_type.value,

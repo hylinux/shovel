@@ -319,7 +319,7 @@ are in `.github\workflows\ci.yml`.
   `ContextBudgetMiddleware` rejects overflow. Main instructions do not replace
   the isolated Memory extractor/summarizer prompts.
 - Azure OpenAI chat and embeddings share `runtime\azure_auth.py`'s
-  `AzureCliOpenAIClient`: an empty chat `security_key` or embedding `api_key`
+  `AzureCliOpenAIClient`: an empty chat `api_key` or embedding `api_key`
   selects lazy asynchronous Azure CLI authentication with automatic token renewal;
   non-empty keys retain API-key authentication. CLI mode rejects
   `AZURE_OPENAI_AD_TOKEN` and never launches interactive login or falls back to

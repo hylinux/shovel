@@ -12,7 +12,7 @@ from shovel.cli import app
 from shovel.cli.commands import init as init_command
 from shovel.config.settings import AppSettings
 from shovel.services.health import HealthResult, HealthStatus
-from shovel.vector.store import init_vector_store
+from shovel.vector.store import init_vector_store, open_collection
 
 
 @pytest.fixture
@@ -72,7 +72,7 @@ def test_init_wizard_persists_inputs_defaults_and_independent_memory_copies(
     raw = tomllib.loads(text)
     assert raw["model"] == raw["memory"]["llm"]
     assert raw["embedding"] == raw["memory"]["embedder"]
-    assert raw["model"]["security_key"] == "chat-private-key"
+    assert raw["model"]["api_key"] == "chat-private-key"
     assert raw["embedding"]["api_key"] == "embedding-private-key"
     assert raw["model"]["base_endpoint"] == "https://chat.example.test"
     assert raw["model"]["model_name"] == "chat-deployment"
@@ -93,6 +93,12 @@ def test_init_wizard_persists_inputs_defaults_and_independent_memory_copies(
     settings = AppSettings.load(config)
     assert settings.agent.workspace == profile / "workspaces" / "default"
     assert Path(settings.zvec.knowledge_path) == profile / "knowledge" / "Knowledge_42"
+    assert settings.zvec.chunk_collection == "Knowledge_42"
+    collection = open_collection(settings.zvec.knowledge_path)
+    try:
+        assert collection.schema.name == "Knowledge_42"
+    finally:
+        collection.close()
     assert settings.memory.index_path == profile / "memory" / "Memory_42"
     assert settings.memory.index_path.is_dir()
     assert any(Path(settings.zvec.knowledge_path).iterdir())
@@ -135,7 +141,7 @@ def test_init_provider_choices_optional_keys_and_dimension_override(
     assert raw["model"]["model_provider_type"] == model_provider
     assert raw["embedding"]["provider"] == embedding_provider
     assert raw["zvec"]["dim"] == raw["memory"]["dim"] == 3072
-    assert raw["model"]["security_key"] == raw["embedding"]["api_key"] == ""
+    assert raw["model"]["api_key"] == raw["embedding"]["api_key"] == ""
     if embedding_provider == "ollama":
         assert "dimensions" not in raw["embedding"]
         assert "dimensions" not in raw["memory"]["embedder"]
@@ -228,6 +234,7 @@ def test_init_no_input_creates_unconfigured_profile_without_persisting_environme
         == 1024
     )
     assert Path(settings.zvec.knowledge_path) == profile / "knowledge" / "shovel_chunk"
+    assert settings.zvec.chunk_collection == "shovel_chunk"
     assert settings.memory.index_path == profile / "memory" / "shovel_memory"
 
 

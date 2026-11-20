@@ -178,7 +178,7 @@ async def test_baseline_exercises_real_storage_and_distinguishes_model_errors_fr
         assert all(variant["unrelated_queries"] for variant in variants)
         assert all(0 <= variant["unrelated_query_false_positive_rate"] <= 1 for variant in variants)
     encoded = json.dumps(report)
-    assert settings.model.security_key not in encoded
+    assert settings.model.api_key not in encoded
     assert settings.model.base_endpoint not in encoded
     assert str(tmp_path) not in encoded
 

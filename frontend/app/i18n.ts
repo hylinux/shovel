@@ -172,7 +172,6 @@ export const chinese: Readonly<Record<string, string>> = {
   "base_endpoint": "模型端点",
   "model_name": "模型名称",
   "api_version": "API 版本",
-  "security_key": "模型密钥",
   "max_input_chars": "最大输入字符数",
   "max_output_tokens": "最大输出 Token 数",
   "timeout_seconds": "请求超时（秒）",

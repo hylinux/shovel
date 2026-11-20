@@ -12,7 +12,8 @@ from urllib.parse import urlsplit
 import tomli_w
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, ValidationError
 
-from shovel.config.settings import AppSettings, _to_toml_safe, drop_removed_keys
+from shovel.config.errors import ConfigError
+from shovel.config.settings import AppSettings, _to_toml_safe, drop_removed_keys, normalize_chat_api_keys
 from shovel.runtime.errors import RuntimeFailure
 from shovel.runtime.workspace_config import WorkspaceTextFile
 from shovel.services.config_server import shovel_context
@@ -24,7 +25,7 @@ _SECTIONS = {
         "dev_frontend_port http_port frontend_path log_level"
     ),
     "model": (
-        "model_provider_type base_endpoint model_name api_version security_key "
+        "model_provider_type base_endpoint model_name api_version api_key "
         "max_input_chars max_output_tokens timeout_seconds"
     ),
     "agent": "enable_python_extensions max_tool_iterations",
@@ -44,7 +45,7 @@ _SECTIONS = {
         "summary_max_chars history_messages"
     ),
     "memory.llm": (
-        "model_provider_type base_endpoint model_name api_version security_key "
+        "model_provider_type base_endpoint model_name api_version api_key "
         "max_input_chars max_output_tokens timeout_seconds"
     ),
     "memory.embedder": (
@@ -56,9 +57,7 @@ _EDITABLE = {
     f"{section}.{name}" if section else name for section, names in _SECTIONS.items() for name in names.split()
 }
 _FIXED = ("agent.workspace_path", "database.url", "zvec.knowledge_path", "memory.index_path")
-_SECRETS = frozenset(
-    ("model.security_key", "embedding.api_key", "memory.llm.security_key", "memory.embedder.api_key")
-)
+_SECRETS = frozenset(("model.api_key", "embedding.api_key", "memory.llm.api_key", "memory.embedder.api_key"))
 _CHAT_PROVIDERS = ("", "azure_openai", "deepseek", "qianwen", "ollama")
 _EMBEDDING_PROVIDERS = ("", "azure_openai", "qianwen", "ollama")
 
@@ -101,6 +100,8 @@ def _validate_settings(raw: dict[str, Any], *, environment: bool = False) -> App
     drop_removed_keys(data)
     try:
         return AppSettings(**data) if environment else AppSettings.from_file_data(data)
+    except ConfigError as exc:
+        raise RuntimeFailure(exc.message, status=422) from None
     except ValidationError as exc:
         fields = ", ".join(".".join(map(str, error["loc"])) or "configuration" for error in exc.errors())
         raise RuntimeFailure(
@@ -179,6 +180,8 @@ class RuntimeConfigurationService:
                 choices = [*choices, value]  # Preserve existing unverified providers, never relabel them.
             env_key = "SHOVEL_" + key.replace(".", "__").upper()
             prefixes = [env_key]
+            if key in {"model.api_key", "memory.llm.api_key"}:
+                prefixes.append(env_key.removesuffix("API_KEY") + "SECURITY_KEY")
             while "__" in env_key:
                 env_key = env_key.rsplit("__", 1)[0]
                 prefixes.append(env_key)
@@ -230,6 +233,7 @@ class RuntimeConfigurationService:
                 "This Host does not use the fixed profile stores. Edit its configuration locally.",
                 status=409,
             )
+        raw = normalize_chat_api_keys(raw)
         for key, value in body.changes.items():
             if key not in _EDITABLE:
                 _invalid("configuration", "Field is not editable.")

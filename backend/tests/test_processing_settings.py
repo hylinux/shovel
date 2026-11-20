@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+import tomllib
 from pathlib import Path
 
 import pytest
@@ -8,6 +10,7 @@ from pydantic import SecretStr, ValidationError
 from shovel.config.embedding_config import EmbeddingSettings
 from shovel.config.errors import ConfigError
 from shovel.config.metadata import PRODUCT
+from shovel.config.model_settings import DefaultAgentModelSettings
 from shovel.config.settings import AppSettings, load_settings
 from shovel.pipeline.embedder import HttpEmbedder
 from shovel.runtime.schemas import ProfileInput
@@ -28,6 +31,83 @@ def test_environment_overrides_file_but_file_only_load_is_isolated(
     assert file_only.http_port == 8081
     assert file_only.embedding.model == "from-file"
     assert load_settings(config).http_port == 8082
+
+
+@pytest.mark.parametrize("section", ["model", "memory.llm"])
+@pytest.mark.parametrize("spelling", ["api_key", "security_key"])
+def test_chat_api_key_spelling_loads_and_saves_only_canonical_name(
+    tmp_path: Path, section: str, spelling: str
+) -> None:
+    config = tmp_path / "settings.toml"
+    original = (
+        f'[{section}]\nmodel_provider_type = "openai"\nmodel_name = "test-model"\n'
+        f'{spelling} = "test-chat-key"\n'
+    )
+    config.write_text(original, encoding="utf-8")
+    for settings in (AppSettings.load(config), load_settings(config)):
+        model = settings.model if section == "model" else settings.memory.llm
+        assert model.api_key == "test-chat-key"
+        assert "security_key" not in model.model_dump()
+    assert config.read_text(encoding="utf-8") == original
+    settings.save(config, overwrite=True, backup=False)
+    assert "security_key" not in config.read_text(encoding="utf-8")
+    assert AppSettings.load(config) == settings
+
+
+@pytest.mark.parametrize("section", ["model", "memory.llm"])
+@pytest.mark.parametrize(
+    "file_key,env_key",
+    [
+        ("api_key", "SECURITY_KEY"),
+        ("security_key", "API_KEY"),
+        ("api_key", "JSON_SECURITY_KEY"),
+        ("security_key", "JSON_API_KEY"),
+    ],
+)
+def test_chat_api_key_environment_precedence_across_legacy_and_canonical_names(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, section: str, file_key: str, env_key: str
+) -> None:
+    config = tmp_path / "settings.toml"
+    config.write_text(
+        f'[{section}]\nmodel_provider_type = "openai"\nmodel_name = "test-model"\n'
+        f'{file_key} = "file-private"\n',
+        encoding="utf-8",
+    )
+    prefix = "SHOVEL_" + section.replace(".", "__").upper()
+    if env_key.startswith("JSON_"):
+        monkeypatch.setenv(prefix, json.dumps({env_key.removeprefix("JSON_").lower(): "env-private"}))
+    else:
+        monkeypatch.setenv(prefix + "__" + env_key, "env-private")
+    saved = AppSettings.load(config)
+    effective = load_settings(config)
+    assert (saved.model if section == "model" else saved.memory.llm).api_key == "file-private"
+    assert (effective.model if section == "model" else effective.memory.llm).api_key == "env-private"
+
+
+@pytest.mark.parametrize("section", ["model", "memory.llm"])
+@pytest.mark.parametrize("source", ["file", "environment"])
+def test_conflicting_chat_key_names_fail_without_echoing_secrets(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, section: str, source: str
+) -> None:
+    config = tmp_path / "settings.toml"
+    content = f'[{section}]\nmodel_provider_type = "openai"\nmodel_name = "test-model"\n'
+    if source == "file":
+        content += 'api_key = "canonical-private"\nsecurity_key = "legacy-private"\n'
+    else:
+        prefix = "SHOVEL_" + section.replace(".", "__").upper()
+        monkeypatch.setenv(prefix + "__API_KEY", "canonical-private")
+        monkeypatch.setenv(prefix + "__SECURITY_KEY", "legacy-private")
+    config.write_text(content, encoding="utf-8")
+    with pytest.raises(ConfigError, match="conflicts") as error:
+        load_settings(config)
+    assert "private" not in str(error.value)
+    assert config.read_text(encoding="utf-8") == content
+
+
+def test_matching_chat_key_aliases_are_accepted_but_only_api_key_is_serialized() -> None:
+    settings = DefaultAgentModelSettings(api_key="test-key", security_key="test-key")
+    assert settings.api_key == "test-key"
+    assert "security_key" not in settings.model_dump()
 
 
 def test_removed_agent_listener_settings_load_and_are_omitted_when_regenerated(
@@ -152,9 +232,6 @@ def test_profile_rejects_unsupported_or_invalid_pipeline(pipeline: dict[str, obj
 
 
 def test_release_versions_agree() -> None:
-    import json
-    import tomllib
-
     root = Path(__file__).parents[2]
     project = tomllib.loads((root / "pyproject.toml").read_text(encoding="utf-8"))
     frontend = json.loads((root / "frontend" / "package.json").read_text(encoding="utf-8"))

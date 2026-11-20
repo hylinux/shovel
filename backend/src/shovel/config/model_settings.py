@@ -7,8 +7,25 @@
 from __future__ import annotations
 
 from enum import StrEnum
+from typing import Any
 
-from pydantic import BaseModel, Field
+from pydantic import AliasChoices, BaseModel, Field, model_validator
+
+from shovel.config.errors import ConfigError
+
+
+def normalize_legacy_api_key(data: dict[str, Any], *, section: str = "model") -> dict[str, Any]:
+    if "security_key" not in data:
+        return data
+    result = data.copy()
+    legacy = result.pop("security_key")
+    if "api_key" in result and result["api_key"] != legacy:
+        raise ConfigError(
+            f"{section}.api_key conflicts with legacy {section}.security_key. "
+            "Keep one spelling or set matching values."
+        )
+    result["api_key"] = legacy
+    return result
 
 
 class ModelProviderType(StrEnum):
@@ -44,12 +61,17 @@ class DefaultAgentModelSettings(BaseModel):
     base_endpoint: str = ""
     model_name: str = ""
     api_version: str = ""
-    security_key: str = ""
+    api_key: str = Field(default="", validation_alias=AliasChoices("api_key", "security_key"))
     max_input_chars: int = Field(default=24000, ge=2000)
     max_input_images: int = Field(default=5, ge=1, le=20)
     max_input_image_bytes: int = Field(default=10 * 1024 * 1024, ge=1024, le=50 * 1024 * 1024)
     max_output_tokens: int = Field(default=2048, ge=1)
     timeout_seconds: float = Field(default=120, ge=5, le=600)
+
+    @model_validator(mode="before")
+    @classmethod
+    def migrate_legacy_api_key(cls, data: Any) -> Any:
+        return normalize_legacy_api_key(data) if isinstance(data, dict) else data
 
     @property
     def is_configured(self) -> bool:

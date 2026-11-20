@@ -58,7 +58,7 @@ def settings_at(path: Path) -> AppSettings:
                 "model_provider_type": "openai",
                 "base_endpoint": "http://model.invalid/v1",
                 "model_name": "test-model",
-                "security_key": "test-private-key",
+                "api_key": "test-private-key",
             },
         }
     )
@@ -1261,7 +1261,7 @@ async def test_chat_citations_persist_without_memory(
     captured: list[dict[str, Any]] = []
 
     def response(request: httpx.Request) -> httpx.Response:
-        assert request.headers["authorization"] == f"Bearer {runtime.settings.model.security_key}"
+        assert request.headers["authorization"] == f"Bearer {runtime.settings.model.api_key}"
         captured.append(json.loads(request.content))
         return httpx.Response(
             200,

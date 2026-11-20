@@ -5263,7 +5263,7 @@ Operation 恢复和聊天 pending 状态恢复。</p>
 <p><code>[memory.llm]</code> 是独立模型配置对象，不是逐字段继承 <code>[model]</code>。<br>
 一旦要覆盖，至少提供完整的 provider/model，以及该 provider 所需 endpoint、<br>
 API version、凭据等；遗漏的普通字段使用该配置模型自身默认值。<br>
-它使用 <code>model_provider_type</code>、<code>model_name</code>、<code>base_endpoint</code>、<code>security_key</code> 等键，<br>
+它使用 <code>model_provider_type</code>、<code>model_name</code>、<code>base_endpoint</code>、<code>api_key</code> 等键，<br>
 不是旧的 <code>provider/model/base_url/api_key</code> 组合。</p>
 <h3 id="182-memory-参数默认值">18.2 Memory 参数默认值 </h3>
 <table>
@@ -5340,7 +5340,7 @@ API version、凭据等；遗漏的普通字段使用该配置模型自身默认
 <span class="token key property">model_provider_type</span> <span class="token punctuation">=</span> <span class="token string">"ollama"</span>
 <span class="token key property">model_name</span> <span class="token punctuation">=</span> <span class="token string">"shovel-chat-fast"</span>
 <span class="token key property">base_endpoint</span> <span class="token punctuation">=</span> <span class="token string">"http://127.0.0.1:11434"</span>
-<span class="token key property">security_key</span> <span class="token punctuation">=</span> <span class="token string">""</span>
+<span class="token key property">api_key</span> <span class="token punctuation">=</span> <span class="token string">""</span>
 <span class="token key property">max_input_chars</span> <span class="token punctuation">=</span> <span class="token number">16000</span>
 <span class="token key property">max_output_tokens</span> <span class="token punctuation">=</span> <span class="token number">2000</span>
 <span class="token key property">timeout_seconds</span> <span class="token punctuation">=</span> <span class="token number">300</span>
@@ -5362,7 +5362,7 @@ Memory <code>dim</code> 必须匹配 Memory embedder 实际输出，与 RAG 的 
 <h3 id="184-运行时与环境配置">18.4 运行时与环境配置 </h3>
 <p>运行时设置优先级是环境变量高于 TOML、高于默认值。<br>
 环境嵌套示例：<code>SHOVEL_MEMORY__EMBEDDER__API_KEY</code>、<br>
-<code>SHOVEL_MEMORY__LLM__SECURITY_KEY</code>。<br>
+<code>SHOVEL_MEMORY__LLM__API_KEY</code>。<br>
 <code>AppSettings.load()</code> 则有意只读取文件，不能用它验证环境覆盖后的全部运行配置。</p>
 <p>provider、路径或模型版本变更通常需要重启 Host；<br>
 仅重启主 Agent 不会重建 Runtime 的独立 Memory 客户端和配置。<br>

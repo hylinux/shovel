@@ -1,4 +1,5 @@
 import asyncio
+import time
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
@@ -12,6 +13,7 @@ from azure.identity import CredentialUnavailableError
 from shovel.config.model_settings import DefaultAgentModelSettings
 from shovel.runtime.agent import create_framework_client
 from shovel.runtime.errors import RuntimeFailure
+from shovel.services.health import HealthStatus, check_model
 from test_agent_extensions import completion
 
 
@@ -37,6 +39,107 @@ def azure_settings(**overrides):
             **overrides,
         }
     )
+
+
+@pytest.fixture
+def health_probe(monkeypatch):
+    from shovel.runtime.azure_auth import AzureCliOpenAIClient
+
+    response = Mock(return_value=httpx.Response(200, json={"object": "list", "data": []}))
+
+    def client(**kwargs):
+        return AzureCliOpenAIClient(
+            http_client=httpx.AsyncClient(transport=httpx.MockTransport(response)), **kwargs
+        )
+
+    monkeypatch.setattr("shovel.runtime.azure_auth.AzureCliOpenAIClient", client)
+    monkeypatch.setattr(
+        httpx, "get", Mock(side_effect=AssertionError("Azure CLI health must not use anonymous HTTP."))
+    )
+    return response
+
+
+def test_model_health_azure_cli_sends_bearer_token_and_closes_credential(credential, health_probe):
+    value, _ = credential
+    value.get_token.return_value = AccessToken("test-health-token", int(time.time()) + 3600)
+    result = check_model(azure_settings())
+    assert result.status is HealthStatus.OK
+    health_probe.assert_called_once()
+    request = health_probe.call_args.args[0]
+    assert request.method == "GET"
+    assert request.url.path == "/openai/models"
+    assert request.url.params["api-version"] == "2025-04-01-preview"
+    assert request.headers["authorization"] == "Bearer test-health-token"
+    assert "api-key" not in request.headers
+    value.close.assert_awaited_once()
+
+
+def test_model_health_cli_login_failure_is_not_reported_as_missing_api_key(credential, health_probe):
+    value, _ = credential
+    value.get_token.side_effect = CredentialUnavailableError("private credential failure details")
+    result = check_model(azure_settings())
+    assert result.status is HealthStatus.FAILED
+    assert "az login" in result.detail
+    assert "model.api_key" not in result.detail
+    assert "private credential failure details" not in result.detail
+    health_probe.assert_not_called()
+    value.close.assert_awaited_once()
+
+
+@pytest.mark.parametrize("status", [401, 403])
+def test_model_health_cli_rejection_reports_azure_access_without_leaking_response(
+    credential, health_probe, status
+):
+    value, _ = credential
+    value.get_token.return_value = AccessToken("test-health-token", int(time.time()) + 3600)
+    health_probe.return_value = httpx.Response(
+        status, json={"error": {"message": "private provider failure details"}}
+    )
+    result = check_model(azure_settings())
+    assert result.status is HealthStatus.FAILED
+    assert "Azure CLI" in result.detail and str(status) in result.detail
+    assert "model.api_key" not in result.detail
+    assert "private provider failure details" not in result.detail
+    assert "test-health-token" not in result.detail
+    health_probe.assert_called_once()
+    value.close.assert_awaited_once()
+
+
+@pytest.mark.parametrize("status", [200, 401])
+def test_model_health_explicit_key_does_not_use_cli(credential, monkeypatch, status):
+    _, factory = credential
+    get = Mock(return_value=httpx.Response(status))
+    monkeypatch.setattr(httpx, "get", get)
+    result = check_model(azure_settings(api_key="test-api-key"))
+    assert result.status is (HealthStatus.OK if status == 200 else HealthStatus.FAILED)
+    assert get.call_args.kwargs["headers"] == {"api-key": "test-api-key"}
+    if status == 401:
+        assert "model.api_key" in result.detail
+    factory.assert_not_called()
+
+
+def test_model_health_requires_azure_api_version_before_network(credential, monkeypatch):
+    _, factory = credential
+    get = Mock()
+    monkeypatch.setattr(httpx, "get", get)
+    result = check_model(azure_settings(api_version=""))
+    assert result.status is HealthStatus.FAILED
+    assert "model.api_version" in result.detail
+    get.assert_not_called()
+    factory.assert_not_called()
+
+
+def test_model_health_rejects_static_token_in_cli_mode(credential, monkeypatch):
+    _, factory = credential
+    monkeypatch.setenv("AZURE_OPENAI_AD_TOKEN", "private-static-token")
+    get = Mock()
+    monkeypatch.setattr(httpx, "get", get)
+    result = check_model(azure_settings())
+    assert result.status is HealthStatus.FAILED
+    assert "AZURE_OPENAI_AD_TOKEN" in result.detail
+    assert "private-static-token" not in result.detail
+    get.assert_not_called()
+    factory.assert_not_called()
 
 
 async def test_azure_cli_authentication_is_lazy_cached_and_refreshes_before_expiry(credential, monkeypatch):
@@ -93,7 +196,7 @@ async def test_explicit_azure_api_key_preserves_authentication_without_cli(crede
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(model)) as http:
         sdk, client = create_framework_client(
-            azure_settings(model_provider_type=provider, security_key="test-api-key"),
+            azure_settings(model_provider_type=provider, api_key="test-api-key"),
             http,
             max_iterations=3,
         )
@@ -104,6 +207,29 @@ async def test_explicit_azure_api_key_preserves_authentication_without_cli(crede
     factory.assert_not_called()
     value.get_token.assert_not_awaited()
     value.close.assert_not_awaited()
+
+
+@pytest.mark.parametrize("provider", ["openai", "deepseek", "qianwen"])
+async def test_canonical_api_key_authenticates_openai_compatible_chat(credential, provider):
+    _, factory = credential
+
+    def model(request):
+        assert request.headers["authorization"] == "Bearer test-chat-api-key"
+        return completion(content="API key response.")
+
+    settings = DefaultAgentModelSettings(
+        model_provider_type=provider,
+        base_endpoint="https://chat.example.test/v1",
+        model_name="test-model",
+        api_key="test-chat-api-key",
+    )
+    async with httpx.AsyncClient(transport=httpx.MockTransport(model)) as http:
+        sdk, client = create_framework_client(settings, http, max_iterations=3)
+        try:
+            assert (await client.get_response("Use the configured API key.")).text == "API key response."
+        finally:
+            await sdk.close()
+    factory.assert_not_called()
 
 
 @pytest.mark.parametrize("error", [CredentialUnavailableError, ClientAuthenticationError])

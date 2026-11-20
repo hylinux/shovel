@@ -274,7 +274,7 @@ def create_framework_client(
         http_client.event_hooks["request"].append(_guard_model_request)
     endpoint = model_endpoint(settings)
     common: dict[str, Any] = {
-        "api_key": settings.security_key or "local-no-key",
+        "api_key": settings.api_key or "local-no-key",
         "http_client": http_client,
         "timeout": settings.timeout_seconds,
         "max_retries": 0,
@@ -283,7 +283,7 @@ def create_framework_client(
         if not settings.api_version:
             raise RuntimeFailure("Azure 对话模型需要 api_version。", status=503)
         sdk: AsyncOpenAI
-        if settings.model_provider_type == ModelProviderType.AZUREOPENAI and not settings.security_key:
+        if settings.model_provider_type == ModelProviderType.AZUREOPENAI and not settings.api_key:
             common["api_key"] = None
             sdk = AzureCliOpenAIClient(**common, azure_endpoint=endpoint, api_version=settings.api_version)
         else:

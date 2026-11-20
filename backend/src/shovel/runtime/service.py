@@ -252,9 +252,9 @@ class Runtime:
 
     def redact(self, message: str) -> str:
         keys = (
-            self.settings.model.security_key,
+            self.settings.model.api_key,
             self.settings.embedding.api_key.get_secret_value(),
-            self.settings.memory.llm.security_key,
+            self.settings.memory.llm.api_key,
             self.settings.memory.embedder.api_key.get_secret_value(),
         )
         for key in keys:

@@ -33,14 +33,14 @@ def configuration(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> RuntimeCon
                 "llm": {
                     "model_provider_type": "deepseek",
                     "model_name": "memory-chat",
-                    "security_key": "memory-chat-private",
+                    "api_key": "memory-chat-private",
                 },
                 "review_required": True,
             },
             "model": {
                 "model_provider_type": "deepseek",
                 "model_name": "deepseek-chat",
-                "security_key": "chat-private",
+                "api_key": "chat-private",
                 "max_input_images": 7,
             },
             "embedding": {"api_key": "vector-private"},
@@ -192,7 +192,7 @@ def test_disallowed_paths_and_sections_cannot_be_written(
         ({"model.base_endpoint": "https://example.test:not-a-port"}, "model.base_endpoint"),
         ({"embedding.timeout_seconds": float("inf")}, "embedding.timeout_seconds"),
         ({"memory.collection": " "}, "memory.collection"),
-        ({"model.security_key": "**********"}, "model.security_key"),
+        ({"model.api_key": "**********"}, "model.api_key"),
     ],
 )
 def test_invalid_fields_never_write_or_echo_inputs(
@@ -209,7 +209,7 @@ def test_invalid_fields_never_write_or_echo_inputs(
 
 @pytest.mark.parametrize("section", ["model", "memory.llm", "embedding", "memory.embedder"])
 def test_secret_keep_replace_and_clear(configuration: RuntimeConfigurationService, section: str) -> None:
-    key = f"{section}.{'security_key' if section in {'model', 'memory.llm'} else 'api_key'}"
+    key = f"{section}.api_key"
     save(configuration, {"log_level": "DEBUG"})
     assert next(item for item in configuration.read()["items"] if item["key"] == key)["configured"]
     replaced = save(configuration, {key: "replacement-private"})
@@ -218,6 +218,54 @@ def test_secret_keep_replace_and_clear(configuration: RuntimeConfigurationServic
     cleared = save(configuration, {key: ""})
     item = next(item for item in cleared["items"] if item["key"] == key)
     assert not item["configured"] and item["value"] is None
+
+
+def test_editor_migrates_legacy_chat_keys_without_exposing_or_losing_secrets(
+    configuration: RuntimeConfigurationService,
+) -> None:
+    raw = tomllib.loads(configuration.file.path.read_text())
+    for model in (raw["model"], raw["memory"]["llm"]):
+        model["security_key"] = model.pop("api_key")
+    configuration.file.path.write_text(tomli_w.dumps(raw))
+    before = configuration.file.path.read_bytes()
+    view = configuration.read()
+    assert view["applied"] and "private" not in json.dumps(view)
+    assert configuration.file.path.read_bytes() == before
+    assert all(item["secret"] for item in view["items"] if item["key"].endswith(".api_key"))
+    result = save(configuration, {"model.api_key": "replacement-private", "memory.llm.api_key": ""})
+    assert "private" not in json.dumps(result)
+    saved = tomllib.loads(configuration.file.path.read_text())
+    assert saved["model"]["api_key"] == "replacement-private"
+    assert saved["memory"]["llm"]["api_key"] == ""
+    assert "security_key" not in saved["model"] and "security_key" not in saved["memory"]["llm"]
+
+
+@pytest.mark.parametrize("section", ["model", "memory.llm"])
+def test_editor_reports_legacy_key_environment_overrides_on_canonical_fields(
+    configuration: RuntimeConfigurationService, monkeypatch: pytest.MonkeyPatch, section: str
+) -> None:
+    env_key = "SHOVEL_" + section.replace(".", "__").upper() + "__SECURITY_KEY"
+    monkeypatch.setenv(env_key, "environment-private")
+    view = configuration.read()
+    field = next(item for item in view["items"] if item["key"] == f"{section}.api_key")
+    assert field["environment"] == [env_key]
+    assert field["pending"] and field["effective_configured"] and field["effective_value"] is None
+    assert "private" not in json.dumps(view)
+    restarted = RuntimeConfigurationService(load_settings(configuration.file.path))
+    assert restarted.read()["applied"]
+
+
+def test_editor_rejects_conflicting_legacy_keys_without_echoing_values(
+    configuration: RuntimeConfigurationService,
+) -> None:
+    raw = tomllib.loads(configuration.file.path.read_text())
+    raw["model"]["security_key"] = "conflicting-private"
+    configuration.file.path.write_text(tomli_w.dumps(raw))
+    before = configuration.file.path.read_bytes()
+    with pytest.raises(RuntimeFailure, match="conflicts") as error:
+        configuration.read()
+    assert error.value.status == 422 and "private" not in str(error.value)
+    assert configuration.file.path.read_bytes() == before
 
 
 @pytest.mark.parametrize("section", ["model", "memory.llm"])
@@ -231,7 +279,7 @@ def test_chat_provider_configuration(
             {
                 f"{section}.base_endpoint": "https://resource.openai.azure.com",
                 f"{section}.api_version": "2025-04-01-preview",
-                f"{section}.security_key": "",
+                f"{section}.api_key": "",
             }
         )
     result = save(configuration, changes)
@@ -275,7 +323,7 @@ def test_provider_specific_errors_and_optional_dimensions(configuration: Runtime
 def test_environment_source_and_actual_application_are_distinct(
     configuration: RuntimeConfigurationService, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setenv("SHOVEL_MODEL", '{"security_key":"environment-private"}')
+    monkeypatch.setenv("SHOVEL_MODEL", '{"api_key":"environment-private"}')
     monkeypatch.setenv("SHOVEL_PERFORMANCE__MAX_CONCURRENT_SCANS", "12")
     saved = save(configuration, {"performance.max_concurrent_scans": 8})
     item = next(item for item in saved["items"] if item["key"] == "performance.max_concurrent_scans")
@@ -286,9 +334,7 @@ def test_environment_source_and_actual_application_are_distinct(
     assert restarted.read()["applied"]
     assert (
         "SHOVEL_MODEL"
-        in next(item for item in restarted.read()["items"] if item["key"] == "model.security_key")[
-            "environment"
-        ]
+        in next(item for item in restarted.read()["items"] if item["key"] == "model.api_key")["environment"]
     )
 
 

@@ -15,7 +15,7 @@ base_endpoint = "http://127.0.0.1:11434"
 model_name = "shovel-chat-fast"
 max_input_chars = 48000
 max_output_tokens = 32000
-security_key = ""
+api_key = ""
 api_version = ""
 timeout_seconds = 300
 
@@ -85,7 +85,7 @@ model_provider_type = "ollama"
 base_endpoint = "http://127.0.0.1:11434"
 model_name = "shovel-chat-fast"
 api_version = ""
-security_key = ""
+api_key = ""
 max_input_chars = 24000
 max_output_tokens = 2048
 timeout_seconds = 120

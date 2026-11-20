@@ -1162,7 +1162,7 @@ P3 的 `memory_experience` 是待审观察及回执，不是 NativeMemory 或业
 `[memory.llm]` 是独立模型配置对象，不是逐字段继承 `[model]`。
 一旦要覆盖，至少提供完整的 provider/model，以及该 provider 所需 endpoint、
 API version、凭据等；遗漏的普通字段使用该配置模型自身默认值。
-它使用 `model_provider_type`、`model_name`、`base_endpoint`、`security_key` 等键，
+它使用 `model_provider_type`、`model_name`、`base_endpoint`、`api_key` 等键，
 不是旧的 `provider/model/base_url/api_key` 组合。
 
 ### 18.2 Memory 参数默认值
@@ -1204,7 +1204,7 @@ summary_max_chars = 2000
 model_provider_type = "ollama"
 model_name = "shovel-chat-fast"
 base_endpoint = "http://127.0.0.1:11434"
-security_key = ""
+api_key = ""
 max_input_chars = 16000
 max_output_tokens = 2000
 timeout_seconds = 300
@@ -1231,7 +1231,7 @@ Memory `dim` 必须匹配 Memory embedder 实际输出，与 RAG 的 `zvec.dim` 
 
 运行时设置优先级是环境变量高于 TOML、高于默认值。
 环境嵌套示例：`SHOVEL_MEMORY__EMBEDDER__API_KEY`、
-`SHOVEL_MEMORY__LLM__SECURITY_KEY`。
+`SHOVEL_MEMORY__LLM__API_KEY`。
 `AppSettings.load()` 则有意只读取文件，不能用它验证环境覆盖后的全部运行配置。
 
 provider、路径或模型版本变更通常需要重启 Host；

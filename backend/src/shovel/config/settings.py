@@ -17,6 +17,7 @@ from typing import Any
 
 import tomli_w
 from pydantic import Field, SecretStr, ValidationError
+from pydantic.fields import FieldInfo
 from pydantic_settings import BaseSettings, PydanticBaseSettingsSource, SettingsConfigDict
 
 from .agent_config import AgentSettings
@@ -29,7 +30,7 @@ from .errors import (
     format_validation_error,
 )
 from .memory_config import MemorySettings
-from .model_settings import DefaultAgentModelSettings
+from .model_settings import DefaultAgentModelSettings, normalize_legacy_api_key
 from .performance_config import PerformanceSettings
 from .platform_config import PlatformSettings
 from .zvec_config import ZvecSettings
@@ -130,6 +131,32 @@ def drop_removed_keys(data: dict[str, Any]) -> list[str]:
     return dropped
 
 
+def normalize_chat_api_keys(data: dict[str, Any]) -> dict[str, Any]:
+    result = data.copy()
+    if isinstance(model := data.get("model"), dict):
+        result["model"] = normalize_legacy_api_key(model, section="model")
+    if isinstance(memory := data.get("memory"), dict) and isinstance(llm := memory.get("llm"), dict):
+        result["memory"] = {
+            **memory,
+            "llm": normalize_legacy_api_key(llm, section="memory.llm"),
+        }
+    return result
+
+
+class _CanonicalChatKeySource(PydanticBaseSettingsSource):
+    """Normalize each source before merging so legacy environment keys retain precedence."""
+
+    def __init__(self, source: PydanticBaseSettingsSource) -> None:
+        super().__init__(source.settings_cls)
+        self.source = source
+
+    def get_field_value(self, field: FieldInfo, field_name: str) -> tuple[Any, str, bool]:
+        return self.source.get_field_value(field, field_name)
+
+    def __call__(self) -> dict[str, Any]:
+        return normalize_chat_api_keys(self.source())
+
+
 # ================================================================
 # AppSettings
 # ================================================================
@@ -180,8 +207,11 @@ class AppSettings(BaseSettings):
         file_secret_settings: PydanticBaseSettingsSource,
     ) -> tuple[PydanticBaseSettingsSource, ...]:
         if not _READ_ENVIRONMENT.get():
-            return (init_settings,)
-        return env_settings, init_settings, dotenv_settings, file_secret_settings
+            return (_CanonicalChatKeySource(init_settings),)
+        return tuple(
+            _CanonicalChatKeySource(source)
+            for source in (env_settings, init_settings, dotenv_settings, file_secret_settings)
+        )
 
     # ------------------------------------------------------------
     # 读

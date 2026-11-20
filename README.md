@@ -85,10 +85,23 @@ Memory collection name. Blank keys are allowed; Azure blank keys select
 non-interactive Azure CLI authentication, not an interactive login. Azure
 requires an API version; other providers may leave it empty.
 
+The hidden chat API-key input is saved as `model.api_key`. The final
+read-only model-list health check also uses Azure CLI authentication when this
+key is empty; it does not send an inference request or launch interactive login.
+
+Chat and Memory LLM use `api_key`, matching embedding configuration. Legacy
+`security_key` fields and `SHOVEL_MODEL__SECURITY_KEY` /
+`SHOVEL_MEMORY__LLM__SECURITY_KEY` environment overrides remain readable.
+Newly generated or editor-saved files use `api_key`; loading alone does not
+rewrite a file. Conflicting old/new names in the same source are rejected
+without printing their values. Environment overrides still take precedence
+over file settings regardless of which spelling is used.
+
 Knowledge and Memory names accept only ASCII letters, digits and underscores
 (not reserved filenames). Their stores are created under
-`~/.shovel/knowledge/<name>` and `~/.shovel/memory/<name>`. Embedding dimensions
-default to 1024 and set both index dimensions. Ollama must produce the chosen
+`~/.shovel/knowledge/<name>` and `~/.shovel/memory/<name>`. The knowledge name
+also sets `zvec.chunk_collection`. Embedding dimensions default to 1024 and set
+both index dimensions. Ollama must produce the chosen
 dimension natively; its unsupported `dimensions` request parameter is omitted.
 Memory receives independent copies of the chat and embedding settings.
 
@@ -481,7 +494,7 @@ them and may charge for calls.
 See the [complete Azure OpenAI configuration reference](Documents/azure_openai_configuration.md)
 for chat, Memory, embedding model selection, authentication, and index migration.
 
-For `azure_openai`, an empty `security_key` selects Azure CLI authentication.
+For `azure_openai`, an empty `api_key` selects Azure CLI authentication.
 Shovel uses the asynchronous `AzureCliCredential` and a cached bearer-token
 provider that refreshes tokens before expiry. Credentials are acquired lazily
 on model requests; startup does not sign in or run inference.
@@ -492,7 +505,7 @@ model_provider_type = "azure_openai"
 base_endpoint = "https://YOUR-RESOURCE.openai.azure.com"
 model_name = "YOUR-DEPLOYMENT-NAME"
 api_version = "2025-04-01-preview"
-security_key = ""
+api_key = ""
 max_input_chars = 160000
 max_output_tokens = 1024
 timeout_seconds = 300
@@ -518,10 +531,10 @@ does not bypass resource networking rules or enterprise egress policy.
 CLI login failures are reported explicitly; Shovel does not launch interactive
 login or silently fall back to an API key.
 
-A non-empty `security_key` preserves API-key authentication. Environment
-overrides such as `SHOVEL_MODEL__SECURITY_KEY` take precedence over the empty
+A non-empty `api_key` preserves API-key authentication. Environment
+overrides such as `SHOVEL_MODEL__API_KEY` take precedence over the empty
 TOML value, so unset them when choosing CLI authentication. Do not supply a
-manually acquired access token as `security_key` or `AZURE_OPENAI_AD_TOKEN`;
+manually acquired access token as `api_key` or `AZURE_OPENAI_AD_TOKEN`;
 let the provider acquire and refresh tokens. CLI mode rejects a configured
 `AZURE_OPENAI_AD_TOKEN` rather than letting a static token bypass renewal.
 The generic `AZURE_OPENAI_ENDPOINT`, `AZURE_OPENAI_MODEL`, and

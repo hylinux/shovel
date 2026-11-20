@@ -9,7 +9,7 @@ import { configurationChanges, configurationDirty, configurationDraft } from "..
 const require = createRequire(import.meta.url);
 const fields = [
   { key: "http_port", section: "", type: "number", value: 8080, active_value: 8080 },
-  { key: "model.security_key", section: "model", type: "string", secret: true, value: null, configured: true },
+  { key: "model.api_key", section: "model", type: "string", secret: true, value: null, configured: true },
   { key: "agent.enable_python_extensions", section: "agent", type: "boolean", value: false },
   { key: "agent.workspace_path", section: "agent", type: "string", value: "fixed-workspace", readonly: true },
   { key: "embedding.dimensions", section: "embedding", type: "number", value: null, nullable: true },
@@ -80,15 +80,15 @@ test("Only changed allowlisted scalar values are sent, with distinct secret keep
   assert.deepEqual(configurationChanges(fields, draft, {}), {
     http_port: 8081, "agent.enable_python_extensions": true, "embedding.dimensions": 1024,
   });
-  draft["model.security_key"] = "new-secret";
-  assert.equal(configurationChanges(fields, draft, { "model.security_key": "replace" })["model.security_key"], "new-secret");
-  assert.equal(configurationChanges(fields, draft, { "model.security_key": "clear" })["model.security_key"], "");
-  assert.equal(configurationChanges(fields, draft, { "model.security_key": "keep" })["model.security_key"], undefined);
+  draft["model.api_key"] = "new-secret";
+  assert.equal(configurationChanges(fields, draft, { "model.api_key": "replace" })["model.api_key"], "new-secret");
+  assert.equal(configurationChanges(fields, draft, { "model.api_key": "clear" })["model.api_key"], "");
+  assert.equal(configurationChanges(fields, draft, { "model.api_key": "keep" })["model.api_key"], undefined);
 });
 
 test("Empty replacement and invalid numeric drafts cannot be converted into silent resets", () => {
   const draft = configurationDraft(fields);
-  assert.throws(() => configurationChanges(fields, draft, { "model.security_key": "replace" }), /replacement/);
+  assert.throws(() => configurationChanges(fields, draft, { "model.api_key": "replace" }), /replacement/);
   for (const value of ["", " ", "NaN", "Infinity"]) {
     draft.http_port = value;
     assert.throws(() => configurationChanges(fields, draft, {}), /valid number/);
@@ -118,7 +118,7 @@ test("Edits survive language changes; save uses the loaded revision without repl
 
 test("Explicit secret replacement uses a password input and clears browser drafts after save", async () => {
   const ui = harness();
-  const key = "model.security_key";
+  const key = "model.api_key";
   field(ui, key).props.onChange({ target: { value: "replace" } });
   const input = ui.render().find(node => node.props.id === `runtime-${key}-replacement`);
   assert.equal(input.props.type, "password");

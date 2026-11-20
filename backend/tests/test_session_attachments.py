@@ -61,7 +61,7 @@ async def runtime(tmp_path: Path) -> AsyncIterator[Runtime]:
                 "model_provider_type": "openai",
                 "base_endpoint": "http://model.invalid/v1",
                 "model_name": "test-model",
-                "security_key": "test-key",
+                "api_key": "test-key",
             },
         }
     )

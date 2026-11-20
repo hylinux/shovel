@@ -447,7 +447,7 @@ async def test_compatible_memory_extractor_accepts_empty_facts_and_plain_text_su
     settings = MemoryModelSettings(
         model_provider_type=provider,
         model_name="memory-model",
-        security_key="test-memory-key",
+        api_key="test-memory-key",
     )
     extractor = AgentFrameworkMemoryExtractor(settings, lambda: httpx.MockTransport(respond))
     try:
@@ -504,7 +504,7 @@ async def test_compatible_memory_extractor_rejects_invalid_output(provider: str,
     settings = MemoryModelSettings(
         model_provider_type=provider,
         model_name="memory-model",
-        security_key="test-memory-key",
+        api_key="test-memory-key",
     )
     extractor = AgentFrameworkMemoryExtractor(settings, lambda: httpx.MockTransport(respond))
     try:
@@ -538,7 +538,7 @@ async def test_compatible_memory_extractor_budgets_schema_instructions_before_re
     settings = MemoryModelSettings(
         model_provider_type="deepseek",
         model_name="memory-model",
-        security_key="test-memory-key",
+        api_key="test-memory-key",
         max_input_chars=limit,
     )
     extractor = AgentFrameworkMemoryExtractor(settings, lambda: httpx.MockTransport(forbidden))
@@ -2033,7 +2033,7 @@ async def test_maf_chat_to_native_memory_to_another_session(
         if provider == "qianwen":
             assert body["enable_thinking"] is False
         if provider == "azure_openai":
-            assert request.headers["api-key"] == runtime.settings.model.security_key
+            assert request.headers["api-key"] == runtime.settings.model.api_key
             assert request.url.params["api-version"] == "2024-10-21"
         output = {
             "candidates": [

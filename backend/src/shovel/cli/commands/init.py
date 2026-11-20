@@ -114,7 +114,10 @@ def _initial_settings(*, interactive: bool) -> AppSettings:
         name = _prompt_required("Model name / deployment")
         version = _prompt_api_version("Model API version (empty for non-Azure providers)", provider)
         key: str = typer.prompt(
-            "Model API key (may be empty)", default="", hide_input=True, show_default=False
+            "Model API key (model.api_key; may be empty)",
+            default="",
+            hide_input=True,
+            show_default=False,
         )
         model = DefaultAgentModelSettings.model_validate(
             {
@@ -123,7 +126,7 @@ def _initial_settings(*, interactive: bool) -> AppSettings:
                 "base_endpoint": endpoint,
                 "model_name": name,
                 "api_version": version,
-                "security_key": key,
+                "api_key": key,
             }
         )
         knowledge_name = _prompt_store_name("Knowledge name", knowledge_name)
@@ -168,6 +171,7 @@ def _initial_settings(*, interactive: bool) -> AppSettings:
             "performance": {"max_local_model_requests": 3},
             "zvec": {
                 "knowledge_path": str(cli_context.get_default_knowledge_dir() / knowledge_name),
+                "chunk_collection": knowledge_name,
                 "dim": dimension,
             },
             "embedding": embedding.model_dump(mode="python"),

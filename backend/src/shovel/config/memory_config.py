@@ -20,7 +20,7 @@ class MemoryModelSettings(DefaultAgentModelSettings):
                 (
                     self.model_provider_type,
                     self.model_name,
-                    self.security_key,
+                    self.api_key,
                     self.base_endpoint,
                     self.api_version,
                 )

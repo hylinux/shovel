@@ -11,6 +11,7 @@ from typer.testing import CliRunner
 from shovel.cli import app
 from shovel.cli.commands import init as init_command
 from shovel.config.settings import AppSettings
+from shovel.runtime.agent import model_endpoint
 from shovel.services.health import HealthResult, HealthStatus
 from shovel.vector.store import init_vector_store, open_collection
 
@@ -120,6 +121,7 @@ def test_init_wizard_persists_inputs_defaults_and_independent_memory_copies(
         ("2", "openai", "2", "openai"),
         ("3", "deepseek", "3", "qianwen"),
         ("4", "qianwen", "4", "ollama"),
+        ("5", "ollama", "4", "ollama"),
     ],
 )
 def test_init_provider_choices_optional_keys_and_dimension_override(
@@ -130,6 +132,10 @@ def test_init_provider_choices_optional_keys_and_dimension_override(
         ["init"],
         input=_answers(
             model_provider=model_choice,
+            model_endpoint="http://127.0.0.1:11434"
+            if model_provider == "ollama"
+            else "https://chat.example.test",
+            model_name="shovel-chat-fast" if model_provider == "ollama" else "chat-deployment",
             model_version="2025-04-01-preview" if model_provider == "azure_openai" else "",
             embedding_provider=embedding_choice,
             embedding_version="2025-04-01-preview" if embedding_provider == "azure_openai" else "",
@@ -150,6 +156,13 @@ def test_init_provider_choices_optional_keys_and_dimension_override(
         assert raw["embedding"]["dimensions"] == raw["memory"]["embedder"]["dimensions"] == 3072
     assert raw["model"] == raw["memory"]["llm"]
     assert raw["embedding"] == raw["memory"]["embedder"]
+    if model_provider == "ollama":
+        settings = AppSettings.load(profile / "config" / "settings.toml")
+        assert settings.model.base_endpoint == "http://127.0.0.1:11434"
+        assert settings.model.model_name == settings.memory.llm.model_name == "shovel-chat-fast"
+        assert settings.model.api_version == settings.memory.llm.api_version == ""
+        assert model_endpoint(settings.model) == "http://127.0.0.1:11434/v1"
+        assert model_endpoint(settings.memory.llm) == "http://127.0.0.1:11434/v1"
 
 
 def test_init_reprompts_invalid_choices_endpoints_names_dimensions_and_azure_versions(profile: Path) -> None:
@@ -157,7 +170,7 @@ def test_init_reprompts_invalid_choices_endpoints_names_dimensions_and_azure_ver
         app,
         ["init"],
         input=_answers(
-            model_provider="0\nnot-a-number\n5\n1",
+            model_provider="0\nnot-a-number\n6\n1",
             model_endpoint=(
                 "   \nnot-a-url\nhttps://chat.example.test:invalid\n"
                 "https://user:password@chat.example.test\n"

@@ -42,6 +42,7 @@ _MODEL_PROVIDERS = (
     ("OpenAI", "openai"),
     ("DeepSeek", "deepseek"),
     ("Qianwen", "qianwen"),
+    ("Ollama", "ollama"),
 )
 _EMBEDDING_PROVIDERS = (
     ("Azure OpenAI", "azure_openai"),

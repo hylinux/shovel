@@ -106,12 +106,16 @@ profile; automatic `--persist-root` is Windows-only. No machine-level variable i
 written. A running Host keeps its original root and actual configuration file.
 
 On first run, `shovel init` then asks for the chat provider (Azure OpenAI, OpenAI,
-DeepSeek or Qianwen), endpoint, model/deployment, API version and hidden API key;
+DeepSeek, Qianwen or Ollama), endpoint, model/deployment, API version and hidden API key;
 then the knowledge name, embedding provider (Azure OpenAI, OpenAI, Qianwen or
 Ollama), endpoint, model/deployment, dimensions, hidden API key, API version and
 Memory collection name. Blank keys are allowed; Azure blank keys select
 non-interactive Azure CLI authentication, not an interactive login. Azure
 requires an API version; other providers may leave it empty.
+
+For local Ollama chat, enter `http://127.0.0.1:11434` and your installed model
+(for example `shovel-chat-fast`); API version and API key can both be empty.
+The runtime adds `/v1` for its OpenAI-compatible chat client.
 
 The hidden chat API-key input is saved as `model.api_key`. The final
 read-only model-list health check also uses Azure CLI authentication when this

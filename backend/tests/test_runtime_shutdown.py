@@ -19,7 +19,9 @@ import typer
 from py_generic_host.hosting.host import HostOptions
 from py_generic_host.hosting.lifetime import ApplicationLifetime
 from py_generic_host.hosting.stop_reason import StopReason
+from typer.testing import CliRunner
 
+from shovel.cli import app
 from shovel.cli.commands import run as run_module
 from shovel.config.embedding_config import EmbeddingSettings
 from shovel.pipeline.sink import ZvecChunkSink, open_chunk_sink
@@ -474,6 +476,94 @@ async def test_cancelled_npm_install_terminates_process_tree_and_closes_job(
     close_job.assert_called_once_with(456)
     assert spawn.call_args.args == ("npm.cmd", "ci")
     assert spawn.call_args.kwargs["creationflags"] & 4
+
+
+@pytest.mark.parametrize("subcommand", [[], ["prd"]])
+@pytest.mark.parametrize("asset_source", ["override", "configured", "packaged", "source"])
+@pytest.mark.parametrize("exit_code", [0, 7])
+def test_default_run_matches_production_and_resolves_assets_without_npm(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    subcommand: list[str],
+    asset_source: str,
+    exit_code: int,
+) -> None:
+    settings = settings_at(tmp_path)
+    package = tmp_path / "site-packages" / "shovel"
+    monkeypatch.setattr(run_module, "__file__", str(package / "cli" / "commands" / "run.py"))
+    packaged = package / "static"
+    source = tmp_path / "checkout" / "frontend"
+    configured = tmp_path / "configured"
+    override = tmp_path / "override"
+    expected = {
+        "override": override,
+        "configured": configured,
+        "packaged": packaged,
+        "source": source / "out",
+    }[asset_source]
+    if asset_source != "source":
+        packaged.mkdir(parents=True)
+        (packaged / "index.html").write_text("bundled frontend", encoding="utf-8")
+    expected.mkdir(parents=True, exist_ok=True)
+    (expected / "index.html").write_text("selected frontend", encoding="utf-8")
+    if asset_source in {"override", "configured"}:
+        settings.frontend_path = str(configured)
+    directory = Mock(return_value=source)
+    host = Mock(run_async=AsyncMock(), exit_code=exit_code)
+    build = Mock(return_value=host)
+    dependencies = AsyncMock(side_effect=AssertionError("Production must not install npm packages."))
+    spawn = AsyncMock(side_effect=AssertionError("Production must not launch Node.js or npm."))
+    monkeypatch.setattr(run_module, "_load_settings_or_exit", lambda: settings)
+    monkeypatch.setattr(run_module, "_resolve_frontend_dir", directory)
+    monkeypatch.setattr(run_module, "build_host", build)
+    monkeypatch.setattr(run_module, "_ensure_frontend_dependencies", dependencies)
+    monkeypatch.setattr(run_module.asyncio, "create_subprocess_exec", spawn)
+    unrelated = tmp_path / "unrelated"
+    unrelated.mkdir()
+    monkeypatch.chdir(unrelated)
+    arguments = ["run", *subcommand]
+    if asset_source == "override":
+        arguments.extend(["--frontend-dir", str(override)])
+    result = CliRunner().invoke(app, arguments)
+    assert result.exit_code == exit_code, result.output
+    build.assert_called_once_with(settings, development=False, frontend=expected)
+    host.run_async.assert_awaited_once()
+    assert directory.call_count == int(asset_source == "source")
+    dependencies.assert_not_awaited()
+    spawn.assert_not_awaited()
+
+
+@pytest.mark.parametrize("arguments", [["run", "--help"], ["run", "prd", "--help"]])
+def test_run_help_does_not_start_production(monkeypatch: pytest.MonkeyPatch, arguments: list[str]) -> None:
+    load = Mock(side_effect=AssertionError("Help must not load runtime configuration."))
+    monkeypatch.setattr(run_module, "_load_settings_or_exit", load)
+    result = CliRunner().invoke(app, arguments)
+    assert result.exit_code == 0, result.output
+    load.assert_not_called()
+
+
+def test_explicit_run_dev_does_not_invoke_default_production(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    development = AsyncMock()
+    load = Mock(side_effect=AssertionError("The default production entry must not run."))
+    monkeypatch.setattr(run_module, "_run_dev_async", development)
+    monkeypatch.setattr(run_module, "_load_settings_or_exit", load)
+    result = CliRunner().invoke(app, ["run", "dev", "--frontend-dir", str(tmp_path)])
+    assert result.exit_code == 0, result.output
+    development.assert_awaited_once_with(tmp_path)
+    load.assert_not_called()
+
+
+def test_run_rejects_misplaced_frontend_option_instead_of_ignoring_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    development = AsyncMock()
+    monkeypatch.setattr(run_module, "_run_dev_async", development)
+    result = CliRunner().invoke(app, ["run", "--frontend-dir", str(tmp_path), "dev"])
+    assert result.exit_code == 2, result.output
+    assert "Place --frontend-dir after" in result.output
+    development.assert_not_awaited()
 
 
 @pytest.mark.parametrize("exit_code", [0, 1])

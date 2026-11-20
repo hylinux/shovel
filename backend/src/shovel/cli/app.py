@@ -68,7 +68,7 @@ app.add_typer(
 
 
 # run project命令
-app.add_typer(run_app, name="run", help="running project in [dev|prd] model.")
+app.add_typer(run_app, name="run", help="Run Shovel in production (default) or development mode.")
 
 
 # resource 数据源资源管理命令

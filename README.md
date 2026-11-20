@@ -425,6 +425,9 @@ writing collection, or invoke real embedding diagnostics without approval.
 
 ### Python-only local production serving
 
+`shovel run` is equivalent to `shovel run prd`. In a source checkout, build the
+frontend first:
+
 ```powershell
 Set-Location frontend
 npm run build
@@ -436,6 +439,27 @@ Next.js exports `frontend\out`; production needs no Node.js server.
 Static assets resolve in this order: `--frontend-dir`, `frontend_path`,
 packaged `shovel\static`, then the source checkout's `frontend\out`.
 Missing assets fail startup rather than falling back to a development server.
+Both `shovel run --frontend-dir <directory>` and
+`shovel run prd --frontend-dir <directory>` select an existing static export.
+
+Release wheels include the built frontend inside the Python package:
+
+```text
+site-packages
+  shovel
+    static
+      index.html
+      _next
+      ...
+```
+
+After installing a release wheel, run `shovel init` and then `shovel run`
+(or `shovel run prd`) from any working directory. FastAPI serves the bundled
+frontend and `/api/v1` on the same configured `http_host`/`http_port` listener
+(default `127.0.0.1:8080`). No source checkout, Node.js, npm installation or
+frontend compilation is needed on the user's machine. Keep these read-only,
+version-matched assets in the package, not in the writable user data root.
+Frontend compilation happens during packaging, never during production startup.
 
 This is a local hosting mode, **not the protected enterprise installation
 procedure**.

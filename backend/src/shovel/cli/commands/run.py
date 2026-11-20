@@ -63,9 +63,9 @@ _FRONTEND_DIR_NAME = "frontend"
 _TERMINATE_TIMEOUT = 5.0
 
 app = typer.Typer(
-    help="run shovel [dev|prd]",
-    invoke_without_command=False,
-    no_args_is_help=True,
+    help="Run Shovel; defaults to production mode.",
+    invoke_without_command=True,
+    no_args_is_help=False,
 )
 
 
@@ -81,6 +81,23 @@ _PUMP_DRAIN_TIMEOUT = 2.0
 # -----------------------------------------------------------------------------
 # 命令入口
 # -----------------------------------------------------------------------------
+
+
+@app.callback()
+def run(
+    ctx: typer.Context,
+    frontend_dir: Annotated[
+        Path | None,
+        typer.Option("--frontend-dir", help="生产静态导出目录;等同于 run prd --frontend-dir。"),
+    ] = None,
+) -> None:
+    if ctx.invoked_subcommand is None:
+        run_prd(frontend_dir=frontend_dir)
+    elif frontend_dir is not None:
+        raise typer.BadParameter(
+            "Place --frontend-dir after the dev or prd subcommand.",
+            param_hint="--frontend-dir",
+        )
 
 
 @app.command(name="dev")
@@ -105,7 +122,9 @@ def run_dev(
 def run_prd(
     frontend_dir: Annotated[
         Path | None,
-        typer.Option("--frontend-dir", help="生产静态导出目录,默认使用 frontend_path 或 frontend/out。"),
+        typer.Option(
+            "--frontend-dir", help="生产静态导出目录,默认使用 frontend_path、包内 static 或 frontend/out。"
+        ),
     ] = None,
 ) -> None:
     """Running project in production mode."""

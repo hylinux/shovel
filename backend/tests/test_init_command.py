@@ -37,6 +37,7 @@ def _answers(**overrides: str) -> str:
         "model_provider": "1",
         "model_endpoint": "https://chat.example.test",
         "model_name": "chat-deployment",
+        "model_api": "1",
         "model_version": "2025-04-01-preview",
         "model_key": "",
         "knowledge": "Knowledge_42",
@@ -50,6 +51,8 @@ def _answers(**overrides: str) -> str:
     }
     assert overrides.keys() <= values.keys()
     values.update(overrides)
+    if values["model_provider"].splitlines()[-1] not in ("1", "2", "6"):
+        values.pop("model_api")
     return "\n" + "\n".join(values.values()) + "\n"
 
 
@@ -122,6 +125,7 @@ def test_init_wizard_persists_inputs_defaults_and_independent_memory_copies(
         ("3", "deepseek", "3", "qianwen"),
         ("4", "qianwen", "4", "ollama"),
         ("5", "ollama", "4", "ollama"),
+        ("6", "azure_foundry", "1", "azure_openai"),
     ],
 )
 def test_init_provider_choices_optional_keys_and_dimension_override(
@@ -170,7 +174,7 @@ def test_init_reprompts_invalid_choices_endpoints_names_dimensions_and_azure_ver
         app,
         ["init"],
         input=_answers(
-            model_provider="0\nnot-a-number\n6\n1",
+            model_provider="0\nnot-a-number\n7\n1",
             model_endpoint=(
                 "   \nnot-a-url\nhttps://chat.example.test:invalid\n"
                 "https://user:password@chat.example.test\n"
@@ -195,6 +199,47 @@ def test_init_reprompts_invalid_choices_endpoints_names_dimensions_and_azure_ver
     assert "Azure OpenAI requires an API version" in result.output
     assert "ASCII letters" in result.output
     assert "positive integer" in result.output
+
+
+def test_init_foundry_v1_endpoint_optional_version_and_memory_copy(profile: Path) -> None:
+    result = CliRunner().invoke(
+        app,
+        ["init"],
+        input=_answers(
+            model_provider="6",
+            model_endpoint=("https://foundry.example.test/models\nhttps://foundry.example.test/openai/v1"),
+            model_name="foundry-chat",
+            model_version="",
+        ),
+    )
+    assert result.exit_code == 0, result.output
+    assert "Microsoft Foundry" in result.output
+    assert "not a /models" in result.output
+    settings = AppSettings.load(profile / "config" / "settings.toml")
+    assert settings.model.model_provider_type == "azure_foundry"
+    assert settings.model.api_version == settings.model.api_key == ""
+    assert settings.model.model_dump() == settings.memory.llm.model_dump()
+    assert model_endpoint(settings.model) == "https://foundry.example.test/openai/v1"
+
+
+@pytest.mark.parametrize(
+    "mode,version",
+    [("", ""), ("2", "2025-01-01-preview\n2025-04-01-preview")],
+)
+def test_init_foundry_responses_default_and_version_validation(
+    profile: Path, mode: str, version: str
+) -> None:
+    result = CliRunner().invoke(
+        app,
+        ["init"],
+        input=_answers(model_provider="6", model_api=mode, model_version=version),
+    )
+    assert result.exit_code == 0, result.output
+    settings = AppSettings.load(profile / "config" / "settings.toml")
+    assert settings.model.api_mode == settings.memory.llm.api_mode == "responses"
+    if version:
+        assert "2025-03-01-preview or newer" in result.output
+        assert settings.model.api_version == "2025-04-01-preview"
 
 
 @pytest.mark.parametrize(

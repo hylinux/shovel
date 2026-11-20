@@ -21,9 +21,9 @@ from agent_framework import (
     MCPStdioTool,
     MCPStreamableHTTPTool,
     SkillsProvider,
+    SupportsChatGetResponse,
     Workflow,
 )
-from agent_framework.openai import OpenAIChatCompletionClient
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from shovel.config.agent_config import AgentSettings
@@ -258,7 +258,7 @@ class AgentExtensions:
                     secret_header(header)
         return env, headers
 
-    async def load(self, client: OpenAIChatCompletionClient[Any]) -> None:
+    async def load(self, client: SupportsChatGetResponse[Any]) -> None:
         require_ordinary(EgressChannel.TOOL)
         async with self._lock:
             if self._stack is not None:

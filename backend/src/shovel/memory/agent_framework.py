@@ -13,7 +13,7 @@ import httpx
 from agent_framework import Agent, AgentResponse
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
-from shovel.config.model_settings import DefaultAgentModelSettings, ModelProviderType
+from shovel.config.model_settings import DefaultAgentModelSettings, ModelApiMode, ModelProviderType
 from shovel.memory.domain import MemoryCandidate, MemoryExtractionError, MemoryRecord, MemoryType
 from shovel.protection.egress import EgressChannel, require_ordinary
 from shovel.runtime.agent import ModelOptions, create_framework_client
@@ -159,6 +159,11 @@ class AgentFrameworkMemoryExtractor:
         options = self._options()
         schema = ExtractionOutput.model_json_schema()
         schema["$defs"]["CandidateOutput"]["properties"]["evidence"]["enum"] = source_evidence(text)
+        if self.settings.api_mode is ModelApiMode.RESPONSES:
+            candidate = schema["$defs"]["CandidateOutput"]
+            candidate["required"] = list(candidate["properties"])
+            for property_schema in candidate["properties"].values():
+                property_schema.pop("default", None)
         schema_json = json.dumps(schema, ensure_ascii=False)
         instructions = EXTRACTION
         schema_chars = len(schema_json)
@@ -170,12 +175,12 @@ class AgentFrameworkMemoryExtractor:
             )
             schema_chars = 0
         else:
+            json_schema_options: dict[str, Any] = {"name": "memory_candidates", "schema": schema}
+            if self.settings.api_mode is ModelApiMode.RESPONSES:
+                json_schema_options["strict"] = True
             options["response_format"] = {
                 "type": "json_schema",
-                "json_schema": {
-                    "name": "memory_candidates",
-                    "schema": schema,
-                },
+                "json_schema": json_schema_options,
             }
         agent = Agent(
             client=self._client(),

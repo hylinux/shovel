@@ -1,15 +1,19 @@
 import asyncio
+import json
 import time
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
 import httpx
 import pytest
+from agent_framework import Agent, FunctionTool
+from agent_framework.exceptions import ChatClientException
 from azure.core.credentials import AccessToken
 from azure.core.exceptions import ClientAuthenticationError
 from azure.core.pipeline.policies import _authentication
 from azure.identity import CredentialUnavailableError
 
+from shovel.config.errors import ConfigError
 from shovel.config.model_settings import DefaultAgentModelSettings
 from shovel.runtime.agent import create_framework_client
 from shovel.runtime.errors import RuntimeFailure
@@ -39,6 +43,434 @@ def azure_settings(**overrides):
             **overrides,
         }
     )
+
+
+def foundry_settings(**overrides):
+    return azure_settings(
+        **{
+            "model_provider_type": "azure_foundry",
+            "base_endpoint": "https://example.services.ai.azure.com",
+            "api_version": "",
+            **overrides,
+        }
+    )
+
+
+@pytest.mark.parametrize("key", ["", "test-foundry-key"])
+async def test_foundry_v1_chat_uses_deployment_bearer_auth_and_correct_cli_scope(credential, key):
+    value, factory = credential
+    value.get_token.return_value = AccessToken("test-foundry-token", int(time.time()) + 3600)
+    requests = []
+
+    def model(request):
+        requests.append(request)
+        assert request.url.path == "/openai/v1/chat/completions"
+        assert not request.url.query
+        assert request.headers["authorization"] == f"Bearer {key or 'test-foundry-token'}"
+        assert "api-key" not in request.headers
+        assert json.loads(request.content)["model"] == "chat-deployment"
+        return completion(content="Foundry response.")
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(model)) as http:
+        sdk, client = create_framework_client(foundry_settings(api_key=key), http, max_iterations=3)
+        try:
+            value.get_token.assert_not_awaited()
+            assert (await client.get_response("Foundry test.")).text == "Foundry response."
+            await client.get_response("Cached token.")
+        finally:
+            await sdk.close()
+    assert len(requests) == 2
+    if key:
+        factory.assert_not_called()
+    else:
+        value.get_token.assert_awaited_once_with("https://ai.azure.com/.default")
+        value.close.assert_awaited_once()
+
+
+async def test_foundry_v1_stream_preserves_tool_definition(credential):
+    _, factory = credential
+
+    def model(request):
+        data = json.loads(request.content)
+        assert data["stream"] and data["tools"][0]["function"]["name"] == "lookup"
+        update = {
+            "id": "test-stream",
+            "object": "chat.completion.chunk",
+            "created": 1,
+            "model": "chat-deployment",
+            "choices": [{"index": 0, "delta": {"content": "Foundry streamed"}, "finish_reason": None}],
+        }
+        return httpx.Response(
+            200,
+            headers={"content-type": "text/event-stream"},
+            text=f"data: {json.dumps(update)}\n\ndata: [DONE]\n\n",
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(model)) as http:
+        sdk, _ = create_framework_client(foundry_settings(api_key="test-key"), http, max_iterations=3)
+        try:
+            stream = await sdk.chat.completions.create(
+                model="chat-deployment",
+                messages=[{"role": "user", "content": "test"}],
+                stream=True,
+                tools=[
+                    {"type": "function", "function": {"name": "lookup", "parameters": {"type": "object"}}}
+                ],
+            )
+            assert (
+                "".join([chunk.choices[0].delta.content or "" async for chunk in stream])
+                == "Foundry streamed"
+            )
+        finally:
+            await sdk.close()
+    factory.assert_not_called()
+
+
+def test_foundry_health_uses_v1_models_and_cli_not_legacy_azure_routes(credential, monkeypatch):
+    from shovel.runtime.azure_auth import FoundryCliOpenAIClient
+
+    value, _ = credential
+    value.get_token.return_value = AccessToken("test-foundry-token", int(time.time()) + 3600)
+    requests = []
+
+    def response(request):
+        requests.append(request)
+        assert request.url.path == "/openai/v1/models" and not request.url.query
+        assert request.headers["authorization"] == "Bearer test-foundry-token"
+        return httpx.Response(200, json={"object": "list", "data": []})
+
+    def client(**kwargs):
+        return FoundryCliOpenAIClient(
+            http_client=httpx.AsyncClient(transport=httpx.MockTransport(response)), **kwargs
+        )
+
+    monkeypatch.setattr("shovel.runtime.azure_auth.FoundryCliOpenAIClient", client)
+    assert check_model(foundry_settings()).status is HealthStatus.OK
+    assert len(requests) == 1
+    value.get_token.assert_awaited_once_with("https://ai.azure.com/.default")
+    value.close.assert_awaited_once()
+
+
+async def test_foundry_cli_failure_has_no_fallback_and_does_not_expose_credentials(credential):
+    value, _ = credential
+    value.get_token.side_effect = CredentialUnavailableError("private credential details")
+    response = Mock()
+    async with httpx.AsyncClient(transport=httpx.MockTransport(response)) as http:
+        sdk, _ = create_framework_client(foundry_settings(), http, max_iterations=3)
+        try:
+            with pytest.raises(RuntimeFailure, match="Azure CLI authentication failed") as failure:
+                await sdk.chat.completions.create(
+                    model="chat-deployment", messages=[{"role": "user", "content": "test"}]
+                )
+            assert "Microsoft Foundry" in failure.value.hint
+            assert "private" not in str(failure.value)
+        finally:
+            await sdk.close()
+    response.assert_not_called()
+    value.close.assert_awaited_once()
+
+
+@pytest.mark.parametrize("status", [200, 401])
+def test_foundry_key_health_uses_bearer_and_implicit_version(credential, monkeypatch, status):
+    _, factory = credential
+    get = Mock(return_value=httpx.Response(status))
+    monkeypatch.setattr(httpx, "get", get)
+    result = check_model(foundry_settings(api_key="test-foundry-key"))
+    assert result.status is (HealthStatus.OK if status == 200 else HealthStatus.FAILED)
+    assert get.call_args.args[0] == "https://example.services.ai.azure.com/openai/v1/models"
+    assert get.call_args.kwargs["headers"] == {"Authorization": "Bearer test-foundry-key"}
+    factory.assert_not_called()
+
+
+async def test_foundry_memory_extraction_and_summary_share_v1_client(credential):
+    from shovel.config.memory_config import MemoryModelSettings
+    from shovel.memory.agent_framework import AgentFrameworkMemoryExtractor
+
+    _, factory = credential
+    calls = []
+
+    def model(request):
+        data = json.loads(request.content)
+        calls.append(data)
+        assert request.url.path == "/openai/v1/chat/completions" and not request.url.query
+        assert request.headers["authorization"] == "Bearer test-memory-foundry"
+        assert not data.get("tools")
+        if len(calls) == 1:
+            assert data["response_format"]["type"] == "json_schema"
+            content = '{"candidates": []}'
+        else:
+            content = "The user greeted the assistant."
+        return completion(content=content)
+
+    settings = MemoryModelSettings(**foundry_settings(api_key="test-memory-foundry").model_dump())
+    extractor = AgentFrameworkMemoryExtractor(settings, lambda: httpx.MockTransport(model))
+    try:
+        assert await extractor.extract("Hello.") == []
+        assert await extractor.summarize("", [{"role": "user", "content": "Hello."}], 2000) == (
+            "The user greeted the assistant."
+        )
+    finally:
+        await extractor.close()
+    assert len(calls) == 2
+    factory.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "fields",
+    [
+        {"base_endpoint": "https://example.services.ai.azure.com/models"},
+        {"base_endpoint": "https://example.services.ai.azure.com/api/projects/test"},
+        {"base_endpoint": "https://example.services.ai.azure.com/openai/v1", "api_version": "2025-04-01"},
+    ],
+)
+def test_foundry_rejects_incompatible_endpoint_and_version(fields):
+    with pytest.raises(ConfigError):
+        foundry_settings(**fields)
+
+
+def responses_payload(text="Responses answer.", *, output=None):
+    return {
+        "id": "resp_test",
+        "object": "response",
+        "created_at": 1,
+        "model": "chat-deployment",
+        "status": "completed",
+        "error": None,
+        "incomplete_details": None,
+        "metadata": {},
+        "usage": {"input_tokens": 5, "output_tokens": 2, "total_tokens": 7},
+        "output": output
+        if output is not None
+        else [
+            {
+                "type": "message",
+                "id": "msg_test",
+                "status": "completed",
+                "role": "assistant",
+                "content": [{"type": "output_text", "text": text, "annotations": []}],
+            }
+        ],
+    }
+
+
+@pytest.mark.parametrize(
+    "provider,endpoint,version,key",
+    [
+        ("azure_foundry", "https://example.services.ai.azure.com", "", ""),
+        ("azure_foundry", "https://example.services.ai.azure.com", "", "test-key"),
+        ("azure_foundry", "https://example.cognitiveservices.azure.com", "2025-04-01-preview", ""),
+        ("azure_openai", "https://example.openai.azure.com", "2025-04-01-preview", ""),
+        ("azure_openai", "https://example.openai.azure.com", "2025-04-01-preview", "test-key"),
+        ("openai", "https://example.test/v1", "", "test-key"),
+    ],
+)
+async def test_responses_routing_auth_budget_and_local_history(credential, provider, endpoint, version, key):
+    value, factory = credential
+    value.get_token.return_value = AccessToken("responses-token", int(time.time()) + 3600)
+
+    def model(request):
+        assert request.url.path == (
+            "/openai/responses"
+            if version
+            else ("/v1/responses" if provider == "openai" else "/openai/v1/responses")
+        )
+        assert request.url.params.get("api-version") == (version or None)
+        if version and key:
+            assert request.headers["api-key"] == key
+        else:
+            assert request.headers["authorization"] == f"Bearer {key or 'responses-token'}"
+        data = json.loads(request.content)
+        assert data["model"] == "chat-deployment"
+        assert data["max_output_tokens"] == 32 and not data["store"]
+        assert "previous_response_id" not in data and "conversation" not in data
+        return httpx.Response(200, json=responses_payload())
+
+    settings = DefaultAgentModelSettings(
+        model_provider_type=provider,
+        base_endpoint=endpoint,
+        api_version=version,
+        model_name="chat-deployment",
+        api_key=key,
+        api_mode="responses",
+    )
+    async with httpx.AsyncClient(transport=httpx.MockTransport(model)) as http:
+        sdk, client = create_framework_client(settings, http, max_iterations=3)
+        try:
+            response = await client.get_response("hello", options={"max_tokens": 32, "store": True})
+            assert response.text == "Responses answer."
+            assert response.conversation_id is None
+        finally:
+            await sdk.close()
+    if key:
+        factory.assert_not_called()
+    else:
+        scope = "https://cognitiveservices.azure.com/.default" if version else "https://ai.azure.com/.default"
+        value.get_token.assert_awaited_once_with(scope)
+        value.close.assert_awaited_once()
+
+
+async def test_responses_agent_completes_local_tool_loop_and_replays_reasoning():
+    calls = []
+    executed = []
+
+    def lookup(value: str) -> str:
+        executed.append(value)
+        return "lookup-result"
+
+    def model(request):
+        data = json.loads(request.content)
+        calls.append(data)
+        assert request.url.path == "/openai/v1/responses"
+        assert data["store"] is False and "previous_response_id" not in data
+        if len(calls) == 1:
+            assert data["tools"][0]["name"] == "lookup"
+            return httpx.Response(
+                200,
+                json=responses_payload(
+                    output=[
+                        {
+                            "type": "reasoning",
+                            "id": "rs_test",
+                            "summary": [],
+                            "encrypted_content": "test-encrypted",
+                        },
+                        {
+                            "type": "function_call",
+                            "id": "fc_test",
+                            "call_id": "call_test",
+                            "name": "lookup",
+                            "arguments": '{"value":"marker"}',
+                            "status": "completed",
+                        },
+                    ]
+                ),
+            )
+        results = [item for item in data["input"] if item["type"] == "function_call_output"]
+        assert len(results) == 1 and results[0]["call_id"] == "call_test"
+        assert "lookup-result" in results[0]["output"]
+        assert any(item.get("encrypted_content") == "test-encrypted" for item in data["input"])
+        return httpx.Response(200, json=responses_payload("Tool completed."))
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(model)) as http:
+        sdk, client = create_framework_client(
+            foundry_settings(api_key="test-key", api_mode="responses"), http, max_iterations=3
+        )
+        try:
+            agent = Agent(client=client, tools=[FunctionTool(name="lookup", func=lookup)])
+            assert (await agent.run("Look up marker.")).text == "Tool completed."
+        finally:
+            await sdk.close()
+    assert executed == ["marker"] and len(calls) == 2
+
+
+async def test_responses_stream_translates_sse_into_framework_updates():
+    def model(request):
+        data = json.loads(request.content)
+        assert data["stream"] and not data["store"]
+        payload = responses_payload("Streamed answer.")
+        events = [
+            {"type": "response.created", "response": {**payload, "status": "in_progress", "output": []}},
+            {"type": "response.output_item.added", "output_index": 0, "item": payload["output"][0]},
+            {
+                "type": "response.output_text.delta",
+                "item_id": "msg_test",
+                "output_index": 0,
+                "content_index": 0,
+                "delta": "Streamed answer.",
+            },
+            {"type": "response.completed", "response": payload},
+        ]
+        return httpx.Response(
+            200,
+            headers={"content-type": "text/event-stream"},
+            text="".join(f"event: {event['type']}\ndata: {json.dumps(event)}\n\n" for event in events),
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(model)) as http:
+        sdk, client = create_framework_client(
+            foundry_settings(api_key="test-key", api_mode="responses"), http, max_iterations=3
+        )
+        try:
+            updates = [update async for update in client.get_response("hello", stream=True)]
+            assert "".join(update.text or "" for update in updates) == "Streamed answer."
+            assert any(update.finish_reason == "stop" for update in updates)
+        finally:
+            await sdk.close()
+
+
+async def test_responses_memory_translates_json_schema_and_summary():
+    from shovel.memory.agent_framework import AgentFrameworkMemoryExtractor
+
+    calls = []
+
+    def model(request):
+        data = json.loads(request.content)
+        calls.append(data)
+        assert not data["store"] and not data.get("tools")
+        if len(calls) == 1:
+            assert data["text"]["format"]["type"] == "json_schema"
+            assert data["text"]["format"]["name"] == "memory_candidates"
+            assert data["text"]["format"]["strict"]
+            schema = data["text"]["format"]["schema"]["$defs"]["CandidateOutput"]
+            assert set(schema["required"]) == set(schema["properties"])
+            assert all("default" not in field for field in schema["properties"].values())
+            return httpx.Response(200, json=responses_payload('{"candidates": []}'))
+        return httpx.Response(200, json=responses_payload("The user greeted the assistant."))
+
+    extractor = AgentFrameworkMemoryExtractor(
+        foundry_settings(api_key="test-key", api_mode="responses"), lambda: httpx.MockTransport(model)
+    )
+    try:
+        assert await extractor.extract("Hello.") == []
+        assert await extractor.summarize("", [{"role": "user", "content": "Hello."}], 500)
+    finally:
+        await extractor.close()
+    assert len(calls) == 2
+
+
+async def test_responses_errors_do_not_retry_or_fall_back_and_remote_ids_are_rejected():
+    calls = []
+
+    def model(request):
+        calls.append(request)
+        return httpx.Response(
+            400, json={"error": {"message": "unsupported", "type": "invalid_request_error"}}
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(model)) as http:
+        sdk, client = create_framework_client(
+            foundry_settings(api_key="test-key", api_mode="responses"), http, max_iterations=3
+        )
+        try:
+            with pytest.raises(RuntimeFailure, match="local Session history"):
+                await client.get_response("hello", options={"conversation_id": "resp_remote"})
+            assert not calls
+            with pytest.raises(ChatClientException):
+                await client.get_response("hello")
+        finally:
+            await sdk.close()
+    assert len(calls) == 1 and calls[0].url.path == "/openai/v1/responses"
+
+
+@pytest.mark.parametrize(
+    "provider,version",
+    [
+        ("azure_foundry", "2025-01-01-preview"),
+        ("azure_openai", ""),
+        ("azure_openai", "invalid"),
+        ("ollama", ""),
+        ("deepseek", ""),
+    ],
+)
+def test_responses_rejects_unsupported_provider_or_version(provider, version):
+    with pytest.raises(ConfigError):
+        DefaultAgentModelSettings(
+            model_provider_type=provider,
+            model_name="deployment",
+            base_endpoint="https://example.test",
+            api_mode="responses",
+            api_version=version,
+        )
 
 
 @pytest.fixture

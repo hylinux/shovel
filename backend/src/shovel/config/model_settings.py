@@ -6,12 +6,42 @@
 # ---------------------------------------------------------------------
 from __future__ import annotations
 
+from datetime import date
 from enum import StrEnum
 from typing import Any
+from urllib.parse import urlsplit
 
 from pydantic import AliasChoices, BaseModel, Field, model_validator
 
 from shovel.config.errors import ConfigError
+
+
+def foundry_v1_endpoint(endpoint: str) -> str:
+    try:
+        url = urlsplit(endpoint)
+        _ = url.port
+    except ValueError:
+        raise ConfigError("Microsoft Foundry requires a valid HTTP(S) endpoint.") from None
+    if (
+        url.scheme not in {"http", "https"}
+        or not url.hostname
+        or url.username
+        or url.password
+        or url.query
+        or url.fragment
+        or any(character.isspace() for character in endpoint)
+        or "\\" in endpoint
+    ):
+        raise ConfigError("Microsoft Foundry requires an HTTP(S) endpoint without credentials or query.")
+    path = url.path.rstrip("/")
+    if not path:
+        return endpoint.rstrip("/") + "/openai/v1"
+    if path.endswith("/openai/v1"):
+        return endpoint.rstrip("/")
+    raise ConfigError(
+        "Use the Microsoft Foundry resource root or its /openai/v1 base URL, "
+        "not a /models, deployment, or project-only endpoint."
+    )
 
 
 def normalize_legacy_api_key(data: dict[str, Any], *, section: str = "model") -> dict[str, Any]:
@@ -49,6 +79,20 @@ class ModelProviderType(StrEnum):
     OLLAMA = "ollama"
 
 
+class ModelApiMode(StrEnum):
+    CHAT_COMPLETIONS = "chat_completions"
+    RESPONSES = "responses"
+
+
+def validate_responses_version(version: str) -> None:
+    try:
+        supported = date.fromisoformat(version.removesuffix("-preview")) >= date(2025, 3, 1)
+    except ValueError:
+        supported = False
+    if not supported:
+        raise ConfigError("Azure Responses requires api_version 2025-03-01-preview or newer.")
+
+
 class DefaultAgentModelSettings(BaseModel):
     """``[model]`` 段: 默认对话大模型。
 
@@ -61,6 +105,7 @@ class DefaultAgentModelSettings(BaseModel):
     base_endpoint: str = ""
     model_name: str = ""
     api_version: str = ""
+    api_mode: ModelApiMode = ModelApiMode.CHAT_COMPLETIONS
     api_key: str = Field(default="", validation_alias=AliasChoices("api_key", "security_key"))
     max_input_chars: int = Field(default=24000, ge=2000)
     max_input_images: int = Field(default=5, ge=1, le=20)
@@ -72,6 +117,38 @@ class DefaultAgentModelSettings(BaseModel):
     @classmethod
     def migrate_legacy_api_key(cls, data: Any) -> Any:
         return normalize_legacy_api_key(data) if isinstance(data, dict) else data
+
+    @model_validator(mode="after")
+    def validate_foundry(self) -> DefaultAgentModelSettings:
+        if self.model_provider_type is ModelProviderType.AZUREFOUNDRY:
+            if self.base_endpoint:
+                foundry_v1_endpoint(self.base_endpoint)
+                if self.api_version and urlsplit(self.base_endpoint).path.rstrip("/").endswith("/openai/v1"):
+                    raise ConfigError("Foundry /openai/v1 uses implicit versioning; leave api_version empty.")
+            elif self.is_configured:
+                raise ConfigError("Microsoft Foundry requires model.base_endpoint.")
+        return self
+
+    @model_validator(mode="after")
+    def validate_api_mode(self) -> DefaultAgentModelSettings:
+        if self.api_mode is ModelApiMode.RESPONSES and self.model_provider_type:
+            if self.model_provider_type not in (
+                ModelProviderType.OPENAI,
+                ModelProviderType.AZUREOPENAI,
+                ModelProviderType.AZUREFOUNDRY,
+            ):
+                raise ConfigError(
+                    "Responses is supported only for OpenAI, Azure OpenAI and Microsoft Foundry."
+                )
+            if self.model_provider_type is ModelProviderType.AZUREOPENAI or (
+                self.model_provider_type is ModelProviderType.AZUREFOUNDRY and self.api_version
+            ):
+                validate_responses_version(self.api_version)
+        return self
+
+    @property
+    def uses_foundry_v1(self) -> bool:
+        return self.model_provider_type is ModelProviderType.AZUREFOUNDRY and not self.api_version
 
     @property
     def is_configured(self) -> bool:

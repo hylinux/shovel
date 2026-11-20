@@ -25,7 +25,7 @@ _SECTIONS = {
         "dev_frontend_port http_port frontend_path log_level"
     ),
     "model": (
-        "model_provider_type base_endpoint model_name api_version api_key "
+        "model_provider_type base_endpoint model_name api_version api_mode api_key "
         "max_input_chars max_output_tokens timeout_seconds"
     ),
     "agent": "enable_python_extensions max_tool_iterations",
@@ -45,7 +45,7 @@ _SECTIONS = {
         "summary_max_chars history_messages"
     ),
     "memory.llm": (
-        "model_provider_type base_endpoint model_name api_version api_key "
+        "model_provider_type base_endpoint model_name api_version api_mode api_key "
         "max_input_chars max_output_tokens timeout_seconds"
     ),
     "memory.embedder": (
@@ -58,7 +58,7 @@ _EDITABLE = {
 }
 _FIXED = ("agent.workspace_path", "database.url", "zvec.knowledge_path", "memory.index_path")
 _SECRETS = frozenset(("model.api_key", "embedding.api_key", "memory.llm.api_key", "memory.embedder.api_key"))
-_CHAT_PROVIDERS = ("", "azure_openai", "deepseek", "qianwen", "ollama")
+_CHAT_PROVIDERS = ("", "azure_openai", "azure_foundry", "deepseek", "qianwen", "ollama")
 _EMBEDDING_PROVIDERS = ("", "azure_openai", "qianwen", "ollama")
 
 

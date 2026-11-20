@@ -106,16 +106,72 @@ profile; automatic `--persist-root` is Windows-only. No machine-level variable i
 written. A running Host keeps its original root and actual configuration file.
 
 On first run, `shovel init` then asks for the chat provider (Azure OpenAI, OpenAI,
-DeepSeek, Qianwen or Ollama), endpoint, model/deployment, API version and hidden API key;
+DeepSeek, Qianwen, Ollama or Microsoft Foundry), endpoint, model/deployment, API version and hidden API key;
 then the knowledge name, embedding provider (Azure OpenAI, OpenAI, Qianwen or
 Ollama), endpoint, model/deployment, dimensions, hidden API key, API version and
-Memory collection name. Blank keys are allowed; Azure blank keys select
+Memory collection name. Blank keys are allowed; Azure OpenAI/Foundry blank keys select
 non-interactive Azure CLI authentication, not an interactive login. Azure
-requires an API version; other providers may leave it empty.
+OpenAI requires an API version; Foundry v1 and other providers may leave it empty.
 
 For local Ollama chat, enter `http://127.0.0.1:11434` and your installed model
 (for example `shovel-chat-fast`); API version and API key can both be empty.
 The runtime adds `/v1` for its OpenAI-compatible chat client.
+
+Microsoft Foundry uses `model_provider_type = "azure_foundry"`. New configurations
+use its OpenAI-compatible v1 Chat Completions endpoint:
+
+```toml
+[model]
+model_provider_type = "azure_foundry"
+base_endpoint = "https://YOUR-RESOURCE.services.ai.azure.com"
+model_name = "YOUR-DEPLOYMENT"
+api_version = ""
+api_key = ""
+```
+
+A resource root gains `/openai/v1`; a complete `/openai/v1` base URL is preserved
+(including a project-scoped v1 URL). `model_name` is the deployed model name.
+An explicit key uses Bearer authentication; an empty key uses lazy, renewable
+Azure CLI authentication with `https://ai.azure.com/.default`, never interactive
+login or a fallback key. The read-only health check uses the same authentication.
+Main Agent, Memory LLM and platform Skill/Agent clients share this factory.
+
+Existing `azure_foundry` configurations with a resource root and non-empty
+`api_version` retain the legacy versioned Azure OpenAI-compatible route.
+For v1, leave `api_version` empty. Native `/models` inference and project-only
+URLs are not OpenAI v1 base URLs and are rejected. This does not add Foundry
+embedding or Anthropic Messages support. Your deployment must
+support Chat Completions and the tools/vision/structured outputs you enable;
+offline adapter tests do not certify every deployed model.
+See [Microsoft Foundry endpoints and authentication](https://learn.microsoft.com/en-us/azure/foundry/foundry-models/concepts/endpoints).
+
+Select `api_mode = "responses"` in `[model]` and, if independently configured,
+`[memory.llm]` for deployments requiring Responses instead of Chat Completions.
+This uses MAF's Responses client for the Main Agent, platform Skill/Agent and
+Memory, including streaming, function tools and structured output. Existing
+profiles default to `api_mode = "chat_completions"`; no automatic fallback or
+model-name guessing changes their protocol. The initialization wizard offers
+both modes for OpenAI/Azure OpenAI/Foundry and recommends Responses for Foundry.
+The workbench configuration editor exposes the same setting.
+
+For a versioned Azure/Foundry deployment:
+
+```toml
+[model]
+model_provider_type = "azure_foundry"
+base_endpoint = "https://YOUR-RESOURCE.cognitiveservices.azure.com"
+model_name = "YOUR-DEPLOYMENT"
+api_version = "2025-04-01-preview"
+api_mode = "responses"
+api_key = ""
+```
+
+Versioned Responses requires `2025-03-01-preview` or newer. Foundry v1 also
+supports Responses with an empty `api_version`; OpenAI uses its normal v1
+base URL. Other providers retain Chat Completions. Responses sends `store=false`
+and replays local Session history, not remote conversation/response IDs. This
+does not certify arbitrary deployment features or change provider logging policy.
+Changing only `api_version` does not select Responses.
 
 The hidden chat API-key input is saved as `model.api_key`. The final
 read-only model-list health check also uses Azure CLI authentication when this

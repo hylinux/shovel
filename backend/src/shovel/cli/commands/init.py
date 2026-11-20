@@ -16,7 +16,13 @@ from shovel.cli.root_environment import persist_root_environment, show_root_envi
 from shovel.cli.ui.console import console
 from shovel.config.embedding_config import EmbeddingSettings
 from shovel.config.errors import ConfigError
-from shovel.config.model_settings import DefaultAgentModelSettings, ModelProviderType
+from shovel.config.model_settings import (
+    DefaultAgentModelSettings,
+    ModelApiMode,
+    ModelProviderType,
+    foundry_v1_endpoint,
+    validate_responses_version,
+)
 from shovel.config.paths import (
     default_root_path,
     resolve_root_path,
@@ -43,6 +49,7 @@ _MODEL_PROVIDERS = (
     ("DeepSeek", "deepseek"),
     ("Qianwen", "qianwen"),
     ("Ollama", "ollama"),
+    ("Microsoft Foundry", "azure_foundry"),
 )
 _EMBEDDING_PROVIDERS = (
     ("Azure OpenAI", "azure_openai"),
@@ -50,13 +57,17 @@ _EMBEDDING_PROVIDERS = (
     ("Qianwen", "qianwen"),
     ("Ollama", "ollama"),
 )
+_MODEL_APIS = (
+    ("Chat Completions (existing compatibility)", "chat_completions"),
+    ("Responses (recommended for Foundry reasoning models and tools)", "responses"),
+)
 
 
-def _prompt_provider(label: str, providers: tuple[tuple[str, str], ...]) -> str:
+def _prompt_provider(label: str, providers: tuple[tuple[str, str], ...], *, default: int = 1) -> str:
     for number, (name, _) in enumerate(providers, start=1):
         console.print(f"  {number}. {name}")
     while True:
-        choice: int = typer.prompt(label, type=int, default=1)
+        choice: int = typer.prompt(label, type=int, default=default)
         if 1 <= choice <= len(providers):
             return providers[choice - 1][1]
         console.warning(f"Choose a number from 1 to {len(providers)}.")
@@ -89,17 +100,34 @@ def _prompt_endpoint(label: str, provider: str) -> str:
             console.warning("Enter an HTTP(S) endpoint without credentials, query or fragment.")
         elif provider == "azure_openai" and url.path.rstrip("/"):
             console.warning("Azure OpenAI requires the resource root endpoint, without a deployment path.")
+        elif provider == "azure_foundry":
+            try:
+                foundry_v1_endpoint(value)
+                return value
+            except ConfigError as exc:
+                console.warning(exc.message)
         else:
             return value
 
 
-def _prompt_api_version(label: str, provider: str) -> str:
+def _prompt_api_version(
+    label: str, provider: str, *, api_mode: ModelApiMode = ModelApiMode.CHAT_COMPLETIONS
+) -> str:
     while True:
         value: str = typer.prompt(label, default="", show_default=False)
         value = value.strip()
-        if value or provider != "azure_openai":
-            return value
-        console.warning("Azure OpenAI requires an API version.")
+        if not value and provider == "azure_openai":
+            console.warning("Azure OpenAI requires an API version.")
+            continue
+        if api_mode is ModelApiMode.RESPONSES and (
+            provider == "azure_openai" or (provider == "azure_foundry" and value)
+        ):
+            try:
+                validate_responses_version(value)
+            except ConfigError as exc:
+                console.warning(exc.message)
+                continue
+        return value
 
 
 def _prompt_store_name(label: str, default: str) -> str:
@@ -117,11 +145,20 @@ def _initial_settings(*, interactive: bool) -> AppSettings:
     knowledge_name, memory_name = "shovel_chunk", "shovel_memory"
 
     if interactive:
-        console.info("Configure the chat model. API keys are hidden; an empty Azure key uses Azure CLI.")
+        console.info(
+            "Configure the chat model. API keys are hidden; an empty Azure OpenAI/Foundry key uses Azure CLI."
+        )
         provider = _prompt_provider("Model provider", _MODEL_PROVIDERS)
         endpoint = _prompt_endpoint("Model endpoint", provider)
         name = _prompt_required("Model name / deployment")
-        version = _prompt_api_version("Model API version (empty for non-Azure providers)", provider)
+        api_mode = ModelApiMode.CHAT_COMPLETIONS
+        if provider in ("azure_openai", "azure_foundry", "openai"):
+            api_mode = ModelApiMode(
+                _prompt_provider("Model API", _MODEL_APIS, default=2 if provider == "azure_foundry" else 1)
+            )
+        version = _prompt_api_version(
+            "Model API version (empty for Foundry v1/non-Azure providers)", provider, api_mode=api_mode
+        )
         key: str = typer.prompt(
             "Model API key (model.api_key; may be empty)",
             default="",
@@ -135,6 +172,7 @@ def _initial_settings(*, interactive: bool) -> AppSettings:
                 "base_endpoint": endpoint,
                 "model_name": name,
                 "api_version": version,
+                "api_mode": api_mode,
                 "api_key": key,
             }
         )

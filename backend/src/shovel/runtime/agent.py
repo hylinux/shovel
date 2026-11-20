@@ -35,13 +35,19 @@ from agent_framework import (
     SessionContext,
     SlidingWindowStrategy,
     SupportsAgentRun,
+    SupportsChatGetResponse,
 )
 from agent_framework.ag_ui import AgentFrameworkAgent
 from agent_framework.exceptions import ChatClientException
-from agent_framework.openai import OpenAIChatCompletionClient
+from agent_framework.openai import OpenAIChatClient, OpenAIChatCompletionClient
 from openai import APIError, AsyncAzureOpenAI, AsyncOpenAI
 
-from shovel.config.model_settings import DefaultAgentModelSettings, ModelProviderType
+from shovel.config.model_settings import (
+    DefaultAgentModelSettings,
+    ModelApiMode,
+    ModelProviderType,
+    foundry_v1_endpoint,
+)
 from shovel.exceptions.pipeline import VectorSinkError
 from shovel.memory.domain import PROFILE_TOPICS
 from shovel.memory.relevance import Query, memory_only_query, resolve_memory_query
@@ -58,7 +64,7 @@ from shovel.runtime.agent_instructions import (
     AgentInstructionsView,
     compose_instructions,
 )
-from shovel.runtime.azure_auth import AzureCliOpenAIClient
+from shovel.runtime.azure_auth import AzureCliOpenAIClient, FoundryCliOpenAIClient
 from shovel.runtime.diagnostics import diagnostics_enabled, trace, trace_duration
 from shovel.runtime.errors import RuntimeFailure
 from shovel.runtime.schemas import MessageInput, SearchInput
@@ -250,6 +256,8 @@ def text_within_json_budget(value: str, limit: int) -> str:
 
 
 def model_endpoint(settings: DefaultAgentModelSettings) -> str:
+    if settings.uses_foundry_v1:
+        return foundry_v1_endpoint(settings.base_endpoint)
     if settings.base_endpoint:
         endpoint = settings.base_endpoint.rstrip("/")
         if settings.model_provider_type == ModelProviderType.OLLAMA and not endpoint.endswith("/v1"):
@@ -267,9 +275,22 @@ def model_endpoint(settings: DefaultAgentModelSettings) -> str:
     raise RuntimeFailure("此模型供应商需要显式配置 base_endpoint。", status=503)
 
 
+class StatelessResponsesMiddleware(ChatMiddleware):
+    """Keep local Session history authoritative instead of provider-side continuations."""
+
+    async def process(self, context: ChatContext, call_next: Callable[[], Awaitable[None]]) -> None:
+        options = dict(context.options or {})
+        if any(options.get(key) for key in ("conversation_id", "previous_response_id", "conversation")):
+            raise RuntimeFailure(
+                "Responses requires local Session history, not remote continuation IDs.", status=422
+            )
+        context.options = {**options, "store": False}
+        await call_next()
+
+
 def create_framework_client(
     settings: DefaultAgentModelSettings, http_client: httpx.AsyncClient, *, max_iterations: int
-) -> tuple[AsyncOpenAI, OpenAIChatCompletionClient[Any]]:
+) -> tuple[AsyncOpenAI, SupportsChatGetResponse[Any]]:
     if _guard_model_request not in http_client.event_hooks["request"]:
         http_client.event_hooks["request"].append(_guard_model_request)
     endpoint = model_endpoint(settings)
@@ -279,21 +300,30 @@ def create_framework_client(
         "timeout": settings.timeout_seconds,
         "max_retries": 0,
     }
-    if settings.model_provider_type in (ModelProviderType.AZUREOPENAI, ModelProviderType.AZUREFOUNDRY):
+    sdk: AsyncOpenAI
+    if settings.uses_foundry_v1:
+        if settings.api_key:
+            sdk = AsyncOpenAI(**common, base_url=endpoint)
+        else:
+            sdk = FoundryCliOpenAIClient(**common, base_url=endpoint)
+    elif settings.model_provider_type in (ModelProviderType.AZUREOPENAI, ModelProviderType.AZUREFOUNDRY):
         if not settings.api_version:
             raise RuntimeFailure("Azure 对话模型需要 api_version。", status=503)
-        sdk: AsyncOpenAI
-        if settings.model_provider_type == ModelProviderType.AZUREOPENAI and not settings.api_key:
+        if not settings.api_key:
             common["api_key"] = None
             sdk = AzureCliOpenAIClient(**common, azure_endpoint=endpoint, api_version=settings.api_version)
         else:
             sdk = AsyncAzureOpenAI(**common, azure_endpoint=endpoint, api_version=settings.api_version)
     else:
         sdk = AsyncOpenAI(**common, base_url=endpoint)
-    return sdk, OpenAIChatCompletionClient(
+    client_type = (
+        OpenAIChatClient if settings.api_mode is ModelApiMode.RESPONSES else OpenAIChatCompletionClient
+    )
+    return sdk, client_type(
         model=settings.model_name,
         async_client=sdk,
         instruction_role="system",
+        middleware=[StatelessResponsesMiddleware()] if settings.api_mode is ModelApiMode.RESPONSES else None,
         function_invocation_configuration={
             "max_iterations": max_iterations,
             "include_detailed_errors": False,
@@ -1009,7 +1039,7 @@ class ShovelAgent:
         self.extensions = AgentExtensions(runtime.settings.agent, oauth=runtime.mcp_auth)
         self._client: httpx.AsyncClient | None = None
         self._sdk: AsyncOpenAI | None = None
-        self._framework: OpenAIChatCompletionClient[Any] | None = None
+        self._framework: SupportsChatGetResponse[Any] | None = None
 
     def _apply_instructions(self, configuration: AgentInstructionsView) -> None:
         self.runtime.instructions.validate(configuration["content"])
@@ -1028,7 +1058,7 @@ class ShovelAgent:
             return {"extra_body": {"max_tokens": max_tokens}}
         return {"max_tokens": max_tokens}
 
-    def client(self) -> OpenAIChatCompletionClient[Any]:
+    def client(self) -> SupportsChatGetResponse[Any]:
         if self._framework is None:
             settings = self.runtime.settings.model
             if self._client is None:

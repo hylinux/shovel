@@ -13,9 +13,11 @@ from pathlib import Path
 from time import monotonic
 from typing import Any
 from unittest.mock import patch
+from uuid import uuid4
 
 import httpx
 import pytest
+from ag_ui.core import EventType
 from scripts.memory_baseline import baseline_runtime, isolated_settings
 
 from shovel.config.settings import AppSettings, load_settings
@@ -95,6 +97,95 @@ class Evidence:
     def flush(self) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.path.write_text(json.dumps(self.data, indent=2) + "\n", encoding="utf-8")
+
+
+async def test_live_responses_main_agent_tools_and_memory(tmp_path: Path) -> None:
+    path = Path(os.environ["SHOVEL_LIVE_CONFIG"])
+    original = hashlib.sha256(path.read_bytes()).digest()
+    configured = AppSettings.load(path)
+    assert configured.model.is_configured and configured.model.api_mode == "responses"
+    assert not configured.memory.llm.is_configured or configured.memory.llm.api_mode == "responses"
+    directory = Path(os.environ.get("SHOVEL_RUNTIME_CONFIG_LIVE_REPORT_DIR", str(tmp_path)))
+    report = Evidence(directory / "test_live_responses_main_agent_tools_and_memory.json", configured)
+    report.data["scope"] = "responses-adapter-live"
+    report.data["models"]["main"]["api_mode"] = "responses"
+    settings = isolated_settings(configured, tmp_path)
+    requests: list[dict[str, Any]] = []
+
+    async def observe(request: httpx.Request) -> None:
+        if request.method != "POST":
+            return
+        data = json.loads(request.content)
+        assert request.url.path.endswith("/responses")
+        assert data["store"] is False
+        assert "previous_response_id" not in data and "conversation" not in data
+        requests.append(
+            {
+                "stream": bool(data.get("stream")),
+                "tool_results": sum(
+                    item.get("type") == "function_call_output" for item in data.get("input", [])
+                ),
+            }
+        )
+
+    try:
+        async with baseline_runtime(settings) as runtime:
+            async with runtime.sessions() as database:
+                session = Conversation(title="Synthetic Responses validation")
+                database.add(session)
+                await database.commit()
+            runtime.chat.agent.client()
+            assert runtime.chat.agent._client is not None
+            runtime.chat.agent._client.event_hooks["request"].append(observe)
+            answer = await runtime.chat.send(
+                session.id,
+                MessageInput(
+                    content="For this synthetic validation only, reply with exactly SHOVEL_RESPONSES_OK.",
+                    memory_enabled=False,
+                    knowledge_policy="disabled",
+                ),
+            )
+            assert answer.state == "completed" and answer.content.strip() == "SHOVEL_RESPONSES_OK"
+            report.record("main_agent_response_persisted")
+            before = len(requests)
+            events = [
+                event
+                async for event in runtime.chat.stream(
+                    session.id,
+                    MessageInput(
+                        content=(
+                            "Call list_resources exactly once. Then reply with exactly "
+                            "SHOVEL_RESPONSES_TOOL_STREAM_OK."
+                        ),
+                        memory_enabled=False,
+                        knowledge_policy="disabled",
+                    ),
+                    uuid4().hex,
+                )
+            ]
+            assert any(event.type == EventType.RUN_FINISHED for event in events)
+            assert not any(event.type == EventType.RUN_ERROR for event in events)
+            calls = requests[before:]
+            assert len(calls) == 2 and all(call["stream"] for call in calls)
+            assert sum(call["tool_results"] for call in calls) == 1
+            history = await runtime.chat.messages(session.id)
+            assert history[-1].state == "completed"
+            assert "SHOVEL_RESPONSES_TOOL_STREAM_OK" in history[-1].content
+            report.record("stream_tool_result_replayed_and_answer_persisted", model_requests=len(calls))
+            source = "I prefer jasmine tea every morning."
+            candidates = await runtime.memory.extractor.extract(source)
+            assert candidates and any("tea" in item.object.lower() for item in candidates)
+            assert all(item.evidence in source for item in candidates)
+            report.record("strict_memory_extraction", candidates=len(candidates))
+            summary = await runtime.memory.extractor.summarize(
+                "", [{"role": "user", "content": "Hello."}], 500
+            )
+            assert summary and len(summary) <= 500
+            report.record("memory_summary")
+        report.data["complete"] = True
+    finally:
+        report.flush()
+        assert hashlib.sha256(path.read_bytes()).digest() == original, "User configuration was modified."
 
 
 @pytest.fixture

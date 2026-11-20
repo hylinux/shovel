@@ -30,6 +30,7 @@ from openai import APIError, APIStatusError
 from shovel.config.model_settings import (
     DefaultAgentModelSettings,
     ModelProviderType,
+    foundry_v1_endpoint,
 )
 from shovel.runtime.errors import RuntimeFailure
 
@@ -101,10 +102,7 @@ def check_model(settings: DefaultAgentModelSettings) -> HealthResult:
             ),
         )
 
-    if (
-        settings.model_provider_type in (ModelProviderType.AZUREOPENAI, ModelProviderType.AZUREFOUNDRY)
-        and not settings.api_version
-    ):
+    if settings.model_provider_type is ModelProviderType.AZUREOPENAI and not settings.api_version:
         return HealthResult(
             status=HealthStatus.FAILED,
             target=target,
@@ -112,7 +110,10 @@ def check_model(settings: DefaultAgentModelSettings) -> HealthResult:
         )
 
     url, headers = _probe_request(settings)
-    azure_cli = settings.model_provider_type is ModelProviderType.AZUREOPENAI and not settings.api_key
+    azure_cli = (
+        settings.model_provider_type in (ModelProviderType.AZUREOPENAI, ModelProviderType.AZUREFOUNDRY)
+        and not settings.api_key
+    )
 
     try:
         if azure_cli:
@@ -142,7 +143,7 @@ def check_model(settings: DefaultAgentModelSettings) -> HealthResult:
 
     if status in (401, 403):
         guidance = (
-            "Check Azure CLI login, resource tenant and Azure OpenAI access permissions."
+            "Check Azure CLI login, resource tenant and Azure model access permissions."
             if azure_cli
             else "Check model.api_key."
         )
@@ -167,7 +168,16 @@ def check_model(settings: DefaultAgentModelSettings) -> HealthResult:
 
 
 async def _probe_azure_cli(settings: DefaultAgentModelSettings) -> None:
-    from shovel.runtime.azure_auth import AzureCliOpenAIClient
+    from shovel.runtime.azure_auth import AzureCliOpenAIClient, FoundryCliOpenAIClient
+
+    if settings.uses_foundry_v1:
+        async with FoundryCliOpenAIClient(
+            base_url=foundry_v1_endpoint(settings.base_endpoint),
+            timeout=_MODEL_TIMEOUT_SECONDS,
+            max_retries=0,
+        ) as client:
+            await client.models.list()
+        return
 
     async with AzureCliOpenAIClient(
         azure_endpoint=settings.base_endpoint,
@@ -187,6 +197,10 @@ def _probe_request(
     base = settings.base_endpoint.rstrip("/")
     provider = settings.model_provider_type
     key = settings.api_key
+
+    if settings.uses_foundry_v1:
+        headers = {"Authorization": f"Bearer {key}"} if key else {}
+        return f"{foundry_v1_endpoint(base)}/models", headers
 
     if provider is ModelProviderType.OLLAMA:
         # Ollama 没有鉴权, 原生端点也比 /v1 兼容层更可靠

@@ -93,6 +93,51 @@ def test_editor_reads_legacy_document_section_and_removes_it_on_save(
 
 
 @pytest.mark.parametrize("section", ["model", "memory.llm"])
+def test_editor_supports_foundry_v1_without_api_version(
+    configuration: RuntimeConfigurationService, section: str
+) -> None:
+    result = save(
+        configuration,
+        {
+            f"{section}.model_provider_type": "azure_foundry",
+            f"{section}.base_endpoint": "https://example.services.ai.azure.com/openai/v1",
+            f"{section}.model_name": "foundry-deployment",
+            f"{section}.api_version": "",
+            f"{section}.api_key": "",
+        },
+    )
+    field = next(item for item in result["items"] if item["key"] == f"{section}.model_provider_type")
+    assert field["value"] == "azure_foundry" and "azure_foundry" in field["choices"]
+    restored = AppSettings.load(configuration.file.path)
+    model = restored.model if section == "model" else restored.memory.llm
+    assert model.uses_foundry_v1 and not model.api_version and not model.api_key
+
+
+@pytest.mark.parametrize("section", ["model", "memory.llm"])
+def test_editor_round_trips_responses_and_rejects_old_version(
+    configuration: RuntimeConfigurationService, section: str
+) -> None:
+    changes = {
+        f"{section}.model_provider_type": "azure_foundry",
+        f"{section}.base_endpoint": "https://example.cognitiveservices.azure.com",
+        f"{section}.model_name": "deployment",
+        f"{section}.api_mode": "responses",
+        f"{section}.api_version": "2025-04-01-preview",
+        f"{section}.api_key": "",
+    }
+    result = save(configuration, changes)
+    field = next(item for item in result["items"] if item["key"] == f"{section}.api_mode")
+    assert field["choices"] == ["chat_completions", "responses"]
+    assert field["value"] == "responses" and field["pending"]
+    before = configuration.file.path.read_bytes()
+    with pytest.raises(RuntimeFailure, match="2025-03-01-preview"):
+        save(configuration, {f"{section}.api_version": "2025-01-01-preview"})
+    assert configuration.file.path.read_bytes() == before
+    restored = AppSettings.load(configuration.file.path)
+    assert (restored.model if section == "model" else restored.memory.llm).api_mode == "responses"
+
+
+@pytest.mark.parametrize("section", ["model", "memory.llm"])
 @pytest.mark.parametrize(
     "field,budget,default,minimum",
     [

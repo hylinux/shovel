@@ -97,9 +97,11 @@ and the actual loaded settings file stay pinned for each Host. Windows
 initialization, not a parent-terminal update or enterprise installation trust.
 For the development server, use
 `uv run shovel run dev` from the root. This supervises Next.js on port 3000 and
-FastAPI on port 9999; either exiting stops both. Production is separate:
+FastAPI on port 9999; either exiting stops both. Dev runs `npm ci` against the
+frontend lockfile if dependencies are missing or invalid. Production is separate:
 `npm run build` in `frontend\` exports `frontend\out`, then
-`uv run shovel run prd` serves it from Python on port 8080, without Node.js.
+`uv run shovel run` (equivalent to `uv run shovel run prd`) serves it from Python
+on port 8080 by default, without Node.js.
 Production asset resolution is `--frontend-dir`, `frontend_path`, packaged
 `shovel\static`, then the source checkout's `frontend\out`.
 
@@ -151,9 +153,10 @@ are in `.github\workflows\ci.yml`.
 - Workflows are trigger-agnostic Capability content with serial-DAG Input,
   Function, Skill, Condition, Approval, Ask User, Notification, Emit Event and
   Output nodes. Checkpoints live on the Execution root; node calls use child
-  Executions. Versioned Skill/Agent executors use isolated, tool-free MAF Agents
-  with frozen instructions, not mutable workspace extensions or Main Agent
-  Memory. Skill Memory Access is Disabled in V1.
+  Executions. Versioned Skill/Agent capabilities run as isolated, tool-free MAF
+  Agents with frozen instructions. They are not preinstalled business Agents,
+  the Main Agent, or its workspace Child Agent/Workflow tools; they do not
+  inherit Main Agent Memory. Skill Memory Access is Disabled in V1.
 - Scanning flows through connector discovery/fetch, parser, parent/child chunker,
   embedder, persistence, and reconciliation. `pipeline\scan_service.py`
   coordinates this flow. SQLite stores authoritative document/chunk text,
@@ -162,8 +165,9 @@ are in `.github\workflows\ci.yml`.
   combines keyword/vector ranks with RRF, then revalidates visibility and
   revisions against SQLite.
 - Chat runs through Microsoft Agent Framework (MAF): `runtime\agent.py` constructs
-  the main Agent with tools, context-provider hooks, `AgentSession`, and native
-  sliding-window compaction. The context provider combines bounded SQLite
+  `shovel`, the built-in user-facing Main Agent, with tools, context-provider
+  hooks, `AgentSession`, and native sliding-window compaction.
+  The context provider combines bounded SQLite
   history, Session Summary, native Memory recall, and independent RAG evidence.
   Chat persists turns and referenced excerpts, expanding child chunks into parent
   context. Both AG-UI `POST /api/v1/agent` and the non-streaming message API use
@@ -174,7 +178,9 @@ are in `.github\workflows\ci.yml`.
   assembles these, and `runtime\memory_tasks.py` runs durable Operations through
   the Host's Memory worker after foreground idle. History, Session Summary and
   long-term facts remain distinct. Memory defaults on per request; automatic
-  extraction reads only the current user's message, using a tool-free MAF Agent.
+  extraction reads only the current user's message. `memory\agent_framework.py`
+  provides the internal, tool-free `shovel-memory-extractor` and
+  `shovel-session-summary` Agents, not user-facing chat targets.
   `[memory.llm]` defaults to `[model]`; `[memory.embedder]` and `memory.dim` are
   independent of knowledge embeddings. Without a Memory embedder, SQLite storage
   remains available but semantic recall is explicitly reported unavailable.
@@ -331,9 +337,20 @@ are in `.github\workflows\ci.yml`.
   selects lazy asynchronous Azure CLI authentication with automatic token renewal;
   non-empty keys retain API-key authentication. CLI mode rejects
   `AZURE_OPENAI_AD_TOKEN` and never launches interactive login or falls back to
-  a key. Use the resource root endpoint, deployment name and `api_version`;
-  chat uses versioned Chat Completions, not `/openai/v1`. See
+  a key. Use the resource root endpoint, deployment name and `api_version`
+  for versioned Azure OpenAI, not `/openai/v1`. See
   `Documents\azure_openai_configuration.md`.
+- Microsoft Foundry (`azure_foundry`) uses OpenAI-compatible `/openai/v1`
+  with an empty `api_version`; a resource root plus a non-empty `api_version`
+  retains the legacy versioned Azure route. A blank key on Foundry v1 uses
+  renewable Azure CLI authentication with `https://ai.azure.com/.default`.
+  This is a model adapter, not Foundry agent hosting or embedding support.
+- `runtime\agent.py`'s shared chat-client factory uses explicit `api_mode` in
+  `[model]` and `[memory.llm]`: default `chat_completions`, opt-in `responses`
+  for OpenAI, Azure OpenAI and Foundry. Versioned Responses requires
+  `2025-03-01-preview` or newer. Preserve stateless Responses (`store=false`,
+  local history, no remote conversation or response IDs) and do not fall back
+  between protocols. See the root README for endpoint and authentication details.
 - Embedding `dimensions` is optional and must match `zvec.dim` or `memory.dim`
   when set; the Ollama adapter rejects it. Include it in `model_version` only
   when explicitly configured, preserving existing fingerprints when omitted.

@@ -3,8 +3,9 @@
 > 本文描述长期目标架构，不是当前版本的完成清单。当前产品为单机、单所有者的
 > 知识 Runtime：持久摄取/恢复、Profile 管理、检索、带来源的 MAF 主 Agent 对话和原生 Memory。
 > 主 Agent 已支持 MCP、Skills 及可选 Python 函数/Agent/Workflow 扩展；
-> 自动调度与完整的多 Agent 管理仍属后续目标。下文工程骨架示例不等同于当前目录和 CLI；
-> 已落地能力及运行契约以根 README 和 `Documents/scan_pipeline.md` 为准。
+> 平台已支持 Proactive Services 调度和版本化 Agent Capability，但下文不代表完整的多 Agent
+> 管理已落地。工程骨架示例不等同于当前目录和 CLI；已落地能力及运行契约以根 README、
+> `Documents/platform_architecture.md` 和 `Documents/scan_pipeline.md` 为准。
 
 ## 文档信息
 

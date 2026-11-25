@@ -49,7 +49,15 @@ serving; it does **not** approve an enterprise rollout.
 
 ## Run the local workbench
 
-### Prerequisites
+Choose the instructions for how you're running Shovel:
+
+- **Develop from a source checkout:** install the frontend dependencies with
+  `npm ci` and use `shovel run dev` for live reload.
+- **Use an installed release wheel:** skip the source setup below. Run
+  `shovel init` and `shovel run`; the wheel already includes the built frontend.
+  See [Python-only local production serving](#python-only-local-production-serving).
+
+### Source development prerequisites
 
 - Python **3.14+**, uv, and Git.
 - Node.js **22.18+** for frontend development/builds; CI uses Node 22.
@@ -67,16 +75,20 @@ From the repository root, in PowerShell:
 
 ```powershell
 uv sync --python 3.14-x86_64 --locked --all-extras --dev
+Set-Location frontend
+npm ci
+Set-Location ..
 uv run shovel init
 uv run shovel run dev
 ```
 
-`shovel run dev` checks frontend dependencies before starting either server.
-If dependencies are missing or invalid, it runs `npm ci` using
-`frontend\package-lock.json`, including development and optional dependencies.
-Installation or verification failure stops startup. Node.js/npm must already be
-installed; the first dependency installation requires access to the configured
-npm registry. Production mode does not check or install npm packages.
+Run `npm ci` in `frontend` on a fresh checkout or after
+`frontend\package-lock.json` changes. It requires access to the configured npm
+registry. If you skip this step, `shovel run dev` checks the installed
+dependencies and runs a locked `npm ci` (including development and optional
+dependencies) if they are missing or invalid. Installation or verification
+failure stops startup. On success, dev mode starts Next.js on port 3000 and the
+FastAPI backend on port 9999 by default.
 
 On platforms with supported native dependencies, use
 `uv sync --locked --all-extras --dev` with the appropriate Python interpreter.
@@ -92,7 +104,7 @@ uv run shovel init --root-path 'D:\ShovelData'
 # Non-interactive setup; use --persist-root only to explicitly save a Windows user variable.
 uv run shovel init --root-path 'D:\ShovelData' --no-input
 $env:SHOVEL_ROOT_PATH = 'D:\ShovelData'
-uv run shovel run prd
+uv run shovel run dev
 ```
 
 The root contains `config\settings.toml`, `data`, `workspaces`, `knowledge`,
@@ -425,24 +437,29 @@ writing collection, or invoke real embedding diagnostics without approval.
 
 ### Python-only local production serving
 
-`shovel run` is equivalent to `shovel run prd`. In a source checkout, build the
-frontend first:
+`shovel run` is equivalent to `shovel run prd`. Neither command installs npm
+dependencies, builds the frontend, or starts a Node.js server.
+
+**From a source checkout**, build the frontend before starting production mode.
+If you haven't already installed the frontend dependencies, run `npm ci` first:
 
 ```powershell
 Set-Location frontend
+npm ci
 npm run build
 Set-Location ..
-uv run shovel run prd
+uv run shovel run
 ```
 
-Next.js exports `frontend\out`; production needs no Node.js server.
+Next.js exports `frontend\out`.
 Static assets resolve in this order: `--frontend-dir`, `frontend_path`,
 packaged `shovel\static`, then the source checkout's `frontend\out`.
 Missing assets fail startup rather than falling back to a development server.
 Both `shovel run --frontend-dir <directory>` and
 `shovel run prd --frontend-dir <directory>` select an existing static export.
 
-Release wheels include the built frontend inside the Python package:
+**From an installed release wheel**, skip `npm ci` and `npm run build`. The
+release workflow builds the frontend before packaging it inside the wheel:
 
 ```text
 site-packages
@@ -453,13 +470,17 @@ site-packages
       ...
 ```
 
-After installing a release wheel, run `shovel init` and then `shovel run`
-(or `shovel run prd`) from any working directory. FastAPI serves the bundled
-frontend and `/api/v1` on the same configured `http_host`/`http_port` listener
-(default `127.0.0.1:8080`). No source checkout, Node.js, npm installation or
-frontend compilation is needed on the user's machine. Keep these read-only,
-version-matched assets in the package, not in the writable user data root.
-Frontend compilation happens during packaging, never during production startup.
+After installation, run these commands from any working directory:
+
+```powershell
+shovel init
+shovel run
+```
+
+FastAPI automatically serves the bundled frontend at `/` and the API at
+`/api/v1` on the same configured listener (default `127.0.0.1:8080`). No source
+checkout, Node.js, or npm is needed. Keep these read-only, version-matched
+assets in the package, not in the writable user data root.
 
 This is a local hosting mode, **not the protected enterprise installation
 procedure**.

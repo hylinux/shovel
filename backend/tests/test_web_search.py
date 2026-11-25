@@ -154,8 +154,20 @@ def test_scope_rejects_origin_and_path_escapes_and_deduplicates_fragments() -> N
     assert not scope.contains(SITE + "/docs/%252e%252e/admin")
 
 
-@pytest.mark.parametrize("filename", ["ts-tutorial.html", "index.htm", "index.xhtml", "INDEX.HTML"])
-def test_html_page_scope_includes_its_directory_not_other_tutorials(filename: str) -> None:
+@pytest.mark.parametrize(
+    "filename",
+    [
+        "ts-tutorial.html",
+        "index.htm",
+        "index.xhtml",
+        "INDEX.HTML",
+        "index.asp",
+        "INDEX.ASPX",
+        "index.php",
+        "index.jsp",
+    ],
+)
+def test_web_page_scope_includes_its_directory_not_other_tutorials(filename: str) -> None:
     start = SITE + "/typescript/" + filename
     scope = WebScope(start)
     assert scope.start_url == start
@@ -171,12 +183,13 @@ def test_html_page_scope_includes_its_directory_not_other_tutorials(filename: st
         assert not scope.contains(url)
 
 
-def test_explicit_directory_and_non_html_document_scopes_are_not_broadened() -> None:
+@pytest.mark.parametrize("filename", ["guide.pdf", "guide.docx", "guide.zip", "guide.unknown"])
+def test_explicit_directory_and_non_html_document_scopes_are_not_broadened(filename: str) -> None:
     directory = WebScope(SITE + "/docs/guide.html/")
     assert directory.contains(SITE + "/docs/guide.html/chapter")
     assert not directory.contains(SITE + "/docs/other.html")
-    document = WebScope(SITE + "/docs/guide.pdf")
-    assert document.contains(SITE + "/docs/guide.pdf")
+    document = WebScope(SITE + "/docs/" + filename)
+    assert document.contains(SITE + "/docs/" + filename)
     assert not document.contains(SITE + "/docs/other.pdf")
 
 
@@ -503,33 +516,46 @@ class Sink:
         return 0
 
 
+@pytest.mark.parametrize(
+    "filename", ["ts-tutorial.html", "index.asp", "index.aspx", "index.php", "index.jsp"]
+)
 async def test_tutorial_page_recursively_crawls_and_indexes_linked_chapters(
-    runtime: Runtime, site: Site
+    runtime: Runtime, site: Site, filename: str
 ) -> None:
+    suffix = Path(filename).suffix
+    start_path = "/typescript/" + filename
+    intro_path = "/typescript/ts-intro" + suffix
+    types_path = "/typescript/chapters/types" + suffix
     site.add(
-        "/typescript/ts-tutorial.html",
-        '<h1>TypeScript Tutorial</h1><nav><a href="ts-intro.html">Introduction</a>'
-        '<a href="ts-intro.html#overview">Introduction fragment</a></nav>'
+        "/robots.txt",
+        "User-agent: *\nDisallow: /typescript/blocked",
+        **{"content-type": "text/plain"},
+    )
+    site.add(
+        start_path,
+        f'<h1>TypeScript Tutorial</h1><nav><a href="{intro_path}">Introduction</a>'
+        f'<a href="ts-intro{suffix}#overview">Introduction fragment</a>'
+        '<a href="/typescript/blocked">Blocked</a></nav>'
         '<a href="/js/js-tutorial.html">Other tutorial</a>'
         '<a href="/typescript-other/page.html">Other directory</a>'
         '<a href="https://other.example.com/typescript/page.html">External site</a>'
         '<a rel="nofollow" href="never.html">Do not follow</a>',
     )
     site.add(
-        "/typescript/ts-intro.html",
+        intro_path,
         "<h1>TypeScript Introduction</h1><p>Tutorial introduction content.</p>"
-        '<a href="chapters/types.html">Types</a><a href="ts-tutorial.html">Start</a>',
+        f'<a href="chapters/types{suffix}">Types</a><a href="{filename}">Start</a>',
     )
     site.add(
-        "/typescript/chapters/types.html",
+        types_path,
         "<h1>TypeScript Types</h1><p>Tutorial types content.</p>"
-        '<a href="../ts-intro.html#overview">Introduction</a>',
+        f'<a href="../ts-intro{suffix}#overview">Introduction</a>',
     )
     resource = await runtime.resources.create(
         ResourceDraft(
             name="tutorial",
             connector_kind="web_search",
-            config={"start_url": SITE + "/typescript/ts-tutorial.html"},
+            config={"start_url": SITE + start_path},
         )
     )
     assert (await runtime.resources.verify(resource.id)).ok
@@ -539,14 +565,15 @@ async def test_tutorial_page_recursively_crawls_and_indexes_linked_chapters(
         resource.id
     )
     expected = {
-        SITE + "/typescript/ts-tutorial.html",
-        SITE + "/typescript/ts-intro.html",
-        SITE + "/typescript/chapters/types.html",
+        SITE + start_path,
+        SITE + intro_path,
+        SITE + types_path,
     }
     assert result.state is JobState.SUCCEEDED and result.parsed == result.embedded == 3
     assert {record.doc_uri for record in sink.records} == expected
     assert len(site.paths) == len(set(site.paths))
     assert set(site.paths) == {"/robots.txt", "/sitemap.xml"} | {httpx.URL(url).path for url in expected}
+    assert any("robots.txt disallow" in warning for warning in result.warnings)
     hits = await RetrievalService(runtime).search(SearchInput(query="Tutorial", mode="keyword"))
     assert {hit["doc_uri"] for hit in hits["items"]} == expected
 
